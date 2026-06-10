@@ -8,89 +8,65 @@
   </head>
   <body>
     <main class="shell">
-      <header class="topbar">
-        <div class="brand-block">
-          <p class="eyebrow">微博单平台 MVP</p>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Weibo MVP · Haidao Public Opinion Agent</p>
           <h1>微博 Agent 工作台</h1>
+          <p class="subtitle">围绕《海岛舒服日志》、刘昊然、李兰迪的微博真实证据、Agent 判断、行动确认和可追溯问答。</p>
         </div>
         <div class="status-strip">
           <span id="connectionDot" class="dot"></span>
           <span id="connectionText">连接中</span>
           <time id="generatedAt"></time>
         </div>
-      </header>
+      </section>
 
-      <section id="weiboWorkbench" class="command-center">
+      <section id="weiboWorkbench" class="workspace">
         <aside class="control-panel">
-          <div class="panel-title">
-            <h2>操作</h2>
+          <label>项目名称<input id="projectName" value="海岛舒服日志" readonly /></label>
+          <label>当前平台<input id="activePlatform" value="微博" readonly /></label>
+          <label>发现关键词<input id="discoveryKeyword" value="刘昊然 李兰迪 海岛舒服日志" /></label>
+          <div class="platform-lock">
             <span>微博</span>
           </div>
-          <label>项目<input id="projectName" value="海岛舒服日志" readonly /></label>
-          <label>平台<input id="activePlatform" value="微博" readonly /></label>
-          <label>关键词<input id="discoveryKeyword" value="刘昊然 李兰迪 海岛舒服日志" /></label>
-          <div class="button-stack">
-            <button id="runDiscovery">发现目标</button>
-            <button id="runMigrate" class="secondary">初始化表</button>
-          </div>
-          <p id="lastAction" class="control-note">等待操作。</p>
+          <button id="runDiscovery">创建微博发现任务</button>
+          <button id="runMigrate" class="secondary">初始化 MySQL 表</button>
+          <p id="lastAction" class="control-note">MVP 只展示微博链路；无 MySQL、MediaCrawler 或登录态时显示阻塞原因，不生成模拟建议。</p>
         </aside>
 
-        <section class="overview">
+        <section class="dashboard workbench-grid">
           <article class="panel">
-            <header><h2>依赖状态</h2><span id="partialState">读取中</span></header>
+            <header><h2>系统状态</h2><span id="partialState">读取中</span></header>
             <div id="setupStatus" class="status-grid"></div>
           </article>
-
-          <article class="panel">
-            <header><h2>下一步</h2><span>自动判断</span></header>
-            <div id="nextStep" class="next-step"></div>
-          </article>
-
-          <article class="panel metric-panel">
-            <div class="metric-card"><span>目标</span><strong id="targetCount">0</strong></div>
-            <div class="metric-card"><span>事件</span><strong id="eventCount">0</strong></div>
-            <div class="metric-card"><span>行动</span><strong id="actionCount">0</strong></div>
-            <div class="metric-card"><span>缺口</span><strong id="gapCount">0</strong></div>
-          </article>
-
           <article class="panel">
             <header><h2>Agent 判断</h2><span>证据优先</span></header>
-            <div id="judgments" class="list compact-list"></div>
+            <div id="judgments" class="list"></div>
+          </article>
+          <article class="panel wide">
+            <header><h2>推荐采集目标</h2><span>选择后再采评论</span></header>
+            <div id="recommendedTargets" class="list target-list"></div>
           </article>
         </section>
       </section>
 
-      <section class="workbench-grid">
-        <article class="panel focus-panel">
-          <header><h2>推荐采集目标</h2><span>选择后采评论</span></header>
-          <div id="recommendedTargets" class="list target-list"></div>
-        </article>
-
-        <section class="side-stack">
-          <article class="panel">
-            <header><h2>微博事件</h2><span>线索 / 正式事件</span></header>
-            <div id="events" class="list"></div>
-          </article>
-
-          <article class="panel">
-            <header><h2>待确认行动</h2><span>人工确认</span></header>
-            <div id="pendingActions" class="list"></div>
-          </article>
-        </section>
-      </section>
-
-      <section class="evidence-grid">
+      <section class="insight-grid">
         <article class="panel">
-          <header><h2>数据缺口</h2><span>不编造</span></header>
+          <header><h2>微博事件</h2><span>线索 / 正式事件</span></header>
+          <div id="events" class="list"></div>
+        </article>
+        <article class="panel">
+          <header><h2>待确认行动</h2><span>人工确认后回测</span></header>
+          <div id="pendingActions" class="list"></div>
+        </article>
+        <article class="panel">
+          <header><h2>数据缺口</h2><span>不编造下游结果</span></header>
           <div id="dataGaps" class="list"></div>
         </article>
-
         <article class="panel">
-          <header><h2>证据引用</h2><span>来源 ID</span></header>
+          <header><h2>证据引用</h2><span>回答来源</span></header>
           <div id="citations" class="list"></div>
         </article>
-
         <article class="panel wide">
           <header><h2>证据问答</h2><span>只答已有微博记录</span></header>
           <div class="qa-row">

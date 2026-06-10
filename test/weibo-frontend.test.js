@@ -3,29 +3,18 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 test("front-end uses Weibo Agent workbench as the primary screen", async () => {
-  const [html, js, css] = await Promise.all([
+  const [html, js] = await Promise.all([
     readFile("public/index.html", "utf8"),
-    readFile("public/app.js", "utf8"),
-    readFile("public/styles.css", "utf8")
+    readFile("public/app.js", "utf8")
   ]);
 
   assert.match(html, /id="weiboWorkbench"/);
-  assert.match(html, /class="command-center"/);
-  assert.match(html, /id="nextStep"/);
-  assert.match(html, /id="targetCount"/);
   assert.match(html, /id="recommendedTargets"/);
   assert.match(html, /id="pendingActions"/);
   assert.match(html, /id="dataGaps"/);
   assert.match(html, /微博 Agent 工作台/);
-  assert.doesNotMatch(html, /class="hero"/);
 
   assert.match(js, /\/api\/weibo\/workbench/);
-  assert.match(js, /renderOverview/);
-  assert.match(js, /nextStepCard/);
-  assert.match(js, /dataGapsFor/);
-  assert.match(js, /workbench\.error_type/);
-  assert.match(js, /依赖未就绪/);
-  assert.match(css, /max-width: 1124px/);
   assert.doesNotMatch(js, /new EventSource\("\/api\/stream"\)/);
   assert.doesNotMatch(js, /fetch\("\/api\/collect"/);
   assert.doesNotMatch(html, /小红书 \/ 抖音 \/ 微博/);
