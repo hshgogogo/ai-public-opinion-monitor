@@ -95,8 +95,9 @@
 - [x] 9.8 Show Weibo event cards and event detail with timeline, evidence, impact assessment, recommended actions, and citations.
 - [x] 9.9 Show pending action confirmations in the first-screen queue and allow confirm/reject/uncertain/partial updates.
 - [x] 9.10 Clearly label the current MVP as Weibo-only and avoid presenting Xiaohongshu/Douyin as active MVP sources.
-- [ ] 9.11 Run a local Claude Code design pass and refactor the front-end workbench around the current Weibo MVP capabilities.
-  - 2026-06-10: Deferred by user request; keep this as a follow-up and finish the MVP workflow first.
+- [x] 9.11 Refactor the front-end workbench around the current Weibo MVP capabilities.
+- [ ] 9.12 Run a local Claude Code design pass when subscription quota is available.
+  - 2026-06-10: Local Claude Code returned quota error `403 当前订阅额度已使用完毕`; Codex fallback front-end refactor was applied and verified first.
 
 ## 10. Weibo Memory, Reports, and Q&A
 
