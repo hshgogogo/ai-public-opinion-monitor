@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI舆情监测系统</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Film AI Command Center</p>
+          <h1>AI舆情监测系统</h1>
+          <p class="subtitle">面向制片人与宣发团队的真实采集、数据库沉淀、AI情感分析和证据化策略看板。</p>
+        </div>
+        <div class="status-strip">
+          <span id="connectionDot" class="dot"></span>
+          <span id="connectionText">连接中</span>
+          <time id="generatedAt"></time>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="control-panel">
+          <label>项目名称<input id="projectName" value="长夜追光" /></label>
+          <label>监控领域<input id="category" value="小红书 / 抖音 / 微博" /></label>
+          <label>目标受众<input id="audience" value="制片人与宣发团队" /></label>
+          <label>关键词<textarea id="keywords">海岛舒服日志, 刘昊然, 李兰迪, 刘奕铁, 颜卓灵, 尹正, 程潇, 官宣, 粤语</textarea></label>
+          <div class="platform-lock">
+            <span>小红书</span>
+            <span>抖音</span>
+            <span>微博</span>
+          </div>
+          <button id="runCollect">启动真实采集</button>
+          <button id="runMigrate" class="secondary">初始化 MySQL 表</button>
+          <p class="control-note">真实数据模式：禁止 mock 和测试注入；无数据库或无 Cookie 时显示失败状态。</p>
+        </aside>
+
+        <section class="dashboard">
+          <div class="kpi-grid" id="kpiGrid"></div>
+          <div class="chart-grid">
+            <article class="panel wide">
+              <header><h2>热度趋势与预测</h2><span>真实样本 + 6小时预测</span></header>
+              <canvas id="trendChart" width="900" height="320"></canvas>
+            </article>
+            <article class="panel">
+              <header><h2>情绪结构</h2><span>正/中/负</span></header>
+              <canvas id="sentimentChart" width="420" height="320"></canvas>
+            </article>
+            <article class="panel">
+              <header><h2>平台声量</h2><span>渠道权重</span></header>
+              <canvas id="sourceChart" width="420" height="320"></canvas>
+            </article>
+            <article class="panel">
+              <header><h2>议题雷达</h2><span>可切换监控重点</span></header>
+              <canvas id="topicChart" width="420" height="320"></canvas>
+            </article>
+          </div>
+        </section>
+      </section>
+
+      <section class="insight-grid">
+        <article class="panel strategy-panel">
+          <header><h2>AI营销策略</h2><span id="strategyHeadline"></span></header>
+          <p id="strategySummary" class="strategy-summary"></p>
+          <div id="strategyPlays" class="plays"></div>
+        </article>
+        <article class="panel">
+          <header><h2>企业数据状态</h2><span>MySQL / Cookie / 真实性</span></header>
+          <div id="enterpriseStatus" class="status-grid"></div>
+        </article>
+        <article class="panel">
+          <header><h2>多 Agent 团队</h2><span>同步采集 / 分析 / 预测 / 策略</span></header>
+          <div id="agents" class="agents"></div>
+        </article>
+        <article class="panel">
+          <header><h2>高热证据</h2><span>策略依据</span></header>
+          <div id="topItems" class="feed"></div>
+        </article>
+        <article class="panel">
+          <header><h2>实时事件</h2><span>系统日志</span></header>
+          <div id="events" class="events"></div>
+        </article>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

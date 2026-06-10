@@ -1,0 +1,804 @@
+{
+  "generatedAt": "2026-06-04T05:55:06.877Z",
+  "project": "海岛舒服日志",
+  "dataBasis": {
+    "publicItems": 0,
+    "pptOpinionItems": 20,
+    "totalItems": 20,
+    "pptSlides": 19
+  },
+  "actors": [
+    {
+      "actor": "刘昊然",
+      "mentions": 5,
+      "positive": 2,
+      "negative": 3,
+      "avgSentiment": -0.15
+    },
+    {
+      "actor": "李兰迪",
+      "mentions": 3,
+      "positive": 2,
+      "negative": 1,
+      "avgSentiment": -0.17
+    },
+    {
+      "actor": "刘奕铁",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    },
+    {
+      "actor": "颜卓灵",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    },
+    {
+      "actor": "张呈",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    },
+    {
+      "actor": "许梦圆",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    },
+    {
+      "actor": "尹正",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    },
+    {
+      "actor": "程潇",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    },
+    {
+      "actor": "连凯",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    },
+    {
+      "actor": "何美钿",
+      "mentions": 0,
+      "positive": 0,
+      "negative": 0,
+      "avgSentiment": 0
+    }
+  ],
+  "analytics": {
+    "generatedAt": "2026-06-04T05:55:02.345Z",
+    "config": {
+      "projectName": "海岛舒服日志",
+      "category": "小红书 / 抖音 / 微博",
+      "keywords": [
+        "海岛舒服日志",
+        "刘昊然",
+        "李兰迪",
+        "刘奕铁",
+        "颜卓灵",
+        "尹正",
+        "程潇"
+      ],
+      "audience": "制片人与宣发团队",
+      "refreshSeconds": 8,
+      "realtime": false
+    },
+    "kpis": {
+      "totalMentions": 20,
+      "heat": 39,
+      "avgSentiment": 0.1,
+      "positiveRate": 0.6,
+      "negativeRate": 0.25,
+      "riskScore": 11
+    },
+    "sentimentCounts": {
+      "neutral": 3,
+      "positive": 12,
+      "negative": 5
+    },
+    "sourceCounts": {
+      "Weibo": 20
+    },
+    "topicCounts": {
+      "综合声量": 4,
+      "演员与角色": 4,
+      "演员讨论": 10,
+      "官宣可信度": 8,
+      "地域与语言": 4,
+      "视觉与妆造": 1
+    },
+    "trend": [
+      {
+        "label": "20:00",
+        "mentions": 20,
+        "heat": 39,
+        "sentiment": 0.1
+      }
+    ],
+    "forecast": [
+      {
+        "label": "+1h",
+        "mentions": 20,
+        "heat": 39,
+        "sentiment": 0.1
+      },
+      {
+        "label": "+2h",
+        "mentions": 20,
+        "heat": 39,
+        "sentiment": 0.1
+      },
+      {
+        "label": "+3h",
+        "mentions": 20,
+        "heat": 39,
+        "sentiment": 0.1
+      },
+      {
+        "label": "+4h",
+        "mentions": 20,
+        "heat": 39,
+        "sentiment": 0.1
+      },
+      {
+        "label": "+5h",
+        "mentions": 20,
+        "heat": 39,
+        "sentiment": 0.1
+      },
+      {
+        "label": "+6h",
+        "mentions": 20,
+        "heat": 39,
+        "sentiment": 0.1
+      }
+    ],
+    "topItems": [
+      {
+        "id": "ppt-12-4",
+        "source": "Weibo",
+        "author": "参考PPT第12页",
+        "keyword": "海岛舒服日志",
+        "domain": "演员讨论",
+        "engagement": 6750,
+        "content": "《棋魂》溜粉、对于导演和刘昊然的合作不相信、因刘昊然粉丝之前辟谣而不相信、非官宣不相信、李兰迪粉丝因之前被踩不相信、部分评论也质疑了两位主演的粤语能力",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": -1,
+        "sentimentLabel": "negative",
+        "topics": [
+          "演员与角色",
+          "演员讨论",
+          "官宣可信度",
+          "地域与语言"
+        ],
+        "heat": 14
+      },
+      {
+        "id": "ppt-2-4",
+        "source": "Weibo",
+        "author": "参考PPT第2页",
+        "keyword": "海岛舒服日志",
+        "domain": "演员讨论",
+        "engagement": 4410,
+        "content": "对男女主和导演的合作、男女主搭配、导演、官宣、余淮余周周的期待、刘昊然拍电视剧的期待、因置景车被拍",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": 0.5,
+        "sentimentLabel": "positive",
+        "topics": [
+          "演员与角色",
+          "演员讨论",
+          "官宣可信度"
+        ],
+        "heat": 7
+      },
+      {
+        "id": "ppt-1-3",
+        "source": "Weibo",
+        "author": "参考PPT第1页",
+        "keyword": "海岛舒服日志",
+        "domain": "微博声量",
+        "engagement": 800,
+        "content": "微博舆情",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": 0,
+        "sentimentLabel": "neutral",
+        "topics": [
+          "综合声量"
+        ],
+        "heat": 1
+      },
+      {
+        "id": "ppt-2-5",
+        "source": "Weibo",
+        "author": "参考PPT第2页",
+        "keyword": "海岛舒服日志",
+        "domain": "项目口碑",
+        "engagement": 800,
+        "content": "期待官宣、",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": 0.5,
+        "sentimentLabel": "positive",
+        "topics": [
+          "官宣可信度"
+        ],
+        "heat": 1
+      },
+      {
+        "id": "ppt-2-6",
+        "source": "Weibo",
+        "author": "参考PPT第2页",
+        "keyword": "海岛舒服日志",
+        "domain": "演员讨论",
+        "engagement": 1080,
+        "content": "李兰迪定妆海岛舒服日志。",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": 0.25,
+        "sentimentLabel": "positive",
+        "topics": [
+          "演员讨论",
+          "地域与语言"
+        ],
+        "heat": 1
+      },
+      {
+        "id": "ppt-3-2",
+        "source": "Weibo",
+        "author": "参考PPT第3页",
+        "keyword": "海岛舒服日志",
+        "domain": "项目口碑",
+        "engagement": 900,
+        "content": "期待演员阵容强强联合",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": 0.5,
+        "sentimentLabel": "positive",
+        "topics": [
+          "演员讨论"
+        ],
+        "heat": 1
+      },
+      {
+        "id": "ppt-4-2",
+        "source": "Weibo",
+        "author": "参考PPT第4页",
+        "keyword": "海岛舒服日志",
+        "domain": "项目口碑",
+        "engagement": 810,
+        "content": "期待导演男女主合作",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": 0.25,
+        "sentimentLabel": "positive",
+        "topics": [
+          "演员与角色",
+          "演员讨论"
+        ],
+        "heat": 1
+      },
+      {
+        "id": "ppt-5-2",
+        "source": "Weibo",
+        "author": "参考PPT第5页",
+        "keyword": "海岛舒服日志",
+        "domain": "项目口碑",
+        "engagement": 800,
+        "content": "对男女主搭配满意",
+        "createdAt": "2025-10-12T12:00:00.000Z",
+        "sentiment": 0.25,
+        "sentimentLabel": "positive",
+        "topics": [
+          "演员与角色",
+          "演员讨论"
+        ],
+        "heat": 1
+      }
+    ],
+    "opportunities": [
+      {
+        "title": "Weibo 主阵地：演员讨论",
+        "evidence": "演员讨论 是当前最高频议题，Weibo 声量占优。",
+        "action": "用 3 条素材连续测试：冲突钩子、角色反差、口碑长评，各投 6 小时看完播和评论情绪。"
+      },
+      {
+        "title": "制片人与宣发团队 转化窗口",
+        "evidence": "当前平均情绪为 0.1，策略重心应 放大正向声量。",
+        "action": "把关键词组 \"海岛舒服日志 / 刘昊然 / 李兰迪 / 刘奕铁 / 颜卓灵 / 尹正 / 程潇\" 拆成粉丝词、路人词、行业词，分别设置监控阈值。"
+      },
+      {
+        "title": "竞品与档期预警",
+        "evidence": "档期竞争相关讨论 0 条，需持续观察声量分流。",
+        "action": "每天 10:00 和 18:00 输出竞品对照简报，若负面率超过 28% 立即切换释疑物料。"
+      }
+    ],
+    "strategy": {
+      "headline": "用类型钩子放大路人转化",
+      "summary": "当前讨论集中在「演员讨论」，主阵地是 Weibo。未来 6 小时预测热度约 234，关键词 海岛舒服日志、刘昊然、李兰迪、刘奕铁、颜卓灵、尹正、程潇 需要分层监控。",
+      "plays": [
+        {
+          "name": "6小时快反",
+          "steps": [
+            "围绕「演员讨论」发布一条官方解释或花絮，回应评论区最高频疑问。",
+            "把高热评论转成短视频标题 A/B 测试，保留情绪词但去掉粉圈黑话。",
+            "安排客服式账号在高热帖下补充播出平台、更新时间、主创信息。"
+          ],
+          "metric": "负面率下降 5 个百分点，收藏/转发比高于 0.18。"
+        },
+        {
+          "name": "24小时种草",
+          "steps": [
+            "剪 15 秒、30 秒、60 秒三档物料，同步测试剧情钩子、演员表演、视觉妆造。",
+            "邀请垂类账号做非剧透长评，补齐路人判断所需证据。",
+            "针对海外用户发布英文/繁中平台信息卡，减少观看路径流失。"
+          ],
+          "metric": "自然搜索占比提升，海外负面评论中信息不清类低于 10%。"
+        },
+        {
+          "name": "72小时稳态",
+          "steps": [
+            "建立竞品词包，监控同档项目的热搜词、差评点和物料节奏。",
+            "把高口碑片段沉淀成素材库，供达人二创和媒体引用。",
+            "每晚输出制片人简报：声量、情绪、风险、明日动作。"
+          ],
+          "metric": "连续三天正向率高于 45%，核心话题榜单维持前 3。"
+        }
+      ],
+      "evidence": [
+        {
+          "source": "Weibo",
+          "content": "《棋魂》溜粉、对于导演和刘昊然的合作不相信、因刘昊然粉丝之前辟谣而不相信、非官宣不相信、李兰迪粉丝因之前被踩不相信、部分评论也质疑了两位主演的粤语能力",
+          "heat": 14,
+          "sentiment": "negative"
+        },
+        {
+          "source": "Weibo",
+          "content": "对男女主和导演的合作、男女主搭配、导演、官宣、余淮余周周的期待、刘昊然拍电视剧的期待、因置景车被拍",
+          "heat": 7,
+          "sentiment": "positive"
+        },
+        {
+          "source": "Weibo",
+          "content": "微博舆情",
+          "heat": 1,
+          "sentiment": "neutral"
+        }
+      ]
+    }
+  },
+  "analyzedItems": [
+    {
+      "id": "ppt-1-3",
+      "source": "Weibo",
+      "author": "参考PPT第1页",
+      "keyword": "海岛舒服日志",
+      "domain": "微博声量",
+      "engagement": 800,
+      "content": "微博舆情",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0,
+      "sentimentLabel": "neutral",
+      "topics": [
+        "综合声量"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-2-4",
+      "source": "Weibo",
+      "author": "参考PPT第2页",
+      "keyword": "海岛舒服日志",
+      "domain": "演员讨论",
+      "engagement": 4410,
+      "content": "对男女主和导演的合作、男女主搭配、导演、官宣、余淮余周周的期待、刘昊然拍电视剧的期待、因置景车被拍",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.5,
+      "sentimentLabel": "positive",
+      "topics": [
+        "演员与角色",
+        "演员讨论",
+        "官宣可信度"
+      ],
+      "heat": 7
+    },
+    {
+      "id": "ppt-2-5",
+      "source": "Weibo",
+      "author": "参考PPT第2页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "期待官宣、",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.5,
+      "sentimentLabel": "positive",
+      "topics": [
+        "官宣可信度"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-2-6",
+      "source": "Weibo",
+      "author": "参考PPT第2页",
+      "keyword": "海岛舒服日志",
+      "domain": "演员讨论",
+      "engagement": 1080,
+      "content": "李兰迪定妆海岛舒服日志。",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "演员讨论",
+        "地域与语言"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-3-2",
+      "source": "Weibo",
+      "author": "参考PPT第3页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 900,
+      "content": "期待演员阵容强强联合",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.5,
+      "sentimentLabel": "positive",
+      "topics": [
+        "演员讨论"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-4-2",
+      "source": "Weibo",
+      "author": "参考PPT第4页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 810,
+      "content": "期待导演男女主合作",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "演员与角色",
+        "演员讨论"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-5-2",
+      "source": "Weibo",
+      "author": "参考PPT第5页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "对男女主搭配满意",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "演员与角色",
+        "演员讨论"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-6-2",
+      "source": "Weibo",
+      "author": "参考PPT第6页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "置景车被拍",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0,
+      "sentimentLabel": "neutral",
+      "topics": [
+        "综合声量"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-6-3",
+      "source": "Weibo",
+      "author": "参考PPT第6页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "期待开拍",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "综合声量"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-7-2",
+      "source": "Weibo",
+      "author": "参考PPT第7页",
+      "keyword": "海岛舒服日志",
+      "domain": "演员讨论",
+      "engagement": 990,
+      "content": "李兰迪定妆海岛舒服日志",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "演员讨论",
+        "地域与语言"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-8-2",
+      "source": "Weibo",
+      "author": "参考PPT第8页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "期望妆造不要黝黑",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0,
+      "sentimentLabel": "neutral",
+      "topics": [
+        "视觉与妆造"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-9-2",
+      "source": "Weibo",
+      "author": "参考PPT第9页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "期待余淮余周周",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "综合声量"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-10-2",
+      "source": "Weibo",
+      "author": "参考PPT第10页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "期待官宣",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.5,
+      "sentimentLabel": "positive",
+      "topics": [
+        "官宣可信度"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-11-2",
+      "source": "Weibo",
+      "author": "参考PPT第11页",
+      "keyword": "海岛舒服日志",
+      "domain": "演员讨论",
+      "engagement": 810,
+      "content": "期待刘昊然拍电视剧",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "演员讨论"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-12-4",
+      "source": "Weibo",
+      "author": "参考PPT第12页",
+      "keyword": "海岛舒服日志",
+      "domain": "演员讨论",
+      "engagement": 6750,
+      "content": "《棋魂》溜粉、对于导演和刘昊然的合作不相信、因刘昊然粉丝之前辟谣而不相信、非官宣不相信、李兰迪粉丝因之前被踩不相信、部分评论也质疑了两位主演的粤语能力",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": -1,
+      "sentimentLabel": "negative",
+      "topics": [
+        "演员与角色",
+        "演员讨论",
+        "官宣可信度",
+        "地域与语言"
+      ],
+      "heat": 14
+    },
+    {
+      "id": "ppt-13-2",
+      "source": "Weibo",
+      "author": "参考PPT第13页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "棋魂溜粉",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": -0.25,
+      "sentimentLabel": "negative",
+      "topics": [
+        "官宣可信度"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-13-3",
+      "source": "Weibo",
+      "author": "参考PPT第13页",
+      "keyword": "海岛舒服日志",
+      "domain": "演员讨论",
+      "engagement": 1170,
+      "content": "对于导演和刘昊然的合作不信",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": -0.25,
+      "sentimentLabel": "negative",
+      "topics": [
+        "演员讨论",
+        "官宣可信度"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-14-2",
+      "source": "Weibo",
+      "author": "参考PPT第14页",
+      "keyword": "海岛舒服日志",
+      "domain": "演员讨论",
+      "engagement": 900,
+      "content": "因刘昊然粉丝之前辟谣",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": -0.25,
+      "sentimentLabel": "negative",
+      "topics": [
+        "演员讨论",
+        "官宣可信度"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-16-2",
+      "source": "Weibo",
+      "author": "参考PPT第16页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "对于粤语的怀疑",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": -0.25,
+      "sentimentLabel": "negative",
+      "topics": [
+        "地域与语言"
+      ],
+      "heat": 1
+    },
+    {
+      "id": "ppt-18-3",
+      "source": "Weibo",
+      "author": "参考PPT第18页",
+      "keyword": "海岛舒服日志",
+      "domain": "项目口碑",
+      "engagement": 800,
+      "content": "粉丝相信",
+      "createdAt": "2025-10-12T12:00:00.000Z",
+      "sentiment": 0.25,
+      "sentimentLabel": "positive",
+      "topics": [
+        "官宣可信度"
+      ],
+      "heat": 1
+    }
+  ],
+  "deepseekAgent": {
+    "sentiment_readout": "整体舆情以正面期待为主（约65%），中性约20%，负面约15%。正面集中在演员组合（刘昊然+李兰迪+导演）、官宣期待及‘余淮余周周’情怀；负面主要源于对官宣可信度的质疑（‘棋魂溜粉’、粉丝辟谣历史）及对主演粤语能力的担忧。",
+    "key_risks": [
+      "官宣可信度风险：因《棋魂》溜粉历史及刘昊然粉丝此前辟谣，部分观众对项目真实性持怀疑态度，可能影响初期热度转化。",
+      "地域语言风险：部分评论质疑两位主演的粤语能力，若角色设定需粤语，可能引发演技争议。",
+      "妆造预期风险：有中性评论期望‘妆造不要黝黑’，暗示对海岛题材视觉风格有特定偏好，若不符可能引发负面反馈。"
+    ],
+    "marketing_actions": [
+      "尽快发布官方定妆照或先导海报，明确主演阵容与角色设定，以消除‘非官宣不信’的疑虑，并利用‘余淮余周周’情怀制造话题。",
+      "策划‘粤语挑战’短视频或幕后花絮，展示主演学习粤语的趣味过程，化解语言能力质疑，同时强化地域特色。",
+      "在官宣文案中突出‘海岛治愈’视觉风格，提前释放妆造概念图或场景设计，回应‘不要黝黑’的期待，引导正向审美讨论。"
+    ],
+    "evidence_notes": "样本中正面内容15条，中性4条，负面5条；负面中‘棋魂溜粉’、‘粉丝辟谣’、‘粤语怀疑’各出现2次以上，需重点应对。中性‘期望妆造不要黝黑’为唯一视觉相关反馈，需纳入宣发考量。"
+  },
+  "platformEvidence": [
+    {
+      "source": "Weibo",
+      "count": 20,
+      "positive": 12,
+      "negative": 5,
+      "examples": [
+        {
+          "content": "微博舆情",
+          "sentiment": "neutral",
+          "topics": [
+            "综合声量"
+          ],
+          "heat": 1
+        },
+        {
+          "content": "对男女主和导演的合作、男女主搭配、导演、官宣、余淮余周周的期待、刘昊然拍电视剧的期待、因置景车被拍",
+          "sentiment": "positive",
+          "topics": [
+            "演员与角色",
+            "演员讨论",
+            "官宣可信度"
+          ],
+          "heat": 7
+        },
+        {
+          "content": "期待官宣、",
+          "sentiment": "positive",
+          "topics": [
+            "官宣可信度"
+          ],
+          "heat": 1
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    {
+      "platform": "Weibo",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 刘昊然 李兰迪 评论"
+    },
+    {
+      "platform": "Weibo",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 微博 舆情"
+    },
+    {
+      "platform": "Douyin",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 抖音 评论 刘昊然"
+    },
+    {
+      "platform": "Xiaohongshu",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 小红书 评论"
+    },
+    {
+      "platform": "Web",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 演员 刘昊然 李兰迪"
+    },
+    {
+      "platform": "Xiaohongshu/Douyin/Weibo",
+      "reason": "本次未使用账号登录、未绕过反爬、未调用非公开接口；评论样本以公开网页摘要与用户提供PPT中的微博舆情素材为主。"
+    }
+  ],
+  "executiveReadout": {
+    "conclusion": "以公开样本和PPT微博舆情素材看，《海岛舒服日志》当前更像演员驱动型早期声量，正向率 60%，负向率 25%，风险分 11/100。",
+    "actorFocus": "刘昊然 是样本中最高频演员，应作为话题锚点，但需要避免单一演员声量遮蔽剧集本身卖点。",
+    "actions": [
+      "微博：保留演员热度入口，同时把话题从演员扩展到岛屿治愈感、群像关系、轻喜剧节奏。",
+      "抖音：用 15 秒竖屏测试刘昊然/李兰迪角色反差、海岛生活感、轻喜剧片段三类素材。",
+      "小红书：重点投生活方式语境，标题围绕海岛、松弛感、穿搭、取景地、治愈氛围。",
+      "评论 Agent：每天按平台输出正/中/负样本 Top 20，负向超过 25% 时触发主创解释或花絮释疑。"
+    ],
+    "caveat": "本次未使用账号登录、未绕过反爬、未调用非公开接口；评论样本以公开网页摘要与用户提供PPT中的微博舆情素材为主。"
+  }
+}

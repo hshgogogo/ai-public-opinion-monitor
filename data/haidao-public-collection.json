@@ -1,0 +1,51 @@
+{
+  "collectedAt": "2026-06-04T05:50:56.684Z",
+  "project": "海岛舒服日志",
+  "actors": [
+    "刘昊然",
+    "李兰迪",
+    "刘奕铁",
+    "颜卓灵",
+    "张呈",
+    "许梦圆",
+    "尹正",
+    "程潇",
+    "连凯",
+    "何美钿"
+  ],
+  "sources": [
+    "Weibo",
+    "Weibo",
+    "Douyin",
+    "Xiaohongshu",
+    "Web"
+  ],
+  "items": [],
+  "limitations": [
+    {
+      "platform": "Weibo",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 刘昊然 李兰迪 评论"
+    },
+    {
+      "platform": "Weibo",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 微博 舆情"
+    },
+    {
+      "platform": "Douyin",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 抖音 评论 刘昊然"
+    },
+    {
+      "platform": "Xiaohongshu",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 小红书 评论"
+    },
+    {
+      "platform": "Web",
+      "reason": "公开搜索无可解析摘要或被搜索页限制。",
+      "query": "海岛舒服日志 演员 刘昊然 李兰迪"
+    }
+  ]
+}
