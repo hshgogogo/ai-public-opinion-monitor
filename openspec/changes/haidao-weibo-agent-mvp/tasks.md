@@ -65,7 +65,7 @@
 ## 7. Weibo Source Accounts and Action Ledger
 
 - [x] 7.1 Add CRUD or worker support for Weibo source accounts and user-confirmed source types.
-- [ ] 7.2 Assign source type to Weibo targets/posts from known account records using author external ID or profile URL before falling back to display-name-derived matching.
+- [x] 7.2 Assign source type to Weibo targets/posts from known account records using author external ID or profile URL before falling back to display-name-derived matching.
 - [x] 7.3 Implement text content fingerprinting for Weibo targets/posts.
 - [x] 7.4 Detect simple suspected matrix actions from similar content fingerprints in a short time window.
 - [x] 7.5 Create `official_observed` actions when known official Weibo accounts post project-related content.

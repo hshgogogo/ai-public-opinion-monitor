@@ -190,6 +190,136 @@ test(
 );
 
 test(
+  "persists Weibo target and post source types from stable source accounts before display-name fallback",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    for (const account of [
+      {
+        projectId,
+        externalId: "u-stable",
+        profileUrl: "https://weibo.com/u/stable",
+        displayName: "稳定官号",
+        sourceType: "official",
+        confirmedByUser: true
+      },
+      {
+        projectId,
+        displayName: "重名娱乐号",
+        sourceType: "media",
+        confirmedByUser: true
+      },
+      {
+        projectId,
+        displayName: "无ID营销号",
+        sourceType: "marketing",
+        confirmedByUser: true
+      },
+      {
+        projectId,
+        displayName: "有ID同名粉丝",
+        sourceType: "fan",
+        confirmedByUser: true
+      },
+      {
+        projectId,
+        profileUrl: "https://weibo.com/u/url-only",
+        displayName: "URL稳定艺人号",
+        sourceType: "artist",
+        confirmedByUser: true
+      }
+    ]) {
+      const upsert = runWorker(["weibo-source-account-upsert", "--payload-json", JSON.stringify(account)]);
+      assert.equal(upsert.ok, true);
+    }
+
+    const discovery = runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        keyword: "海岛舒服日志",
+        limit: 4,
+        fixturePath: "test/fixtures/weibo-source-type-search.jsonl"
+      })
+    ]);
+    assert.equal(discovery.ok, true);
+    assert.equal(discovery.persisted_targets, 4);
+
+    const targetSourceRows = queryRows(
+      "SELECT external_id, source_type, source_match_method, CAST(source_match_confidence AS CHAR) AS source_match_confidence FROM discovered_targets WHERE project_id=%s ORDER BY external_id",
+      [projectId]
+    );
+    assert.deepEqual(targetSourceRows, [
+      {
+        external_id: "st1001",
+        source_type: "official",
+        source_match_method: "stable_id",
+        source_match_confidence: "1.0000"
+      },
+      {
+        external_id: "st1002",
+        source_type: "marketing",
+        source_match_method: "display_name",
+        source_match_confidence: "0.5500"
+      },
+      {
+        external_id: "st1003",
+        source_type: "unknown",
+        source_match_method: "stable_unmatched",
+        source_match_confidence: "0.2000"
+      },
+      {
+        external_id: "st1004",
+        source_type: "artist",
+        source_match_method: "stable_url",
+        source_match_confidence: "0.9500"
+      }
+    ]);
+
+    assert.equal(
+      targetSourceRows.find((row) => row.external_id === "st1001").source_type,
+      "official",
+      "stable external ID should outrank a conflicting display-name account"
+    );
+    assert.equal(
+      targetSourceRows.find((row) => row.external_id === "st1003").source_type,
+      "unknown",
+      "display-name fallback is not allowed when a stable account identifier is present"
+    );
+
+    const selected = runWorker([
+      "weibo-target-select",
+      "--payload-json",
+      JSON.stringify({ projectId, targetId: "st1001" })
+    ]);
+    assert.equal(selected.ok, true);
+
+    const detail = runWorker([
+      "weibo-collect-target",
+      "--target-id",
+      "st1001",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        fixturePath: "test/fixtures/weibo-source-type-detail.jsonl"
+      })
+    ]);
+    assert.equal(detail.ok, true);
+    assert.equal(detail.persisted_posts, 4);
+
+    const postSourceRows = queryRows(
+      "SELECT external_id, source_type, source_match_method, CAST(source_match_confidence AS CHAR) AS source_match_confidence FROM social_posts WHERE project_id=%s ORDER BY external_id",
+      [projectId]
+    );
+    assert.deepEqual(postSourceRows, targetSourceRows);
+  }
+);
+
+test(
   "persists agent runs, events, action ledger state, and bot memory items into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -234,6 +364,7 @@ test(
       String(projectId)
     ]);
     assert.equal(repeatedEvents.ok, true);
+    assert.equal(repeatedEvents.persisted_events, events.persisted_events);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [projectId])[0].count, events.persisted_events);
 
     const eventId = queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s ORDER BY event_score DESC, id LIMIT 1", [projectId])[0].id;
@@ -269,6 +400,23 @@ test(
     assert.equal(actions.ok, true);
     assert.equal(actions.persisted_source_accounts, 3);
     assert.equal(actions.persisted_actions >= 4, true);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM source_accounts WHERE project_id=%s", [projectId])[0].count, 4);
+
+    const repeatedActions = runWorker([
+      "weibo-actions-fixture",
+      "--accounts",
+      "test/fixtures/weibo-source-accounts.json",
+      "--posts",
+      "test/fixtures/weibo-action-posts.jsonl",
+      "--event-id",
+      String(eventId),
+      "--now",
+      "2026-06-10T12:00:00Z",
+      "--persist-project-id",
+      String(projectId)
+    ]);
+    assert.equal(repeatedActions.ok, true);
+    assert.equal(repeatedActions.persisted_source_accounts, 3);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM source_accounts WHERE project_id=%s", [projectId])[0].count, 4);
 
     const pending = runWorker(["weibo-actions-pending", "--payload-json", JSON.stringify({ projectId })]);

@@ -25,6 +25,12 @@ COLLECTORS = {
     "weibo": weibo.collect,
 }
 
+SOURCE_MATCH_UNKNOWN = {
+    "source_type": "unknown",
+    "source_match_method": "unknown",
+    "source_match_confidence": 0.2,
+}
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -1148,6 +1154,13 @@ def persist_discovered_targets(project_id, targets):
     with db.connect() as conn:
         with conn.cursor() as cur:
             for target in targets:
+                source_match = match_persisted_source_account(
+                    cur,
+                    project_id,
+                    target.get("author_external_id"),
+                    target.get("author_url"),
+                    (target.get("raw_json") or {}).get("screen_name") or (target.get("raw_json") or {}).get("author_name"),
+                )
                 values = (
                     target["target_type"],
                     target.get("external_id"),
@@ -1165,6 +1178,9 @@ def persist_discovered_targets(project_id, targets):
                     json.dumps(target.get("raw_json", {}), ensure_ascii=False),
                     json.dumps(target.get("recommendation_metadata", {}), ensure_ascii=False),
                     target.get("selected_status", "pending"),
+                    source_match["source_type"],
+                    source_match["source_match_method"],
+                    source_match["source_match_confidence"],
                 )
                 cur.execute(
                     """
@@ -1172,9 +1188,10 @@ def persist_discovered_targets(project_id, targets):
                       project_id, platform, target_type, external_id, url, weibo_mid,
                       author_external_id, author_url, title, summary, keyword, `rank`,
                       hot_score, target_locator, content_fingerprint, raw_json,
-                      recommendation_metadata, selected_status
+                      recommendation_metadata, selected_status, source_type,
+                      source_match_method, source_match_confidence
                     )
-                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON DUPLICATE KEY UPDATE
                       id=LAST_INSERT_ID(id),
                       target_type=VALUES(target_type),
@@ -1191,7 +1208,10 @@ def persist_discovered_targets(project_id, targets):
                       content_fingerprint=VALUES(content_fingerprint),
                       raw_json=VALUES(raw_json),
                       recommendation_metadata=VALUES(recommendation_metadata),
-                      selected_status=IF(selected_status IN ('selected','ignored'), selected_status, VALUES(selected_status))
+                      selected_status=IF(selected_status IN ('selected','ignored'), selected_status, VALUES(selected_status)),
+                      source_type=VALUES(source_type),
+                      source_match_method=VALUES(source_match_method),
+                      source_match_confidence=VALUES(source_match_confidence)
                     """,
                     (project_id, *values),
                 )
@@ -1240,6 +1260,9 @@ def target_row_to_payload(row):
         "raw_json": db.jloads(row.get("raw_json"), {}),
         "recommendation_metadata": db.jloads(row.get("recommendation_metadata"), {}),
         "selected_status": row.get("selected_status"),
+        "source_type": row.get("source_type", "unknown"),
+        "source_match_method": row.get("source_match_method", "unknown"),
+        "source_match_confidence": float(row.get("source_match_confidence") or 0),
     }
 
 
@@ -1260,14 +1283,22 @@ def persist_detail_posts(project_id, posts):
     with db.connect() as conn:
         with conn.cursor() as cur:
             for post in posts:
+                source_match = match_persisted_source_account(
+                    cur,
+                    project_id,
+                    post.get("source_account_external_id"),
+                    post.get("source_account_url"),
+                    post.get("author_name"),
+                )
                 cur.execute(
                     """
                     INSERT INTO social_posts(
                       project_id, platform, external_id, url, author_name, title, content,
                       keyword, engagement, raw_json, source_account_external_id,
-                      source_account_url, content_fingerprint
+                      source_account_url, source_type, source_match_method,
+                      source_match_confidence, content_fingerprint
                     )
-                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON DUPLICATE KEY UPDATE
                       url=VALUES(url),
                       author_name=VALUES(author_name),
@@ -1278,6 +1309,9 @@ def persist_detail_posts(project_id, posts):
                       raw_json=VALUES(raw_json),
                       source_account_external_id=VALUES(source_account_external_id),
                       source_account_url=VALUES(source_account_url),
+                      source_type=VALUES(source_type),
+                      source_match_method=VALUES(source_match_method),
+                      source_match_confidence=VALUES(source_match_confidence),
                       content_fingerprint=VALUES(content_fingerprint)
                     """,
                     (
@@ -1292,6 +1326,9 @@ def persist_detail_posts(project_id, posts):
                         json.dumps(post.get("raw_json", {}), ensure_ascii=False),
                         post.get("source_account_external_id"),
                         post.get("source_account_url"),
+                        source_match["source_type"],
+                        source_match["source_match_method"],
+                        source_match["source_match_confidence"],
                         post.get("content_fingerprint"),
                     ),
                 )
@@ -1301,6 +1338,70 @@ def persist_detail_posts(project_id, posts):
                 )
                 post_ids_by_external[post["external_id"]] = cur.fetchone()["id"]
     return len(post_ids_by_external), post_ids_by_external
+
+
+def match_persisted_source_account(cur, project_id, author_external_id=None, author_url=None, display_name=None):
+    if author_external_id:
+        cur.execute(
+            """
+            SELECT external_id, profile_url, display_name, source_type
+            FROM source_accounts
+            WHERE project_id=%s AND platform='weibo' AND external_id=%s
+            ORDER BY confirmed_by_user DESC, id
+            LIMIT 1
+            """,
+            (project_id, author_external_id),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "source_type": row["source_type"],
+                "source_match_method": "stable_id",
+                "source_match_confidence": 1,
+            }
+    if author_url:
+        cur.execute(
+            """
+            SELECT external_id, profile_url, display_name, source_type
+            FROM source_accounts
+            WHERE project_id=%s AND platform='weibo' AND profile_url=%s
+            ORDER BY confirmed_by_user DESC, id
+            LIMIT 1
+            """,
+            (project_id, author_url),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "source_type": row["source_type"],
+                "source_match_method": "stable_url",
+                "source_match_confidence": 0.95,
+            }
+    if author_external_id or author_url:
+        return {
+            "source_type": "unknown",
+            "source_match_method": "stable_unmatched",
+            "source_match_confidence": 0.2,
+        }
+    if display_name:
+        cur.execute(
+            """
+            SELECT external_id, profile_url, display_name, source_type
+            FROM source_accounts
+            WHERE project_id=%s AND platform='weibo' AND display_name=%s
+            ORDER BY confirmed_by_user DESC, id
+            LIMIT 1
+            """,
+            (project_id, display_name),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "source_type": row["source_type"],
+                "source_match_method": "display_name",
+                "source_match_confidence": 0.55,
+            }
+    return dict(SOURCE_MATCH_UNKNOWN)
 
 
 def persist_detail_comments(project_id, comments, post_ids_by_external):
@@ -1530,18 +1631,9 @@ def persist_events(project_id, events):
             for event in events:
                 title = event.get("title") or "Weibo observation"
                 first_seen_at = mysql_timestamp(event.get("first_seen_at"))
-                cur.execute(
-                    """
-                    SELECT id
-                    FROM artist_public_opinion_events
-                    WHERE project_id=%s AND platform='weibo' AND title=%s
-                      AND (first_seen_at <=> %s)
-                    ORDER BY id LIMIT 1
-                    """,
-                    (project_id, title, first_seen_at),
-                )
-                existing = cur.fetchone()
+                identity = event_identity(title, first_seen_at)
                 values = (
+                    identity,
                     event.get("event_type", "observation_lead"),
                     title,
                     event.get("trigger_summary") or "",
@@ -1556,36 +1648,36 @@ def persist_events(project_id, events):
                     first_seen_at,
                     mysql_timestamp(event.get("last_seen_at")),
                 )
-                if existing:
-                    event_id = existing["id"]
-                    cur.execute(
-                        """
-                        UPDATE artist_public_opinion_events
-                        SET event_type=%s, title=%s, trigger_summary=%s,
-                            related_artists=%s, status=%s, risk_level=%s,
-                            event_score=%s, evidence_ids=%s, timeline_json=%s,
-                            impact_assessment=%s, recommended_actions=%s,
-                            first_seen_at=%s, last_seen_at=%s
-                        WHERE id=%s
-                        """,
-                        (*values, event_id),
+                cur.execute(
+                    """
+                    INSERT INTO artist_public_opinion_events(
+                      project_id, platform, event_identity, event_type, title, trigger_summary,
+                      related_artists, status, risk_level, event_score, evidence_ids,
+                      timeline_json, impact_assessment, recommended_actions,
+                      first_seen_at, last_seen_at
                     )
-                    cur.execute("DELETE FROM event_evidence_links WHERE event_id=%s", (event_id,))
-                    cur.execute("DELETE FROM event_status_history WHERE event_id=%s", (event_id,))
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO artist_public_opinion_events(
-                          project_id, platform, event_type, title, trigger_summary,
-                          related_artists, status, risk_level, event_score, evidence_ids,
-                          timeline_json, impact_assessment, recommended_actions,
-                          first_seen_at, last_seen_at
-                        )
-                        VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        """,
-                        (project_id, *values),
-                    )
-                    event_id = cur.lastrowid
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      event_type=VALUES(event_type),
+                      title=VALUES(title),
+                      trigger_summary=VALUES(trigger_summary),
+                      related_artists=VALUES(related_artists),
+                      status=VALUES(status),
+                      risk_level=VALUES(risk_level),
+                      event_score=VALUES(event_score),
+                      evidence_ids=VALUES(evidence_ids),
+                      timeline_json=VALUES(timeline_json),
+                      impact_assessment=VALUES(impact_assessment),
+                      recommended_actions=VALUES(recommended_actions),
+                      first_seen_at=VALUES(first_seen_at),
+                      last_seen_at=VALUES(last_seen_at)
+                    """,
+                    (project_id, *values),
+                )
+                event_id = cur.lastrowid
+                cur.execute("DELETE FROM event_evidence_links WHERE event_id=%s", (event_id,))
+                cur.execute("DELETE FROM event_status_history WHERE event_id=%s", (event_id,))
                 persisted += 1
                 for evidence_id in event.get("evidence_ids", []):
                     cur.execute(
@@ -1621,6 +1713,10 @@ def persist_events(project_id, events):
     return persisted
 
 
+def event_identity(title, first_seen_at):
+    return f"{title}::{first_seen_at or 'no-first-seen'}"
+
+
 def persist_source_accounts(project_id, accounts):
     by_external_id = {}
     by_display_name = {}
@@ -1630,22 +1726,6 @@ def persist_source_accounts(project_id, accounts):
             for account in accounts:
                 external_id = account.get("external_id")
                 display_name = account.get("display_name") or external_id or "unknown"
-                if external_id:
-                    cur.execute(
-                        "SELECT id FROM source_accounts WHERE project_id=%s AND platform='weibo' AND external_id=%s",
-                        (project_id, external_id),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT id
-                        FROM source_accounts
-                        WHERE project_id=%s AND platform='weibo' AND external_id IS NULL AND display_name=%s
-                        ORDER BY id LIMIT 1
-                        """,
-                        (project_id, display_name),
-                    )
-                existing = cur.fetchone()
                 values = (
                     project_id,
                     external_id,
@@ -1656,29 +1736,26 @@ def persist_source_accounts(project_id, accounts):
                     1 if account.get("confirmed_by_user") else 0,
                     json.dumps(account, ensure_ascii=False),
                 )
-                if existing:
-                    account_id = existing["id"]
-                    cur.execute(
-                        """
-                        UPDATE source_accounts
-                        SET project_id=%s, external_id=%s, profile_url=%s, display_name=%s,
-                            source_type=%s, match_confidence=%s, confirmed_by_user=%s, raw_json=%s
-                        WHERE id=%s
-                        """,
-                        (*values, account_id),
+                cur.execute(
+                    """
+                    INSERT INTO source_accounts(
+                      project_id, platform, external_id, profile_url, display_name,
+                      source_type, match_confidence, confirmed_by_user, raw_json
                     )
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO source_accounts(
-                          project_id, platform, external_id, profile_url, display_name,
-                          source_type, match_confidence, confirmed_by_user, raw_json
-                        )
-                        VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s)
-                        """,
-                        values,
-                    )
-                    account_id = cur.lastrowid
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      external_id=VALUES(external_id),
+                      profile_url=VALUES(profile_url),
+                      display_name=VALUES(display_name),
+                      source_type=VALUES(source_type),
+                      match_confidence=VALUES(match_confidence),
+                      confirmed_by_user=VALUES(confirmed_by_user),
+                      raw_json=VALUES(raw_json)
+                    """,
+                    values,
+                )
+                account_id = cur.lastrowid
                 all_ids.append(account_id)
                 if external_id:
                     by_external_id[external_id] = account_id

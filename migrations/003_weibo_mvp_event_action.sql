@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS source_accounts (
   external_id VARCHAR(220) NULL,
   profile_url VARCHAR(1000) NULL,
   display_name VARCHAR(220) NOT NULL,
+  fallback_display_name VARCHAR(220) GENERATED ALWAYS AS (CASE WHEN external_id IS NULL THEN display_name ELSE NULL END) STORED,
   source_type ENUM('official','artist','producer','marketing','suspected_matrix','media','fan','organic','unknown') NOT NULL DEFAULT 'unknown',
   match_confidence DECIMAL(5,4) NOT NULL DEFAULT 0,
   confirmed_by_user TINYINT(1) NOT NULL DEFAULT 0,
@@ -12,6 +13,7 @@ CREATE TABLE IF NOT EXISTS source_accounts (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uniq_source_account_external (platform, external_id),
+  UNIQUE KEY uniq_project_source_account_display (project_id, platform, fallback_display_name),
   KEY idx_source_project_type (project_id, source_type),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -31,10 +33,12 @@ CREATE TABLE IF NOT EXISTS artist_public_opinion_events (
   timeline_json JSON NULL,
   impact_assessment TEXT NULL,
   recommended_actions JSON NULL,
+  event_identity VARCHAR(320) NOT NULL DEFAULT '',
   first_seen_at TIMESTAMP NULL,
   last_seen_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_event_project_platform_identity (project_id, platform, event_identity),
   KEY idx_events_project_status (project_id, status, risk_level),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -117,6 +121,30 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
 SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE source_accounts ADD UNIQUE KEY uniq_project_source_account_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_accounts' AND INDEX_NAME = 'uniq_project_source_account_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE source_accounts ADD COLUMN fallback_display_name VARCHAR(220) GENERATED ALWAYS AS (CASE WHEN external_id IS NULL THEN display_name ELSE NULL END) STORED', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_accounts' AND COLUMN_NAME = 'fallback_display_name');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE source_accounts ADD UNIQUE KEY uniq_project_source_account_display (project_id, platform, fallback_display_name)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_accounts' AND INDEX_NAME = 'uniq_project_source_account_display');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE artist_public_opinion_events ADD COLUMN event_identity VARCHAR(320) NOT NULL DEFAULT ''''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'artist_public_opinion_events' AND COLUMN_NAME = 'event_identity');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+UPDATE artist_public_opinion_events
+SET event_identity = CONCAT(title, '::', COALESCE(DATE_FORMAT(first_seen_at, '%Y-%m-%d %H:%i:%s'), 'no-first-seen'))
+WHERE event_identity = '';
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE artist_public_opinion_events ADD UNIQUE KEY uniq_event_project_platform_identity (project_id, platform, event_identity)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'artist_public_opinion_events' AND INDEX_NAME = 'uniq_event_project_platform_identity');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
