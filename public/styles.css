@@ -183,6 +183,12 @@ button.secondary {
   min-width: 0;
 }
 
+.workbench-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(130px, 1fr));
@@ -265,9 +271,72 @@ canvas {
 .agents,
 .feed,
 .events,
+.list,
 .status-grid {
   display: grid;
   gap: 10px;
+}
+
+.list-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfdff;
+}
+
+.list-item strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.list-item p {
+  margin: 0;
+  color: #334155;
+  line-height: 1.55;
+}
+
+.list-item a {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--blue);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.target-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+}
+
+.button-row,
+.qa-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.button-row {
+  justify-content: flex-end;
+}
+
+.qa-row {
+  margin-bottom: 12px;
+}
+
+.qa-row input {
+  flex: 1 1 260px;
+}
+
+.empty {
+  background: #f6f8fb;
+}
+
+.data-gap {
+  border-color: #ead8b2;
+  background: #fffaf0;
 }
 
 .status-grid div {
@@ -349,7 +418,9 @@ canvas {
 @media (max-width: 1060px) {
   .workspace,
   .chart-grid,
-  .insight-grid {
+  .insight-grid,
+  .workbench-grid,
+  .target-card {
     grid-template-columns: 1fr;
   }
 

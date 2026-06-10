@@ -1,0 +1,38 @@
+[
+  {
+    "id": "strong",
+    "action": {"id": "a-strong", "confirmation_status": "confirmed", "effective_at": "2026-06-10T08:00:00Z", "related_event_id": "event-1"},
+    "baseline": {"negative_rate": 0.62, "avg_sentiment": -0.45, "mentions": 100},
+    "post": {"6h": {"negative_rate": 0.30, "avg_sentiment": 0.05, "mentions": 120}, "24h": {"negative_rate": 0.28, "avg_sentiment": 0.10, "mentions": 140}}
+  },
+  {
+    "id": "medium",
+    "action": {"id": "a-medium", "confirmation_status": "confirmed", "effective_at": "2026-06-10T08:00:00Z", "related_event_id": "event-1"},
+    "baseline": {"negative_rate": 0.50, "avg_sentiment": -0.30, "mentions": 80},
+    "post": {"24h": {"negative_rate": 0.36, "avg_sentiment": -0.05, "mentions": 90}}
+  },
+  {
+    "id": "weak",
+    "action": {"id": "a-weak", "confirmation_status": "confirmed", "effective_at": "2026-06-10T08:00:00Z", "related_event_id": "event-1"},
+    "baseline": {"negative_rate": 0.42, "avg_sentiment": -0.20, "mentions": 70},
+    "post": {"24h": {"negative_rate": 0.35, "avg_sentiment": -0.12, "mentions": 76}}
+  },
+  {
+    "id": "no-signal",
+    "action": {"id": "a-none", "confirmation_status": "confirmed", "effective_at": "2026-06-10T08:00:00Z", "related_event_id": "event-1"},
+    "baseline": {"negative_rate": 0.40, "avg_sentiment": -0.10, "mentions": 70},
+    "post": {"24h": {"negative_rate": 0.39, "avg_sentiment": -0.10, "mentions": 70}}
+  },
+  {
+    "id": "negative",
+    "action": {"id": "a-negative", "confirmation_status": "confirmed", "effective_at": "2026-06-10T08:00:00Z", "related_event_id": "event-1"},
+    "baseline": {"negative_rate": 0.30, "avg_sentiment": 0.05, "mentions": 100},
+    "post": {"24h": {"negative_rate": 0.52, "avg_sentiment": -0.35, "mentions": 160}}
+  },
+  {
+    "id": "unknown",
+    "action": {"id": "a-unknown", "confirmation_status": "pending", "effective_at": null, "related_event_id": "event-1"},
+    "baseline": null,
+    "post": {}
+  }
+]

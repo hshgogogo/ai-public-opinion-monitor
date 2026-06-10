@@ -1,0 +1,5 @@
+{"comment_id":"e1","content":"非官宣消息太多，担心继续溜粉。","topics":["官宣可信度"],"risks":["官宣可信度"],"stance":"questioning","sentiment":"negative","weight":3.2,"created_at":"2026-06-10T08:00:00Z","target_id":"1005"}
+{"comment_id":"e2","content":"刘昊然李兰迪阵容一直没确认，粉丝质疑官宣可信度。","topics":["演员讨论","官宣可信度"],"risks":["官宣可信度","粉丝对立"],"stance":"questioning","sentiment":"negative","weight":4.1,"created_at":"2026-06-10T09:00:00Z","target_id":"1009"}
+{"comment_id":"e3","content":"海岛舒服日志又被说溜粉，讨论区开始辟谣。","topics":["官宣可信度"],"risks":["官宣可信度"],"stance":"questioning","sentiment":"negative","weight":2.8,"created_at":"2026-06-11T07:00:00Z","target_id":"1010"}
+{"comment_id":"e4","content":"刘昊然李兰迪组合很期待，角色关系可以观察。","topics":["演员讨论"],"risks":[],"stance":"supportive","sentiment":"positive","weight":1.2,"created_at":"2026-06-10T10:00:00Z","target_id":"1001"}
+{"comment_id":"e5","content":"更早之前也有人质疑非官宣，但已经超过合并窗口。","topics":["官宣可信度"],"risks":["官宣可信度"],"stance":"questioning","sentiment":"negative","weight":1.5,"created_at":"2026-06-01T08:00:00Z","target_id":"old-risk"}

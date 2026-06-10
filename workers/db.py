@@ -12,11 +12,11 @@ except Exception:  # pragma: no cover
 
 DEFAULT_PROJECT = {
     "project_name": "海岛舒服日志",
-    "category": "小红书 / 抖音 / 微博",
+    "category": "微博 MVP",
     "audience": "制片人与宣发团队",
-    "keywords": ["海岛舒服日志", "刘昊然", "李兰迪", "刘奕铁", "颜卓灵", "尹正", "程潇", "官宣", "粤语"],
-    "actors": ["刘昊然", "李兰迪", "刘奕铁", "颜卓灵", "尹正", "程潇"],
-    "active_platforms": ["xiaohongshu", "douyin", "weibo"],
+    "keywords": ["海岛舒服日志", "刘昊然", "李兰迪"],
+    "actors": ["刘昊然", "李兰迪"],
+    "active_platforms": ["weibo"],
 }
 
 
@@ -67,13 +67,21 @@ def connect():
         conn.close()
 
 
-def run_migration(sql_path="migrations/001_enterprise_mysql.sql"):
-    sql = Path(sql_path).read_text(encoding="utf-8")
-    statements = [part.strip() for part in sql.split(";") if part.strip()]
+def run_migration(sql_path=None):
+    paths = [Path(sql_path)] if sql_path else [
+        Path("migrations/001_enterprise_mysql.sql"),
+        Path("migrations/002_weibo_mvp_ingestion.sql"),
+        Path("migrations/003_weibo_mvp_event_action.sql"),
+        Path("migrations/004_weibo_mvp_memory_report.sql"),
+        Path("migrations/005_weibo_mvp_sentiment.sql"),
+    ]
     with connect() as conn:
         with conn.cursor() as cur:
-            for statement in statements:
-                cur.execute(statement)
+            for path in paths:
+                sql = path.read_text(encoding="utf-8")
+                statements = [part.strip() for part in sql.split(";") if part.strip()]
+                for statement in statements:
+                    cur.execute(statement)
     ensure_default_auth_states()
     ensure_default_project()
 
@@ -84,6 +92,21 @@ def ensure_default_project():
             cur.execute("SELECT id FROM monitor_projects WHERE project_name=%s ORDER BY id LIMIT 1", (DEFAULT_PROJECT["project_name"],))
             row = cur.fetchone()
             if row:
+                cur.execute(
+                    """
+                    UPDATE monitor_projects
+                    SET category=%s, audience=%s, keywords=%s, actors=%s, active_platforms=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        DEFAULT_PROJECT["category"],
+                        DEFAULT_PROJECT["audience"],
+                        json.dumps(DEFAULT_PROJECT["keywords"], ensure_ascii=False),
+                        json.dumps(DEFAULT_PROJECT["actors"], ensure_ascii=False),
+                        json.dumps(DEFAULT_PROJECT["active_platforms"], ensure_ascii=False),
+                        row["id"],
+                    ),
+                )
                 return row["id"]
             cur.execute(
                 """
@@ -104,8 +127,6 @@ def ensure_default_project():
 
 def ensure_default_auth_states():
     defaults = {
-        "xiaohongshu": os.environ.get("XHS_COOKIE_FILE", "config/cookies/xhs.json"),
-        "douyin": os.environ.get("DOUYIN_COOKIE_FILE", "config/cookies/douyin.json"),
         "weibo": os.environ.get("WEIBO_COOKIE_FILE", "config/cookies/weibo.json"),
     }
     with connect() as conn:

@@ -1,6 +1,6 @@
 # Project Agent Notes
 
-This is the application codebase inside the `yuqingjiance` workspace. The parent workspace has OpenSpec initialized, and gstack is installed globally for Codex.
+This is the application codebase and Git repository inside the `yuqingjiance` workspace. OpenSpec is tracked in this repository, and gstack is installed globally for Codex.
 
 ## gstack
 
@@ -12,8 +12,9 @@ This is the application codebase inside the `yuqingjiance` workspace. The parent
 
 ## OpenSpec
 
-- OpenSpec files are in the parent workspace: `../openspec/`.
+- OpenSpec files are in this repository: `openspec/`.
 - OpenSpec Codex skills are in the parent workspace: `../.codex/skills/`.
+- Run OpenSpec commands from this repository root.
 - Use OpenSpec for spec-driven change proposals and validation.
 
 ## Superpowers

@@ -1,0 +1,19 @@
+{
+  "targets": [
+    {"id": "target-1005", "title": "海岛舒服日志 非官宣讨论", "summary": "非官宣和溜粉相关微博目标"}
+  ],
+  "comments": [
+    {"id": "comment-e1", "target_id": "target-1005", "content": "非官宣消息太多，担心继续溜粉。", "sentiment": "negative"},
+    {"id": "comment-e2", "target_id": "target-1005", "content": "粉丝质疑官宣可信度。", "sentiment": "negative"}
+  ],
+  "events": [
+    {"id": "event-1", "title": "微博官宣可信度观察", "status": "escalating", "risk_level": "high", "evidence_ids": ["comment-e1", "comment-e2"]}
+  ],
+  "actions": [
+    {"id": "action-1", "source": "agent_recommended", "confirmation_status": "pending", "related_event_id": "event-1"}
+  ],
+  "backtests": [],
+  "memory": [
+    {"id": "memory-1", "source_kind": "event", "source_id": "event-1", "summary": "官宣可信度风险正在升高。"}
+  ]
+}

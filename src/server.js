@@ -24,6 +24,22 @@ export const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
     if (url.pathname === "/api/health") return sendJson(response, await worker("health"));
     if (url.pathname === "/api/snapshot") return sendJson(response, await worker("snapshot"));
+    if (url.pathname === "/api/weibo/workbench" && request.method === "GET") return weiboWorker(request, response, "weibo-workbench");
+    if (url.pathname === "/api/weibo/discovery" && request.method === "POST") return weiboWorker(request, response, "weibo-discovery");
+    if (url.pathname === "/api/weibo/targets" && request.method === "GET") return weiboWorker(request, response, "weibo-targets");
+    if (url.pathname === "/api/weibo/targets/select" && request.method === "POST") return weiboWorker(request, response, "weibo-target-select");
+    if (url.pathname === "/api/weibo/targets/ignore" && request.method === "POST") return weiboWorker(request, response, "weibo-target-ignore");
+    const targetCollectMatch = url.pathname.match(/^\/api\/weibo\/targets\/([^/]+)\/collect-comments$/);
+    if (targetCollectMatch && request.method === "POST") return weiboWorker(request, response, "weibo-collect-target", "--target-id", targetCollectMatch[1]);
+    if (url.pathname === "/api/weibo/events" && request.method === "GET") return weiboWorker(request, response, "weibo-events");
+    const eventMatch = url.pathname.match(/^\/api\/weibo\/events\/([^/]+)$/);
+    if (eventMatch && request.method === "GET") return weiboWorker(request, response, "weibo-events", "--event-id", eventMatch[1]);
+    if (url.pathname === "/api/weibo/actions/pending" && request.method === "GET") return weiboWorker(request, response, "weibo-actions-pending");
+    const actionConfirmationMatch = url.pathname.match(/^\/api\/weibo\/actions\/([^/]+)\/confirmation$/);
+    if (actionConfirmationMatch && request.method === "PATCH") return weiboWorker(request, response, "weibo-action-confirm", "--action-id", actionConfirmationMatch[1]);
+    const actionBacktestMatch = url.pathname.match(/^\/api\/weibo\/actions\/([^/]+)\/backtest$/);
+    if (actionBacktestMatch && request.method === "POST") return weiboWorker(request, response, "weibo-action-backtest", "--action-id", actionBacktestMatch[1]);
+    if (url.pathname === "/api/weibo/bot/messages" && request.method === "POST") return weiboWorker(request, response, "weibo-bot-message");
     if (url.pathname === "/api/stream") return stream(response);
     if (url.pathname === "/api/migrate" && request.method === "POST") return sendJson(response, await worker("migrate"));
     if (url.pathname === "/api/collect" && request.method === "POST") return collect(request, response);
@@ -46,7 +62,20 @@ async function collect(request, response) {
   const args = ["collect"];
   if (payload.projectId) args.push("--project-id", String(payload.projectId));
   if (payload.limit) args.push("--limit", String(payload.limit));
-  sendJson(response, await worker(...args));
+  const result = await worker(...args);
+  sendJson(response, result, result.error_type === "legacy_collect_disabled" ? 410 : 200);
+}
+
+async function weiboWorker(request, response, command, ...args) {
+  const payload = ["GET", "HEAD"].includes(request.method || "") ? {} : await readJson(request);
+  const result = await worker(command, ...args, "--payload-json", JSON.stringify(payload));
+  sendJson(response, result, statusFor(result));
+}
+
+function statusFor(payload) {
+  if (payload?.error_type === "mysql_unavailable") return 503;
+  if (payload?.error_type === "weibo_endpoint_pending_real_data_implementation") return 501;
+  return 200;
 }
 
 function stream(response) {
@@ -130,7 +159,7 @@ function enterpriseError(error) {
     enterprise: {
       mode: "real-data-only",
       database: { connected: false, error: error.message },
-      allowedPlatforms: ["xiaohongshu", "douyin", "weibo"]
+      allowedPlatforms: ["weibo"]
     },
     kpis: { totalMentions: 0, heat: 0, avgSentiment: 0, positiveRate: 0, negativeRate: 0, riskScore: 0 },
     sentimentCounts: {},

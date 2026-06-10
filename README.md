@@ -1,5 +1,48 @@
 # AI舆情监测系统
 
+## Weibo MVP
+
+当前 OpenSpec change `haidao-weibo-agent-mvp` 将第一阶段收窄为 Weibo MVP：只验证《海岛舒服日志》在微博上的 Agent 工作流。No Xiaohongshu or Douyin collection is active in this MVP.
+
+### Weibo MVP 环境变量
+
+```bash
+export MYSQL_URL='mysql://user:password@127.0.0.1:3306/yuqing_monitor'
+export WEIBO_COOKIE_FILE='config/cookies/weibo.json'
+export MEDIACRAWLER_HOME='../MediaCrawler'
+export MEDIACRAWLER_COMMIT='<verified-commit>'
+export MEDIACRAWLER_PYTHON='../MediaCrawler/.venv/bin/python'
+export MEDIACRAWLER_OUTPUT_DIR='storage/mediacrawler'
+export MEDIACRAWLER_CDP_PORT='9222'
+```
+
+不要提交 `.env`、`config/cookies/`、`storage/`、浏览器登录态或真实 API key。
+
+### Fixture E2E
+
+无需真实微博登录、Chrome CDP、MediaCrawler 或 MySQL，可先跑 fixture 闭环：
+
+```bash
+npm test
+python workers/enterprise_worker.py weibo-fixture-e2e --now 2026-06-10T12:00:00Z
+```
+
+该命令会验证 migration 文件存在，解析微博搜索 fixture，推荐目标，选择目标，解析 detail 评论，做本地/fixture 分析，生成事件线索、行动记录、backtest unknown/信号结果、带引用的 Q&A，并渲染 workbench payload。
+
+### Weibo Auth Troubleshooting
+
+- `auth_required`: 检查 `WEIBO_COOKIE_FILE` 是否存在并指向本地 cookie 文件。
+- `chrome_cdp_unavailable`: 检查 Chrome 是否开启 remote debugging，并确认 `MEDIACRAWLER_CDP_PORT`。
+- `mediacrawler_missing`: 检查 `MEDIACRAWLER_HOME` 是否指向 MediaCrawler checkout。
+- `target_detail_unsupported`: 目标缺少可用于 detail 采集的 `weibo_mid`、`external_id` 或详情 URL。
+- `real_weibo_auth_missing`: fixture 模式未使用真实登录态；这是预期限制，不代表真实采集已完成。
+
+### MVP Limitations
+
+- 真实 MediaCrawler search/detail、MySQL task 入库、DeepSeek 线上调用、前端完整工作台和真实微博环境验收仍是后续任务。
+- Agent 不自动发帖，不保管账号密码，不绕过验证码或反爬机制。
+- 没有足够 evidence 时，Q&A、report、backtest 必须返回 insufficient-data 或 unknown，不能编造事件、评论或行动效果。
+
 面向影视制作公司的企业级 AI 舆情监测 Web 服务。系统限定监控小红书、抖音、微博，使用授权 Cookie 采集真实内容，写入本机 MySQL，并由 DeepSeek Agent 做逐评论情感分析和营销策略生成。
 
 ## 已实现

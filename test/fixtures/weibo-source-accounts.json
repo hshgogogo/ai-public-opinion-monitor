@@ -1,0 +1,20 @@
+[
+  {
+    "external_id": "u-official",
+    "profile_url": "https://weibo.com/u/official",
+    "display_name": "海岛舒服日志官微",
+    "source_type": "official",
+    "confirmed_by_user": true
+  },
+  {
+    "external_id": "u-marketing-1",
+    "display_name": "海岛安利号A",
+    "source_type": "marketing",
+    "confirmed_by_user": true
+  },
+  {
+    "display_name": "重名娱乐号",
+    "source_type": "media",
+    "confirmed_by_user": true
+  }
+]
