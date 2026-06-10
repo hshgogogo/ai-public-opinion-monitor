@@ -62,6 +62,8 @@ test("Weibo MVP migration chunk declares ingestion tables and columns", () => {
   assert.match(sql, /`rank`\s+INT/i);
 
   assert.match(sql, /CREATE TABLE IF NOT EXISTS discovered_targets/i);
+  assert.match(sql, /uniq_discovered_project_platform_external/i);
+  assert.match(sql, /project_id,\s*platform,\s*external_id/i);
   for (const column of [
     "target_locator",
     "target_type",
@@ -87,6 +89,10 @@ test("Weibo MVP migration chunk declares ingestion tables and columns", () => {
   for (const status of ["expired", "verification_required", "rate_limited", "unknown", "configured"]) {
     assert.match(sql, new RegExp(status, "i"));
   }
+  assert.match(sql, /DROP INDEX uniq_platform_external/i);
+  assert.match(sql, /uniq_project_platform_external/i);
+  assert.match(sql, /DROP INDEX uniq_comment_platform_external/i);
+  assert.match(sql, /uniq_comment_project_platform_external/i);
 });
 
 test("Weibo MVP event action backtest migration declares ledger tables", () => {
@@ -121,6 +127,8 @@ test("Weibo MVP event action backtest migration declares ledger tables", () => {
   ]) {
     assert.match(sql, new RegExp(token, "i"));
   }
+  assert.match(sql, /DROP INDEX uniq_source_account_external/i);
+  assert.match(sql, /uniq_project_source_account_external/i);
 });
 
 test("Weibo MVP memory report migration declares bot memory tables", () => {
@@ -169,12 +177,27 @@ test("Weibo MVP sentiment migration extends analysis fields and migration order"
   }
 });
 
-test("OpenSpec tasks do not mark real DB persistence work as complete while only fixture paths exist", () => {
+test("OpenSpec tasks keep external dependency and partial memory work unchecked", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md");
 
-  for (const taskId of ["3.4", "3.5", "4.8", "4.9", "7.1", "7.5", "7.6", "7.7", "7.8"]) {
+  for (const taskId of ["3.1", "3.4", "3.5", "4.1", "4.2", "4.3", "4.4", "4.8", "4.9", "5.5", "6.5", "7.1", "7.5", "7.6", "7.7", "7.8"]) {
+    assert.match(tasks, new RegExp(`- \\[x\\] ${taskId.replace(".", "\\.")}\\b`));
+  }
+
+  for (const taskId of ["3.2", "3.3", "4.7", "6.4", "7.2", "10.1", "11.5"]) {
     assert.match(tasks, new RegExp(`- \\[ \\] ${taskId.replace(".", "\\.")}\\b`));
   }
+});
+
+test("Weibo discovery target persistence uses atomic MySQL upsert", () => {
+  const worker = readText("workers/enterprise_worker.py");
+  const section = worker.match(/def persist_discovered_targets[\s\S]*?\ndef find_discovered_target/)?.[0] || "";
+
+  assert.match(section, /ON DUPLICATE KEY UPDATE/i);
+  assert.match(section, /LAST_INSERT_ID\(id\)/i);
+  assert.match(section, /selected_status=IF\(selected_status IN \('selected','ignored'\)/i);
+  assert.doesNotMatch(section, /discovered_target_id/);
+  assert.doesNotMatch(worker, /def discovered_target_id/);
 });
 
 test("default project and env example are Weibo MVP scoped", () => {

@@ -20,10 +20,16 @@ CREATE TABLE IF NOT EXISTS discovered_targets (
   selected_status ENUM('pending','selected','ignored') NOT NULL DEFAULT 'pending',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_discovered_project_platform_external (project_id, platform, external_id),
   KEY idx_discovered_project_status (project_id, selected_status),
   KEY idx_discovered_fingerprint (platform, content_fingerprint),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE discovered_targets ADD UNIQUE KEY uniq_discovered_project_platform_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'discovered_targets' AND INDEX_NAME = 'uniq_discovered_project_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS target_collection_links (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -143,6 +149,26 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
 SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_comments ADD COLUMN reply_count INT NOT NULL DEFAULT 0', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_comments' AND COLUMN_NAME = 'reply_count');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) > 0, 'ALTER TABLE social_posts DROP INDEX uniq_platform_external', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND INDEX_NAME = 'uniq_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD UNIQUE KEY uniq_project_platform_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND INDEX_NAME = 'uniq_project_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) > 0, 'ALTER TABLE social_comments DROP INDEX uniq_comment_platform_external', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_comments' AND INDEX_NAME = 'uniq_comment_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_comments ADD UNIQUE KEY uniq_comment_project_platform_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_comments' AND INDEX_NAME = 'uniq_comment_project_platform_external');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;

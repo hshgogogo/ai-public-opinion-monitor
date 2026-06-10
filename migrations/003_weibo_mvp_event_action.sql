@@ -110,3 +110,13 @@ CREATE TABLE IF NOT EXISTS action_backtests (
   FOREIGN KEY (action_id) REFERENCES publicity_actions(id),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @sql = (SELECT IF(COUNT(*) > 0, 'ALTER TABLE source_accounts DROP INDEX uniq_source_account_external', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_accounts' AND INDEX_NAME = 'uniq_source_account_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE source_accounts ADD UNIQUE KEY uniq_project_source_account_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'source_accounts' AND INDEX_NAME = 'uniq_project_source_account_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
