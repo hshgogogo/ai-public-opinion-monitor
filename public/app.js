@@ -6,6 +6,11 @@ const els = {
   generatedAt: document.querySelector("#generatedAt"),
   partialState: document.querySelector("#partialState"),
   setupStatus: document.querySelector("#setupStatus"),
+  nextStep: document.querySelector("#nextStep"),
+  targetCount: document.querySelector("#targetCount"),
+  eventCount: document.querySelector("#eventCount"),
+  actionCount: document.querySelector("#actionCount"),
+  gapCount: document.querySelector("#gapCount"),
   judgments: document.querySelector("#judgments"),
   recommendedTargets: document.querySelector("#recommendedTargets"),
   events: document.querySelector("#events"),
@@ -29,7 +34,8 @@ window.setInterval(refreshWorkbench, 30000);
 async function refreshWorkbench() {
   try {
     state.workbench = await fetchJson("/api/weibo/workbench");
-    setConnection(true, "微博 Agent 就绪");
+    const blocked = state.workbench?.ok === false || Boolean(state.workbench?.error_type);
+    setConnection(!blocked, blocked ? "依赖未就绪" : "微博 Agent 就绪");
     renderWorkbench();
   } catch (error) {
     setConnection(false, "读取失败");
@@ -90,15 +96,72 @@ async function handleWorkbenchAction(event) {
 function renderWorkbench() {
   const workbench = state.workbench;
   if (!workbench) return;
+  const dataGaps = dataGapsFor(workbench);
   els.generatedAt.textContent = new Date().toLocaleString();
   els.partialState.textContent = workbench.setup?.partialState || "unknown";
+  renderOverview(workbench, dataGaps);
   renderSetup(workbench.setup || {});
   renderJudgments(workbench.judgments || []);
   renderTargets(workbench.recommendedTargets || []);
   renderEvents(workbench.events || []);
   renderActions(workbench.pendingActions || []);
-  renderDataGaps(workbench.dataGaps || []);
+  renderDataGaps(dataGaps);
   renderCitations(workbench.citations || []);
+}
+
+function dataGapsFor(workbench) {
+  const gaps = workbench.dataGaps || [];
+  if (!workbench.error_type) return gaps;
+  return [
+    {
+      code: workbench.error_type,
+      message: workbench.message || "微博工作台暂时不可用。",
+      nextAction: workbench.fix || workbench.cause || "先补齐依赖，再继续微博工作流。"
+    },
+    ...gaps
+  ];
+}
+
+function renderOverview(workbench, dataGaps) {
+  const targets = workbench.recommendedTargets || [];
+  const events = workbench.events || [];
+  const actions = workbench.pendingActions || [];
+  const gaps = dataGaps || [];
+  setText(els.targetCount, targets.length);
+  setText(els.eventCount, events.length);
+  setText(els.actionCount, actions.length);
+  setText(els.gapCount, gaps.length);
+  els.nextStep.innerHTML = nextStepCard(workbench, targets, events, actions, gaps);
+}
+
+function nextStepCard(workbench, targets, events, actions, gaps) {
+  const blockingGap = gaps.find((gap) => /mysql|mediacrawler|cdp|auth|login|unavailable|missing/i.test(`${gap.code || ""} ${gap.message || ""}`));
+  if (blockingGap) {
+    return stepMarkup("补齐依赖", blockingGap.message || blockingGap.code, blockingGap.nextAction || "先修复依赖状态，再创建微博发现任务。", "warn");
+  }
+  if (!targets.length) {
+    return stepMarkup("发现目标", "当前没有推荐采集目标。", "用左侧关键词创建微博发现任务。", "neutral");
+  }
+  if (!events.length) {
+    return stepMarkup("采集评论", "已有目标，但还没有形成事件或线索。", "选择目标后采集评论，再进入分析。", "neutral");
+  }
+  if (actions.length) {
+    return stepMarkup("确认行动", `${actions.length} 条行动等待人工确认。`, "确认真实动作后再做回测，不把建议当执行。", "ok");
+  }
+  if (gaps.length) {
+    return stepMarkup("处理缺口", `${gaps.length} 个数据缺口影响判断。`, "先补齐缺口，再生成更可靠的问答和报告。", "warn");
+  }
+  return stepMarkup("查看证据", workbench.setup?.partialState || "微博链路已更新。", "检查事件、引用和问答结果。", "ok");
+}
+
+function stepMarkup(title, summary, action, tone) {
+  return `
+    <section class="step-card ${escapeAttr(tone)}">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(summary || "")}</p>
+      <span>${escapeHtml(action || "")}</span>
+    </section>
+  `;
 }
 
 function renderSetup(setup) {
@@ -240,6 +303,10 @@ function formatList(value) {
 function setConnection(online, text) {
   els.connectionDot.classList.toggle("online", online);
   els.connectionText.textContent = text;
+}
+
+function setText(element, value) {
+  if (element) element.textContent = String(value);
 }
 
 function escapeHtml(value) {
