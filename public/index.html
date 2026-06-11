@@ -17,53 +17,15 @@
           <span id="connectionDot" class="dot"></span>
           <span id="connectionText">连接中</span>
           <time id="generatedAt"></time>
+          <a class="nav-link" href="/settings">后台设置</a>
         </div>
       </header>
 
-      <section id="weiboWorkbench" class="command-center">
-        <aside class="control-panel">
-          <div class="panel-title">
-            <h2>操作</h2>
-            <span>微博</span>
-          </div>
-          <label>项目<input id="projectName" value="海岛舒服日志" readonly /></label>
-          <label>平台<input id="activePlatform" value="微博" readonly /></label>
-          <label>关键词<input id="discoveryKeyword" value="刘昊然 李兰迪 海岛舒服日志" /></label>
-          <div class="button-stack">
-            <button id="runDiscovery">发现目标</button>
-            <button id="runMigrate" class="secondary">初始化表</button>
-          </div>
-          <p id="lastAction" class="control-note">等待操作。</p>
-        </aside>
+      <p id="lastAction" class="action-status">等待操作。目标来自微博真实搜索结果，推荐依据会显示在每张卡片里。</p>
 
-        <section class="overview">
-          <article class="panel">
-            <header><h2>依赖状态</h2><span id="partialState">读取中</span></header>
-            <div id="setupStatus" class="status-grid"></div>
-          </article>
-
-          <article class="panel">
-            <header><h2>下一步</h2><span>自动判断</span></header>
-            <div id="nextStep" class="next-step"></div>
-          </article>
-
-          <article class="panel metric-panel">
-            <div class="metric-card"><span>目标</span><strong id="targetCount">0</strong></div>
-            <div class="metric-card"><span>事件</span><strong id="eventCount">0</strong></div>
-            <div class="metric-card"><span>行动</span><strong id="actionCount">0</strong></div>
-            <div class="metric-card"><span>缺口</span><strong id="gapCount">0</strong></div>
-          </article>
-
-          <article class="panel">
-            <header><h2>Agent 判断</h2><span>证据优先</span></header>
-            <div id="judgments" class="list compact-list"></div>
-          </article>
-        </section>
-      </section>
-
-      <section class="workbench-grid">
+      <section id="weiboWorkbench" class="workbench-grid">
         <article class="panel focus-panel">
-          <header><h2>推荐采集目标</h2><span>选择后采评论</span></header>
+          <header><h2>推荐采集目标</h2><span>MediaCrawler 搜索 / 选择后采评论</span></header>
           <div id="recommendedTargets" class="list target-list"></div>
         </article>
 
@@ -91,10 +53,10 @@
           <div id="citations" class="list"></div>
         </article>
 
-        <article class="panel wide">
+        <article class="panel wide qa-panel">
           <header><h2>证据问答</h2><span>只答已有微博记录</span></header>
           <div class="qa-row">
-            <input id="botQuestion" value="微博负面为什么升高？" />
+            <textarea id="botQuestion">微博负面为什么升高？</textarea>
             <button id="sendBotMessage">提问</button>
           </div>
           <p id="botAnswer" class="strategy-summary"></p>

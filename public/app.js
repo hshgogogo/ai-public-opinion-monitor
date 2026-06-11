@@ -27,11 +27,11 @@ const els = {
   botAnswer: document.querySelector("#botAnswer")
 };
 
-document.querySelector("#runDiscovery").addEventListener("click", runDiscovery);
-document.querySelector("#runMigrate").addEventListener("click", runMigrate);
-document.querySelector("#sendBotMessage").addEventListener("click", askBot);
-document.querySelector("#weiboWorkbench").addEventListener("click", handleWorkbenchAction);
-document.querySelector("body").addEventListener("click", handlePageAction);
+document.querySelector("#runDiscovery")?.addEventListener("click", runDiscovery);
+document.querySelector("#runMigrate")?.addEventListener("click", runMigrate);
+document.querySelector("#sendBotMessage")?.addEventListener("click", askBot);
+document.querySelector("#weiboWorkbench")?.addEventListener("click", handleWorkbenchAction);
+document.querySelector("body")?.addEventListener("click", handlePageAction);
 
 refreshWorkbench();
 window.setInterval(refreshWorkbench, 30000);
@@ -44,12 +44,12 @@ async function refreshWorkbench() {
     renderWorkbench();
   } catch (error) {
     setConnection(false, "读取失败");
-    els.lastAction.textContent = error.message;
+    setText(els.lastAction, error.message);
   }
 }
 
 async function runDiscovery() {
-  const keyword = els.discoveryKeyword.value.trim();
+  const keyword = els.discoveryKeyword?.value.trim();
   if (!keyword) return;
   await withBusy(document.querySelector("#runDiscovery"), "创建发现任务", async () => {
     const result = await postJson("/api/weibo/discovery", { keyword });
@@ -67,11 +67,11 @@ async function runMigrate() {
 }
 
 async function askBot() {
-  const question = els.botQuestion.value.trim();
+  const question = els.botQuestion?.value.trim();
   if (!question) return;
   await withBusy(document.querySelector("#sendBotMessage"), "证据问答", async () => {
     const result = await postJson("/api/weibo/bot/messages", { question });
-    els.botAnswer.textContent = result.answer?.text || result.message || result.fix || "当前没有足够微博证据回答。";
+    setText(els.botAnswer, result.answer?.text || result.message || result.fix || "当前没有足够微博证据回答。");
     showActionResult(result, "证据问答");
   });
 }
@@ -81,13 +81,26 @@ async function handleWorkbenchAction(event) {
   if (!button) return;
   const { action, targetId, actionId } = button.dataset;
   if (action === "select-target") {
-    await withBusy(button, "选择目标", async () => showActionResult(await postJson("/api/weibo/targets/select", { targetId }), "选择目标"));
+    await withBusy(button, "选择目标", async () => {
+      showActionResult(await postJson("/api/weibo/targets/select", { targetId }), "选择目标");
+      await refreshWorkbench();
+    });
+    return;
   }
   if (action === "ignore-target") {
-    await withBusy(button, "忽略目标", async () => showActionResult(await postJson("/api/weibo/targets/ignore", { targetId }), "忽略目标"));
+    await withBusy(button, "忽略目标", async () => {
+      showActionResult(await postJson("/api/weibo/targets/ignore", { targetId }), "忽略目标");
+      await refreshWorkbench();
+    });
+    return;
   }
   if (action === "collect-comments") {
-    await withBusy(button, "采集评论", async () => showActionResult(await postJson(`/api/weibo/targets/${encodeURIComponent(targetId)}/collect-comments`, {}), `采集评论 ${targetId || ""}`));
+    await withBusy(button, "采集评论", async () => {
+      await postJson("/api/weibo/targets/select", { targetId });
+      showActionResult(await postJson(`/api/weibo/targets/${encodeURIComponent(targetId)}/collect-comments`, {}), `采集评论 ${targetId || ""}`);
+      await refreshWorkbench();
+    });
+    return;
   }
   if (["confirm-action", "reject-action", "uncertain-action", "partial-action"].includes(action)) {
     if (state.submittingActionIds.has(String(actionId))) return;
@@ -128,7 +141,6 @@ async function handleWorkbenchAction(event) {
     });
     return;
   }
-  await refreshWorkbench();
 }
 
 function handlePageAction(event) {
@@ -145,8 +157,8 @@ function renderWorkbench() {
   const workbench = state.workbench;
   if (!workbench) return;
   const dataGaps = dataGapsFor(workbench);
-  els.generatedAt.textContent = new Date().toLocaleString();
-  els.partialState.textContent = workbench.setup?.partialState || "unknown";
+  setText(els.generatedAt, new Date().toLocaleString());
+  setText(els.partialState, workbench.setup?.partialState || "unknown");
   renderOverview(workbench, dataGaps);
   renderSetup(workbench.setup || {});
   renderJudgments(workbench.judgments || []);
@@ -181,7 +193,7 @@ function renderOverview(workbench, dataGaps) {
   setText(els.eventCount, highRiskEvents ? `${events.length}/${highRiskEvents}高` : events.length);
   setText(els.actionCount, actions.length);
   setText(els.gapCount, blockingGaps ? `${gaps.length}/${blockingGaps}阻断` : gaps.length);
-  els.nextStep.innerHTML = nextStepCard(workbench, targets, events, actions, gaps);
+  setHtml(els.nextStep, nextStepCard(workbench, targets, events, actions, gaps));
 }
 
 function nextStepCard(workbench, targets, events, actions, gaps) {
@@ -258,6 +270,7 @@ function stepMarkup({ title, summary, action, tone, ctaLabel, scrollTarget, runD
 }
 
 function renderSetup(setup) {
+  if (!els.setupStatus) return;
   const health = setup.health?.weiboMvp || {};
   const rows = [
     ["平台", platformLabel(setup.activePlatform || "weibo"), "ok"],
@@ -266,26 +279,27 @@ function renderSetup(setup) {
     ["Chrome CDP", health.cdp?.ok ? "可用" : "不可用", health.cdp?.ok ? "ok" : "warn"],
     ["微博登录", stateLabel(health.auth?.status || "unknown"), health.auth?.error ? "warn" : "ok"]
   ];
-  els.setupStatus.innerHTML = rows
+  setHtml(els.setupStatus, rows
     .map(([label, value, tone]) => `<div><strong>${escapeHtml(label)}</strong><span class="${tone}">${escapeHtml(value)}</span></div>`)
-    .join("");
+    .join(""));
 }
 
 function renderJudgments(judgments) {
-  els.judgments.innerHTML = judgments.length
+  setHtml(els.judgments, judgments.length
     ? judgments.map((item) => `<section class="list-item"><strong>${escapeHtml(item.type || "判断")}</strong><p>${escapeHtml(item.summary || item.message || "")}</p></section>`).join("")
-    : empty({ title: "暂无 Agent 判断", message: "先完成微博发现、详情采集和分析。", actionLabel: "查看推荐目标", scrollTarget: "#recommendedTargets" });
+    : empty({ title: "暂无 Agent 判断", message: "先完成微博发现、详情采集和分析。", actionLabel: "查看推荐目标", scrollTarget: "#recommendedTargets" }));
 }
 
 function renderTargets(targets) {
-  els.recommendedTargets.innerHTML = targets.length
+  setHtml(els.recommendedTargets, targets.length
     ? targets.map(targetCard).join("")
-    : empty({ title: "还没有推荐目标", message: "配置真实环境后，用左侧关键词创建微博发现任务。", actionLabel: "创建发现任务", runDiscovery: true });
+    : empty({ title: "还没有推荐目标", message: "到后台设置里用关键词创建微博发现任务。", actionLabel: "去后台设置", href: "/settings" }));
 }
 
 function targetCard(target) {
   const meta = target.recommendation_metadata || target.recommendation || {};
-  const targetId = target.targetId || target.target_id || target.external_id || "";
+  const targetId = target.external_id || target.targetId || target.target_id || "";
+  const internalId = target.targetId || target.target_id || target.id || "";
   const expectedQuestion = meta.expected_question_answered || meta.expectedQuestionAnswered || target.expected_question_answered || target.expectedQuestionAnswered || "采集后确认评论关注点。";
   const rank = target.rank ?? target.platform_rank ?? target.platformRank ?? "-";
   const hotScore = target.hot_score ?? target.hotScore ?? "-";
@@ -304,7 +318,7 @@ function targetCard(target) {
         </div>
         <p class="meta strong-meta">推荐理由：${escapeHtml(reason)}</p>
         <p class="meta">预期回答：${escapeHtml(expectedQuestion)}</p>
-        <p class="meta">ID ${escapeHtml(targetId || "-")} · ${escapeHtml(target.author_name || target.author || "未知账号")}</p>
+        <p class="meta">微博 ID ${escapeHtml(target.external_id || "-")} · 记录 ${escapeHtml(String(internalId || "-"))} · ${escapeHtml(target.author_name || target.author || "未知账号")}</p>
         ${target.url ? `<a href="${escapeAttr(target.url)}" target="_blank" rel="noreferrer">打开微博证据</a>` : ""}
       </div>
       <div class="button-row">
@@ -317,9 +331,9 @@ function targetCard(target) {
 }
 
 function renderEvents(events) {
-  els.events.innerHTML = events.length
+  setHtml(els.events, events.length
     ? events.map(eventCard).join("")
-    : empty({ title: "还没有形成事件", message: "先选择目标并采集评论；分析后达到证据阈值才会生成事件。", actionLabel: "查看推荐目标", scrollTarget: "#recommendedTargets" });
+    : empty({ title: "还没有形成事件", message: "先选择目标并采集评论；分析后达到证据阈值才会生成事件。", actionLabel: "查看推荐目标", scrollTarget: "#recommendedTargets" }));
 }
 
 function eventCard(event) {
@@ -345,9 +359,9 @@ function eventCard(event) {
 }
 
 function renderActions(actions) {
-  els.pendingActions.innerHTML = actions.length
+  setHtml(els.pendingActions, actions.length
     ? actions.map(actionCard).join("")
-    : empty({ title: "暂无待确认行动", message: "Agent 建议会先进入人工队列；这里为空时，不代表已经执行任何外部动作。" });
+    : empty({ title: "暂无待确认行动", message: "Agent 建议会先进入人工队列；这里为空时，不代表已经执行任何外部动作。" }));
 }
 
 function actionCard(action) {
@@ -393,9 +407,9 @@ function confirmationPanel(actionId, status) {
 }
 
 function renderDataGaps(gaps) {
-  els.dataGaps.innerHTML = gaps.length
+  setHtml(els.dataGaps, gaps.length
     ? gaps.map(gapCard).join("")
-    : empty({ title: "后端未报告数据缺口", message: "这不代表已经覆盖全量微博数据；仍以目标、评论、事件和引用里的证据范围为准。", actionLabel: "查看证据引用", scrollTarget: "#citations" });
+    : empty({ title: "后端未报告数据缺口", message: "这不代表已经覆盖全量微博数据；仍以目标、评论、事件和引用里的证据范围为准。", actionLabel: "查看证据引用", scrollTarget: "#citations" }));
 }
 
 function gapCard(gap) {
@@ -413,15 +427,15 @@ function gapCard(gap) {
 }
 
 function renderCitations(citations) {
-  els.citations.innerHTML = citations.length
+  setHtml(els.citations, citations.length
     ? citations.map((citation) => `<section class="list-item"><strong>${escapeHtml(citation.id || citation.source_id || "source")}</strong><p>${escapeHtml(citation.type || citation.label || "")}</p></section>`).join("")
-    : empty({ title: "暂无可引用证据", message: "完成搜索、详情或评论采集后，问答和报告会引用这里的来源 ID。" });
+    : empty({ title: "暂无可引用证据", message: "完成搜索、详情或评论采集后，问答和报告会引用这里的来源 ID。" }));
 }
 
 function showActionResult(result, actionName = "操作") {
-  els.lastAction.textContent = result.ok === false
+  setText(els.lastAction, result.ok === false
     ? `${actionName}未完成：${stateLabel(result.error_type || "blocked")}，${result.fix || result.message || "请查看数据缺口。"}`
-    : `${actionName}已提交，等待真实数据链路处理。`;
+    : `${actionName}已提交，等待真实数据链路处理。`);
 }
 
 async function postJson(url, body) {
@@ -452,7 +466,7 @@ async function withBusy(button, label, task) {
   const originalText = button.textContent;
   button.disabled = true;
   button.textContent = "处理中";
-  els.lastAction.textContent = `${label}处理中。`;
+  setText(els.lastAction, `${label}处理中。`);
   try {
     await task();
   } finally {
@@ -463,11 +477,14 @@ async function withBusy(button, label, task) {
 
 function empty(options) {
   const state = typeof options === "string" ? { message: options } : options;
+  const action = state.href
+    ? `<a class="empty-cta button-link secondary" href="${escapeAttr(state.href)}">${escapeHtml(state.actionLabel)}</a>`
+    : state.actionLabel ? `<button class="empty-cta secondary" ${state.runDiscovery ? "data-run-discovery=\"1\"" : `data-scroll-target="${escapeAttr(state.scrollTarget)}"`}>${escapeHtml(state.actionLabel)}</button>` : "";
   return `
     <section class="list-item empty">
       ${state.title ? `<strong>${escapeHtml(state.title)}</strong>` : ""}
       <p>${escapeHtml(state.message || "")}</p>
-      ${state.actionLabel ? `<button class="empty-cta secondary" ${state.runDiscovery ? "data-run-discovery=\"1\"" : `data-scroll-target="${escapeAttr(state.scrollTarget)}"`}>${escapeHtml(state.actionLabel)}</button>` : ""}
+      ${action}
     </section>
   `;
 }
@@ -532,6 +549,7 @@ function stateLabel(value) {
     "detail-without-analysis": "详情待分析",
     "event-without-action": "事件待行动",
     failed: "失败",
+    ignored: "已忽略",
     "no-data": "无数据",
     observation: "观察线索",
     observing: "观察中",
@@ -541,6 +559,7 @@ function stateLabel(value) {
     rejected: "已驳回",
     resolved: "已解决",
     "search-only": "仅搜索",
+    selected: "已选择",
     stable: "稳定",
     succeeded: "成功",
     uncertain: "不确定",
@@ -562,6 +581,10 @@ function setConnection(online, text) {
 
 function setText(element, value) {
   if (element) element.textContent = String(value);
+}
+
+function setHtml(element, value) {
+  if (element) element.innerHTML = value;
 }
 
 function escapeHtml(value) {

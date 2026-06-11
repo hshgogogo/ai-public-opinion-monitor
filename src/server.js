@@ -100,7 +100,8 @@ function stream(response) {
 }
 
 async function serveStatic(pathname, response) {
-  const safePath = pathname === "/" ? "/index.html" : pathname;
+  const routePath = pathname === "/settings" ? "/settings.html" : pathname;
+  const safePath = routePath === "/" ? "/index.html" : routePath;
   const filePath = normalize(join(publicDir, safePath));
   if (!filePath.startsWith(publicDir)) return sendJson(response, { error: "Forbidden" }, 403);
   try {

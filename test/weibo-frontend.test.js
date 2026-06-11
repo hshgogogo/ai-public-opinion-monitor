@@ -3,28 +3,36 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 test("front-end uses Weibo Agent workbench as the primary screen", async () => {
-  const [html, js, css] = await Promise.all([
+  const [html, settingsHtml, js, css] = await Promise.all([
     readFile("public/index.html", "utf8"),
+    readFile("public/settings.html", "utf8"),
     readFile("public/app.js", "utf8"),
     readFile("public/styles.css", "utf8")
   ]);
 
   assert.match(html, /id="weiboWorkbench"/);
-  assert.match(html, /class="command-center"/);
-  assert.match(html, /id="nextStep"/);
-  assert.match(html, /id="targetCount"/);
   assert.match(html, /id="recommendedTargets"/);
   assert.match(html, /id="pendingActions"/);
   assert.match(html, /id="dataGaps"/);
   assert.match(html, /微博 Agent 工作台/);
+  assert.match(html, /href="\/settings"/);
+  assert.doesNotMatch(html, /id="runDiscovery"/);
+  assert.doesNotMatch(html, /id="setupStatus"/);
+  assert.doesNotMatch(html, /id="nextStep"/);
   assert.doesNotMatch(html, /class="hero"/);
+  assert.match(settingsHtml, /id="runDiscovery"/);
+  assert.match(settingsHtml, /id="setupStatus"/);
+  assert.match(settingsHtml, /id="nextStep"/);
 
   assert.match(js, /\/api\/weibo\/workbench/);
   assert.match(js, /renderOverview/);
   assert.match(js, /nextStepCard/);
+  assert.match(js, /target\.external_id \|\| target\.targetId/);
+  assert.equal(js.includes('postJson("/api/weibo/targets/select", { targetId })'), true);
   assert.match(js, /dataGapsFor/);
   assert.match(js, /workbench\.error_type/);
   assert.match(js, /依赖未就绪/);
+  assert.match(css, /\.qa-panel \.strategy-summary/);
   assert.match(css, /max-width: 1124px/);
   assert.doesNotMatch(js, /new EventSource\("\/api\/stream"\)/);
   assert.doesNotMatch(js, /fetch\("\/api\/collect"/);
