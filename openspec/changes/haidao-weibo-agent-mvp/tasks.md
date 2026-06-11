@@ -101,7 +101,7 @@
 
 ## 10. Weibo Memory, Reports, and Q&A
 
-- [ ] 10.1 Write target selections, analysis summaries, events, action records, backtest results, reports, and user preferences into `bot_memory_items`.
+- [x] 10.1 Write target selections, analysis summaries, events, action records, backtest results, reports, and user preferences into `bot_memory_items`.
 - [x] 10.2 Implement retrieval-first Q&A over Weibo targets, comments, events, actions, backtests, reports, and memory.
 - [x] 10.3 Ensure Q&A responses include source IDs or explicit insufficient-data messages.
 - [x] 10.4 Generate a Weibo MVP daily Markdown report with data coverage, top Agent judgments, events, actions, evidence, and next monitoring steps.

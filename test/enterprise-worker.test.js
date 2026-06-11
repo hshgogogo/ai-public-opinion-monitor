@@ -149,7 +149,7 @@ test("Weibo MVP memory report migration declares bot memory tables", () => {
     assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`, "i"));
   }
 
-  for (const token of ["source_kind", "source_id", "evidence_ids", "project_id", "report_date", "markdown_body"]) {
+  for (const token of ["source_kind", "source_id", "memory_identity", "evidence_ids", "project_id", "report_date", "markdown_body", "uniq_memory_project_kind_identity"]) {
     assert.match(sql, new RegExp(token, "i"));
   }
 });
@@ -183,16 +183,18 @@ test("Weibo MVP sentiment migration extends analysis fields and migration order"
   }
 });
 
-test("OpenSpec tasks keep external dependency and partial memory work unchecked", () => {
+test("OpenSpec tasks keep only external dependency work unchecked", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md");
 
   for (const taskId of ["3.1", "3.2", "3.3", "3.4", "3.5", "4.1", "4.2", "4.3", "4.4", "4.7", "4.8", "4.9", "5.5", "6.4", "6.5", "7.1", "7.2", "7.5", "7.6", "7.7", "7.8"]) {
     assert.match(tasks, new RegExp(`- \\[x\\] ${taskId.replace(".", "\\.")}\\b`));
   }
 
-  for (const taskId of ["9.12", "10.1", "11.5"]) {
+  for (const taskId of ["9.12", "11.5"]) {
     assert.match(tasks, new RegExp(`- \\[ \\] ${taskId.replace(".", "\\.")}\\b`));
   }
+
+  assert.match(tasks, /- \[x\] 10\.1\b/);
 });
 
 test("Weibo discovery target persistence uses atomic MySQL upsert", () => {

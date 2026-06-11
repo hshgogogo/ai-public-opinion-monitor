@@ -39,7 +39,7 @@ python workers/enterprise_worker.py weibo-fixture-e2e --now 2026-06-10T12:00:00Z
 
 ### MVP Limitations
 
-- 已完成 fixture-driven MySQL persistence，可在本地测试 Weibo task、target、detail posts/comments、event、action、memory/report 的部分入库链路。
+- 已完成 fixture-driven MySQL persistence，可在本地测试 Weibo task、target、detail posts/comments、event、action、backtest memory、report 和 preference memory 入库链路。
 - 已完成 MediaCrawler Weibo search/detail adapters、task-specific output path、raw JSONL 归档和 search/detail JSONL 入库链路；真实环境验收仍以 11.5 为准。
 - 真实微博登录态、Chrome CDP、MediaCrawler 环境验收仍未完成。
 - 已完成 DeepSeek 事件解释 adapter；无 `DEEPSEEK_API_KEY` 或模型失败时，事件仍保留确定性阈值结果并降级为本地/fixture 解释。

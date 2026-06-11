@@ -880,6 +880,33 @@ test(
     assert.equal(confirmation.action.confirmation_status, "confirmed");
     assert.notEqual(queryRows("SELECT confirmed_at FROM publicity_actions WHERE id=%s", [officialAction.id])[0].confirmed_at, null);
 
+    const backtest = runWorker([
+      "weibo-backtest-fixture",
+      "--fixture",
+      "test/fixtures/weibo-backtest-scenarios.json",
+      "--persist-project-id",
+      String(projectId)
+    ]);
+    assert.equal(backtest.ok, true);
+    assert.equal(backtest.persisted_memory_items, backtest.results.length);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='backtest'", [projectId])[0].count, backtest.results.length);
+    const persistedBacktest = queryRows(
+      "SELECT title, summary, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.result')) AS result FROM bot_memory_items WHERE project_id=%s AND source_kind='backtest' AND JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.scenario_id'))='strong' LIMIT 1",
+      [projectId]
+    )[0];
+    assert.match(persistedBacktest.title, /strong/);
+    assert.match(persistedBacktest.summary, /continue|monitor/i);
+    assert.equal(persistedBacktest.result, "strong");
+    const repeatedBacktest = runWorker([
+      "weibo-backtest-fixture",
+      "--fixture",
+      "test/fixtures/weibo-backtest-scenarios.json",
+      "--persist-project-id",
+      String(projectId)
+    ]);
+    assert.equal(repeatedBacktest.ok, true);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='backtest'", [projectId])[0].count, backtest.results.length);
+
     const report = runWorker([
       "weibo-memory-report-fixture",
       "--fixture",
@@ -899,9 +926,17 @@ test(
       [projectId]
     );
     const kinds = new Set(memoryKinds.map((row) => row.source_kind));
-    for (const kind of ["analysis", "event", "action", "report"]) {
+    for (const kind of ["analysis", "event", "action", "backtest", "report", "preference"]) {
       assert.equal(kinds.has(kind), true, `${kind} memory item should be persisted`);
     }
+    const preference = queryRows(
+      "SELECT memory_identity, title, summary, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.id')) AS fixture_id FROM bot_memory_items WHERE project_id=%s AND source_kind='preference' LIMIT 1",
+      [projectId]
+    )[0];
+    assert.equal(preference.memory_identity, "preference:preference-1");
+    assert.match(preference.title, /用户偏好/);
+    assert.match(preference.summary, /可追溯证据/);
+    assert.equal(preference.fixture_id, "preference-1");
   }
 );
 

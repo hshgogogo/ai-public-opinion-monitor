@@ -114,6 +114,7 @@ def main():
     actions_fixture.add_argument("--persist-project-id", type=int)
     backtest_fixture = sub.add_parser("weibo-backtest-fixture")
     backtest_fixture.add_argument("--fixture", required=True)
+    backtest_fixture.add_argument("--persist-project-id", type=int)
     memory_fixture = sub.add_parser("weibo-memory-report-fixture")
     memory_fixture.add_argument("--fixture", required=True)
     memory_fixture.add_argument("--question", required=True)
@@ -175,7 +176,7 @@ def main():
         elif args.command == "weibo-actions-fixture":
             emit(build_weibo_actions_fixture(args.accounts, args.posts, args.event_id, args.now, args.persist_project_id))
         elif args.command == "weibo-backtest-fixture":
-            emit(build_weibo_backtest_fixture(args.fixture))
+            emit(build_weibo_backtest_fixture(args.fixture, args.persist_project_id))
         elif args.command == "weibo-memory-report-fixture":
             emit(build_weibo_memory_report_fixture(args.fixture, args.question, args.now, args.persist_project_id))
         elif args.command == "snapshot":
@@ -1003,6 +1004,7 @@ def weibo_target_state_payload(payload_json, selected_status):
             [updated["id"]],
             {"selected_status": selected_status, "external_id": updated.get("external_id")},
             0.55,
+            memory_identity=f"target:{updated['id']}",
         )
     return {
         "ok": True,
@@ -2314,6 +2316,7 @@ def persist_analysis_payload(payload, project_id, comments_path):
         [item.get("comment_id") for item in payload.get("analyses", []) if item.get("comment_id")],
         {"deepseek": payload.get("deepseek"), "defaults": payload.get("defaults")},
         0.6,
+        memory_identity=f"analysis:{Path(comments_path).name}",
     )
     payload["persisted_agent_runs"] = persisted
 
@@ -2403,6 +2406,7 @@ def persist_events(project_id, events):
                     event.get("evidence_ids", []),
                     event,
                     0.75,
+                    memory_identity=f"event:{event_id}",
                 )
     return persisted
 
@@ -2520,6 +2524,7 @@ def persist_publicity_actions(project_id, actions, account_ids):
                     action.get("evidence_ids", []),
                     action,
                     0.7,
+                    memory_identity=f"action:{action.get('id') or action_id}",
                 )
     return persisted
 
@@ -2558,24 +2563,34 @@ def persist_memory_report(project_id, records, report, now):
         report.get("evidence_ids", []),
         {"dataCoverage": report.get("dataCoverage", {})},
         0.5,
+        memory_identity=f"report:{report_date}",
     )
     persisted = 1
     for item in records.get("memory", []):
+        source_kind = item.get("source_kind", "event") if item.get("source_kind") in {"target", "comment", "analysis", "event", "action", "backtest", "report", "preference", "conversation"} else "event"
         write_memory_item(
             project_id,
-            item.get("source_kind", "event") if item.get("source_kind") in {"target", "comment", "analysis", "event", "action", "backtest", "report", "preference", "conversation"} else "event",
+            source_kind,
             numeric_nullable(item.get("source_id")),
             item.get("title") or "Imported Weibo memory",
             item.get("summary") or "",
             item.get("evidence_ids", []),
             item,
             0.4,
+            memory_identity=memory_item_identity(source_kind, item),
         )
         persisted += 1
     return persisted
 
 
-def write_memory_item(project_id, source_kind, source_id, title, summary, evidence_ids, memory_json, importance):
+def memory_item_identity(source_kind, item):
+    stable_id = item.get("id") or item.get("source_id") or item.get("title")
+    if not stable_id:
+        return None
+    return f"{source_kind}:{stable_id}"
+
+
+def write_memory_item(project_id, source_kind, source_id, title, summary, evidence_ids, memory_json, importance, memory_identity=None):
     if not project_id:
         return None
     with db.connect() as conn:
@@ -2583,15 +2598,24 @@ def write_memory_item(project_id, source_kind, source_id, title, summary, eviden
             cur.execute(
                 """
                 INSERT INTO bot_memory_items(
-                  project_id, source_kind, source_id, title, summary,
+                  project_id, source_kind, source_id, memory_identity, title, summary,
                   evidence_ids, memory_json, importance
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                  id=LAST_INSERT_ID(id),
+                  source_id=VALUES(source_id),
+                  title=VALUES(title),
+                  summary=VALUES(summary),
+                  evidence_ids=VALUES(evidence_ids),
+                  memory_json=VALUES(memory_json),
+                  importance=VALUES(importance)
                 """,
                 (
                     project_id,
                     source_kind,
                     numeric_nullable(source_id),
+                    memory_identity,
                     str(title or source_kind)[:240],
                     summary or "",
                     json.dumps(evidence_ids or [], ensure_ascii=False),
@@ -3692,14 +3716,48 @@ def is_project_related(text):
     return any(term in (text or "") for term in ["海岛舒服日志", "刘昊然", "李兰迪"])
 
 
-def build_weibo_backtest_fixture(fixture_path):
+def build_weibo_backtest_fixture(fixture_path, persist_project_id=None):
     scenarios = json.loads(Path(fixture_path).read_text(encoding="utf-8"))
-    return {
+    results = [backtest_scenario(scenario) for scenario in scenarios]
+    payload = {
         "ok": True,
         "mode": "weibo-agent-mvp",
         "fixture": True,
-        "results": [backtest_scenario(scenario) for scenario in scenarios],
+        "results": results,
     }
+    if persist_project_id:
+        payload["persisted_memory_items"] = persist_backtest_memory(persist_project_id, results)
+    return payload
+
+
+def persist_backtest_memory(project_id, results):
+    persisted = 0
+    for result in results:
+        action_id = result.get("action_id")
+        scenario_id = result.get("scenario_id") or action_id or "unknown"
+        write_memory_item(
+            project_id,
+            "backtest",
+            numeric_nullable(action_id),
+            f"Weibo backtest: {scenario_id}",
+            backtest_memory_summary(result),
+            [action_id] if action_id else [],
+            result,
+            0.58 if result.get("eligible") else 0.35,
+            memory_identity=f"backtest:{scenario_id}",
+        )
+        persisted += 1
+    return persisted
+
+
+def backtest_memory_summary(result):
+    signal = result.get("signal_level") or result.get("result") or "unknown"
+    recommendation = result.get("next_recommendation") or "monitor more windows before changing strategy"
+    if result.get("eligible"):
+        confidence = result.get("attribution_confidence", 0)
+        return f"Backtest signal {signal} with attribution confidence {confidence}. Next: {recommendation}."
+    missing = result.get("missing_data_reason") or "insufficient evidence"
+    return f"Backtest signal {signal}; missing {missing}. Next: {recommendation}."
 
 
 def backtest_scenario(scenario):
