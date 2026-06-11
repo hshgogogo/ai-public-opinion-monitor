@@ -58,7 +58,7 @@
 - [x] 6.1 Implement rule recall for Weibo comments/targets by drama name, actor names, configured keywords, topics, risks, and stance.
 - [x] 6.2 Implement event evidence thresholds that distinguish observation leads from formal events.
 - [x] 6.3 Implement event score and status assignment using deterministic counts/weights before any LLM explanation.
-- [ ] 6.4 Use DeepSeek to generate event title, trigger summary, main stances, impact assessment, and recommended actions only after evidence exists.
+- [x] 6.4 Use DeepSeek to generate event title, trigger summary, main stances, impact assessment, and recommended actions only after evidence exists.
 - [x] 6.5 Write or update Weibo events only in `artist_public_opinion_events`, plus evidence links and status history records.
 - [x] 6.6 Add tests for evidence thresholds, event upsert within the 72-hour merge window, status transitions, and no-evidence behavior.
 

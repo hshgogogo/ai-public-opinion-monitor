@@ -738,28 +738,50 @@ test(
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM agent_runs WHERE error_message='retry_exhausted'")[0].count, 1);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_memory_items WHERE source_kind='analysis'")[0].count, 1);
 
-    const events = runWorker([
+    const fallbackEvents = runWorker([
       "weibo-build-events-fixture",
       "--fixture",
       "test/fixtures/weibo-event-evidence.jsonl",
       "--persist-project-id",
       String(projectId)
     ]);
+    assert.equal(fallbackEvents.ok, true);
+    assert.equal(fallbackEvents.persisted_events >= 2, true);
+
+    const events = runWorker([
+      "weibo-build-events-fixture",
+      "--fixture",
+      "test/fixtures/weibo-event-evidence.jsonl",
+      "--deepseek-response",
+      "test/fixtures/deepseek-event-response.md",
+      "--persist-project-id",
+      String(projectId)
+    ]);
     assert.equal(events.ok, true);
-    assert.equal(events.persisted_events >= 2, true);
-    assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [projectId])[0].count, events.persisted_events);
+    assert.equal(events.persisted_events, fallbackEvents.persisted_events);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [projectId])[0].count, fallbackEvents.persisted_events);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM event_evidence_links")[0].count > 0, true);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM event_status_history")[0].count > 0, true);
+    const explainedEvent = queryRows(
+      "SELECT title, event_score, risk_level, impact_assessment, JSON_LENGTH(recommended_actions) AS recommended_count FROM artist_public_opinion_events WHERE project_id=%s AND title=%s ORDER BY event_score DESC, id LIMIT 1",
+      [projectId, "DeepSeek 官宣可信度风险升温"]
+    )[0];
+    assert.equal(explainedEvent.risk_level, "high");
+    assert.notEqual(Number(explainedEvent.event_score), 999);
+    assert.match(explainedEvent.impact_assessment, /官方澄清/);
+    assert.equal(explainedEvent.recommended_count > 0, true);
     const repeatedEvents = runWorker([
       "weibo-build-events-fixture",
       "--fixture",
       "test/fixtures/weibo-event-evidence.jsonl",
+      "--deepseek-response",
+      "test/fixtures/deepseek-event-response.md",
       "--persist-project-id",
       String(projectId)
     ]);
     assert.equal(repeatedEvents.ok, true);
     assert.equal(repeatedEvents.persisted_events, events.persisted_events);
-    assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [projectId])[0].count, events.persisted_events);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [projectId])[0].count, fallbackEvents.persisted_events);
 
     const eventId = queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s ORDER BY event_score DESC, id LIMIT 1", [projectId])[0].id;
     const manualAccount = runWorker([

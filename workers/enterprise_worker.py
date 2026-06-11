@@ -7,6 +7,8 @@ import re
 import socket
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -102,6 +104,8 @@ def main():
     events_fixture = sub.add_parser("weibo-build-events-fixture")
     events_fixture.add_argument("--fixture", required=True)
     events_fixture.add_argument("--persist-project-id", type=int)
+    events_fixture.add_argument("--deepseek-response")
+    events_fixture.add_argument("--simulate-deepseek-failure")
     actions_fixture = sub.add_parser("weibo-actions-fixture")
     actions_fixture.add_argument("--accounts", required=True)
     actions_fixture.add_argument("--posts", required=True)
@@ -167,7 +171,7 @@ def main():
         elif args.command == "weibo-deepseek-fixture":
             emit(run_deepseek_fixture(args.comments, args.now, args.response, args.simulate_failure, args.persist_project_id))
         elif args.command == "weibo-build-events-fixture":
-            emit(build_weibo_events_fixture(args.fixture, args.persist_project_id))
+            emit(build_weibo_events_fixture(args.fixture, args.persist_project_id, args.deepseek_response, args.simulate_deepseek_failure))
         elif args.command == "weibo-actions-fixture":
             emit(build_weibo_actions_fixture(args.accounts, args.posts, args.event_id, args.now, args.persist_project_id))
         elif args.command == "weibo-backtest-fixture":
@@ -2321,7 +2325,7 @@ def persist_events(project_id, events):
             for event in events:
                 title = event.get("title") or "Weibo observation"
                 first_seen_at = mysql_timestamp(event.get("first_seen_at"))
-                identity = event_identity(title, first_seen_at)
+                identity = event.get("event_identity") or event_identity(title, first_seen_at)
                 values = (
                     identity,
                     event.get("event_type", "observation_lead"),
@@ -2405,6 +2409,19 @@ def persist_events(project_id, events):
 
 def event_identity(title, first_seen_at):
     return f"{title}::{first_seen_at or 'no-first-seen'}"
+
+
+def deterministic_event_identity(issue_key, first_seen_at, evidence_ids):
+    raw = json.dumps(
+        {
+            "issue_key": issue_key,
+            "first_seen_at": first_seen_at or "no-first-seen",
+            "evidence_ids": sorted(str(item) for item in evidence_ids),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"{issue_key or 'event'}::{first_seen_at or 'no-first-seen'}::{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
 
 
 def persist_source_accounts(project_id, accounts):
@@ -3259,10 +3276,17 @@ def analysis_from_deepseek(comment, model_item, now):
     }
 
 
-def build_weibo_events_fixture(fixture_path, persist_project_id=None):
+def build_weibo_events_fixture(fixture_path, persist_project_id=None, deepseek_response_path=None, simulate_deepseek_failure=None):
     evidence = load_jsonl(fixture_path)
     if not evidence:
-        return {"ok": True, "mode": "weibo-agent-mvp", "fixture": True, "events": [], "data_gap": "no_evidence"}
+        return {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "fixture": True,
+            "events": [],
+            "data_gap": "no_evidence",
+            "deepseek_event_explanation": {"status": "not_run", "reason": "no_evidence"},
+        }
     grouped = {}
     for item in evidence:
         for issue in recall_issue_keys(item):
@@ -3271,10 +3295,160 @@ def build_weibo_events_fixture(fixture_path, persist_project_id=None):
     for issue_key, items in grouped.items():
         for cluster in merge_evidence_window(items):
             events.append(build_event_from_evidence(issue_key, cluster))
-    payload = {"ok": True, "mode": "weibo-agent-mvp", "fixture": True, "events": events}
+    explanation = explain_weibo_events(events, evidence, deepseek_response_path, simulate_deepseek_failure)
+    payload = {"ok": True, "mode": "weibo-agent-mvp", "fixture": True, "events": events, "deepseek_event_explanation": explanation}
     if persist_project_id:
         payload["persisted_events"] = persist_events(persist_project_id, events)
     return payload
+
+
+def explain_weibo_events(events, evidence, response_path=None, simulate_failure=None):
+    if not events:
+        return {"status": "not_run", "reason": "no_events"}
+    if simulate_failure:
+        for event in events:
+            event["event_explanation"] = {
+                "model": "local-rules",
+                "fallback_type": "deepseek_failed",
+                "error_type": "deepseek_failed",
+                "message": f"Simulated DeepSeek event explanation failure: {simulate_failure}",
+            }
+        return {"status": "failed", "error_type": "deepseek_failed", "fallback_type": "deterministic_events"}
+    response_text = None
+    if response_path:
+        response_text = Path(response_path).read_text(encoding="utf-8")
+    elif os.environ.get("DEEPSEEK_API_KEY"):
+        response_text = call_deepseek_event_explanation(events, evidence)
+    if not response_text:
+        for event in events:
+            event["event_explanation"] = {"model": "local-rules", "fallback_type": "no_deepseek_response"}
+        return {"status": "not_run", "reason": "deepseek_unavailable", "fallback_type": "deterministic_events"}
+    try:
+        model_items = parse_deepseek_response(response_text)
+    except Exception as exc:
+        for event in events:
+            event["event_explanation"] = {
+                "model": "local-rules",
+                "fallback_type": "deepseek_parse_failed",
+                "error_type": "deepseek_parse_failed",
+            }
+        return {"status": "failed", "error_type": "deepseek_parse_failed", "cause": type(exc).__name__, "fallback_type": "deterministic_events"}
+    items_by_issue = {str(item.get("issue_key") or ""): item for item in model_items if isinstance(item, dict)}
+    applied = 0
+    for event in events:
+        model_item = items_by_issue.get(str(event.get("issue_key"))) or {}
+        if apply_deepseek_event_explanation(event, model_item):
+            applied += 1
+    if applied == 0:
+        return {
+            "status": "not_run",
+            "reason": "no_allowed_event_explanation_fields",
+            "model": "deepseek-chat",
+            "fallback_type": "deterministic_events",
+        }
+    return {
+        "status": "succeeded",
+        "model": "deepseek-chat",
+        "applied_events": applied,
+        "fallback_events": max(len(events) - applied, 0),
+    }
+
+
+def call_deepseek_event_explanation(events, evidence):
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    api_url = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
+    prompt = {
+        "instruction": "Generate Weibo public-opinion event explanation fields only. Do not provide numeric risk, score, or backtest values.",
+        "events": [
+            {
+                "issue_key": event.get("issue_key"),
+                "event_type": event.get("event_type"),
+                "status": event.get("status"),
+                "risk_level": event.get("risk_level"),
+                "event_score": event.get("event_score"),
+                "evidence_ids": event.get("evidence_ids"),
+            }
+            for event in events
+        ],
+        "evidence": evidence[:30],
+        "required_json_fields": ["issue_key", "title", "trigger_summary", "main_stances", "impact_assessment", "recommended_actions"],
+    }
+    body = json.dumps(
+        {
+            "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+            "messages": [
+                {"role": "system", "content": "You explain Weibo public-opinion events for a film publicity team. Return JSON only."},
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            ],
+            "temperature": 0.2,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        api_url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "60"))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return None
+    return (((payload.get("choices") or [{}])[0].get("message") or {}).get("content")) or None
+
+
+def apply_deepseek_event_explanation(event, model_item):
+    if not model_item:
+        event["event_explanation"] = {"model": "local-rules", "fallback_type": "missing_model_item"}
+        return False
+    ignored = {
+        key: model_item.get(key)
+        for key in ["event_score", "risk_level", "status", "backtest_signal"]
+        if key in model_item
+    }
+    applied_fields = []
+    if model_item.get("title"):
+        event["title"] = str(model_item["title"])[:240]
+        applied_fields.append("title")
+    if model_item.get("trigger_summary"):
+        event["trigger_summary"] = str(model_item["trigger_summary"])
+        applied_fields.append("trigger_summary")
+    main_stances = model_item.get("main_stances") if isinstance(model_item.get("main_stances"), list) else []
+    if main_stances:
+        event["main_stances"] = [str(item) for item in main_stances[:8]]
+        applied_fields.append("main_stances")
+    if model_item.get("impact_assessment"):
+        event["impact_assessment"] = str(model_item["impact_assessment"])
+        applied_fields.append("impact_assessment")
+    recommended_actions = model_item.get("recommended_actions")
+    if isinstance(recommended_actions, list) and recommended_actions:
+        event["recommended_actions"] = recommended_actions[:8]
+        applied_fields.append("recommended_actions")
+    if not applied_fields:
+        event["event_explanation"] = {
+            "model": "local-rules",
+            "fallback_type": "missing_allowed_event_explanation_fields",
+            "ignored_model_numbers": ignored,
+        }
+        return False
+    timeline = event.get("timeline_json") or []
+    timeline.append({
+        "type": "deepseek_event_explanation",
+        "main_stances": event.get("main_stances", []),
+        "model": "deepseek-chat",
+    })
+    event["timeline_json"] = timeline
+    event["event_explanation"] = {
+        "model": "deepseek-chat",
+        "fallback_type": "none",
+        "applied_fields": applied_fields,
+        "ignored_model_numbers": ignored,
+    }
+    return True
 
 
 def recall_issue_keys(item):
@@ -3317,6 +3491,7 @@ def build_event_from_evidence(issue_key, evidence_items):
     last_seen = max([item.get("created_at") for item in evidence_items if item.get("created_at")] or [None])
     return {
         "issue_key": issue_key,
+        "event_identity": deterministic_event_identity(issue_key, first_seen, evidence_ids),
         "platform": "weibo",
         "event_type": event_type,
         "title": f"微博{issue_key}观察",
