@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS bot_memory_items (
   project_id BIGINT NOT NULL,
   source_kind ENUM('target','comment','analysis','event','action','backtest','report','preference','conversation') NOT NULL,
   source_id BIGINT NULL,
+  memory_identity VARCHAR(320) NULL,
   title VARCHAR(240) NOT NULL,
   summary TEXT NOT NULL,
   evidence_ids JSON NOT NULL,
@@ -10,6 +11,7 @@ CREATE TABLE IF NOT EXISTS bot_memory_items (
   importance DECIMAL(5,4) NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_memory_project_kind_identity (project_id, source_kind, memory_identity),
   KEY idx_memory_project_kind (project_id, source_kind, created_at),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -50,3 +52,13 @@ CREATE TABLE IF NOT EXISTS daily_reports (
   UNIQUE KEY uniq_daily_report (project_id, report_date),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE bot_memory_items ADD COLUMN memory_identity VARCHAR(320) NULL AFTER source_id', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bot_memory_items' AND COLUMN_NAME = 'memory_identity');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE bot_memory_items ADD UNIQUE KEY uniq_memory_project_kind_identity (project_id, source_kind, memory_identity)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bot_memory_items' AND INDEX_NAME = 'uniq_memory_project_kind_identity');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

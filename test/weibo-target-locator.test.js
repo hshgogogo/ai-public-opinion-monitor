@@ -44,6 +44,21 @@ test("rejects unsupported Weibo target locator with actionable error", () => {
   assert.deepEqual(payload.preserved_locator.external_id, "topic-no-detail");
 });
 
+test("uses Weibo post external_id as detail fallback when mid and status URL are absent", () => {
+  const result = runLocator({
+    platform: "weibo",
+    target_type: "weibo_post",
+    external_id: "1001",
+    url: "https://weibo.com/artist/not-status/1001"
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.detail_locator.weibo_mid, "1001");
+  assert.equal(payload.detail_locator.external_id, "1001");
+});
+
 function runLocator(locator) {
   return spawnSync(
     python,

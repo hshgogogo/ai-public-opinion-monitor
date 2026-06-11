@@ -62,6 +62,8 @@ test("Weibo MVP migration chunk declares ingestion tables and columns", () => {
   assert.match(sql, /`rank`\s+INT/i);
 
   assert.match(sql, /CREATE TABLE IF NOT EXISTS discovered_targets/i);
+  assert.match(sql, /uniq_discovered_project_platform_external/i);
+  assert.match(sql, /project_id,\s*platform,\s*external_id/i);
   for (const column of [
     "target_locator",
     "target_type",
@@ -72,7 +74,10 @@ test("Weibo MVP migration chunk declares ingestion tables and columns", () => {
     "content_fingerprint",
     "hot_score",
     "recommendation_metadata",
-    "selected_status"
+    "selected_status",
+    "source_type",
+    "source_match_method",
+    "source_match_confidence"
   ]) {
     assert.match(sql, new RegExp(`\\b${column}\\b`, "i"));
   }
@@ -87,6 +92,10 @@ test("Weibo MVP migration chunk declares ingestion tables and columns", () => {
   for (const status of ["expired", "verification_required", "rate_limited", "unknown", "configured"]) {
     assert.match(sql, new RegExp(status, "i"));
   }
+  assert.match(sql, /DROP INDEX uniq_platform_external/i);
+  assert.match(sql, /uniq_project_platform_external/i);
+  assert.match(sql, /DROP INDEX uniq_comment_platform_external/i);
+  assert.match(sql, /uniq_comment_project_platform_external/i);
 });
 
 test("Weibo MVP event action backtest migration declares ledger tables", () => {
@@ -121,6 +130,11 @@ test("Weibo MVP event action backtest migration declares ledger tables", () => {
   ]) {
     assert.match(sql, new RegExp(token, "i"));
   }
+  assert.match(sql, /DROP INDEX uniq_source_account_external/i);
+  assert.match(sql, /uniq_project_source_account_external/i);
+  assert.match(sql, /uniq_project_source_account_display/i);
+  assert.match(sql, /event_identity/i);
+  assert.match(sql, /uniq_event_project_platform_identity/i);
 });
 
 test("Weibo MVP memory report migration declares bot memory tables", () => {
@@ -135,7 +149,7 @@ test("Weibo MVP memory report migration declares bot memory tables", () => {
     assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`, "i"));
   }
 
-  for (const token of ["source_kind", "source_id", "evidence_ids", "project_id", "report_date", "markdown_body"]) {
+  for (const token of ["source_kind", "source_id", "memory_identity", "evidence_ids", "project_id", "report_date", "markdown_body", "uniq_memory_project_kind_identity"]) {
     assert.match(sql, new RegExp(token, "i"));
   }
 });
@@ -169,12 +183,42 @@ test("Weibo MVP sentiment migration extends analysis fields and migration order"
   }
 });
 
-test("OpenSpec tasks do not mark real DB persistence work as complete while only fixture paths exist", () => {
+test("OpenSpec tasks include real environment and design pass evidence", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md");
 
-  for (const taskId of ["3.4", "3.5", "4.8", "4.9", "7.1", "7.5", "7.6", "7.7", "7.8"]) {
-    assert.match(tasks, new RegExp(`- \\[ \\] ${taskId.replace(".", "\\.")}\\b`));
+  for (const taskId of ["3.1", "3.2", "3.3", "3.4", "3.5", "4.1", "4.2", "4.3", "4.4", "4.7", "4.8", "4.9", "5.5", "6.4", "6.5", "7.1", "7.2", "7.5", "7.6", "7.7", "7.8"]) {
+    assert.match(tasks, new RegExp(`- \\[x\\] ${taskId.replace(".", "\\.")}\\b`));
   }
+
+  assert.match(tasks, /- \[x\] 9\.12\b/);
+  assert.match(tasks, /Local Claude Code design pass succeeded/);
+  assert.match(tasks, /- \[x\] 10\.1\b/);
+  assert.match(tasks, /- \[x\] 11\.5\b/);
+});
+
+test("Weibo discovery target persistence uses atomic MySQL upsert", () => {
+  const worker = readText("workers/enterprise_worker.py");
+  const section = worker.match(/def persist_discovered_targets[\s\S]*?\ndef find_discovered_target/)?.[0] || "";
+
+  assert.match(section, /ON DUPLICATE KEY UPDATE/i);
+  assert.match(section, /LAST_INSERT_ID\(id\)/i);
+  assert.match(section, /selected_status=IF\(selected_status IN \('selected','ignored'\)/i);
+  assert.doesNotMatch(section, /discovered_target_id/);
+  assert.doesNotMatch(worker, /def discovered_target_id/);
+});
+
+test("Weibo event and source account persistence use atomic MySQL upsert", () => {
+  const worker = readText("workers/enterprise_worker.py");
+  const eventsSection = worker.match(/def persist_events[\s\S]*?\ndef persist_source_accounts/)?.[0] || "";
+  const sourceAccountsSection = worker.match(/def persist_source_accounts[\s\S]*?\ndef persist_publicity_actions/)?.[0] || "";
+
+  assert.match(eventsSection, /ON DUPLICATE KEY UPDATE/i);
+  assert.match(eventsSection, /LAST_INSERT_ID\(id\)/i);
+  assert.doesNotMatch(eventsSection, /SELECT\s+id\s+FROM\s+artist_public_opinion_events/i);
+
+  assert.match(sourceAccountsSection, /ON DUPLICATE KEY UPDATE/i);
+  assert.match(sourceAccountsSection, /LAST_INSERT_ID\(id\)/i);
+  assert.doesNotMatch(sourceAccountsSection, /SELECT\s+id\s+FROM\s+source_accounts/i);
 });
 
 test("default project and env example are Weibo MVP scoped", () => {

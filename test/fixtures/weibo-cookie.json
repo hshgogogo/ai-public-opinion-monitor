@@ -1,0 +1,12 @@
+[
+  {
+    "name": "SUB",
+    "value": "fake-sub-for-tests",
+    "domain": ".weibo.com"
+  },
+  {
+    "name": "OTHER",
+    "value": "other-site-token",
+    "domain": ".example.com"
+  }
+]

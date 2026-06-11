@@ -3,8 +3,12 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import socket
+import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +29,35 @@ COLLECTORS = {
     "weibo": weibo.collect,
 }
 
+SOURCE_MATCH_UNKNOWN = {
+    "source_type": "unknown",
+    "source_match_method": "unknown",
+    "source_match_confidence": 0.2,
+}
+
+
+class MediaCrawlerParseError(Exception):
+    pass
+
+
+MEDIACRAWLER_BOOTSTRAP = """
+import json
+import os
+import runpy
+import sys
+
+try:
+    import config
+
+    config.CDP_DEBUG_PORT = int(os.environ.get("MEDIACRAWLER_CDP_PORT", "9222") or "9222")
+    config.CDP_CONNECT_EXISTING = True
+    config.COOKIES = json.loads(sys.stdin.read() or "{}").get("cookies", "")
+except Exception:
+    pass
+
+runpy.run_path("main.py", run_name="__main__")
+""".strip()
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -37,6 +70,7 @@ def main():
     add_payload_parser(sub, "weibo-targets")
     add_payload_parser(sub, "weibo-target-select")
     add_payload_parser(sub, "weibo-target-ignore")
+    add_payload_parser(sub, "weibo-source-account-upsert")
     collect_target = add_payload_parser(sub, "weibo-collect-target")
     collect_target.add_argument("--target-id", required=True)
     events = add_payload_parser(sub, "weibo-events")
@@ -66,19 +100,26 @@ def main():
     deepseek_fixture.add_argument("--now", required=True)
     deepseek_fixture.add_argument("--response")
     deepseek_fixture.add_argument("--simulate-failure")
+    deepseek_fixture.add_argument("--persist-project-id", type=int)
     events_fixture = sub.add_parser("weibo-build-events-fixture")
     events_fixture.add_argument("--fixture", required=True)
+    events_fixture.add_argument("--persist-project-id", type=int)
+    events_fixture.add_argument("--deepseek-response")
+    events_fixture.add_argument("--simulate-deepseek-failure")
     actions_fixture = sub.add_parser("weibo-actions-fixture")
     actions_fixture.add_argument("--accounts", required=True)
     actions_fixture.add_argument("--posts", required=True)
     actions_fixture.add_argument("--event-id", required=True)
     actions_fixture.add_argument("--now", required=True)
+    actions_fixture.add_argument("--persist-project-id", type=int)
     backtest_fixture = sub.add_parser("weibo-backtest-fixture")
     backtest_fixture.add_argument("--fixture", required=True)
+    backtest_fixture.add_argument("--persist-project-id", type=int)
     memory_fixture = sub.add_parser("weibo-memory-report-fixture")
     memory_fixture.add_argument("--fixture", required=True)
     memory_fixture.add_argument("--question", required=True)
     memory_fixture.add_argument("--now", required=True)
+    memory_fixture.add_argument("--persist-project-id", type=int)
     snapshot = sub.add_parser("snapshot")
     snapshot.add_argument("--project-id", type=int)
     collect = sub.add_parser("collect")
@@ -95,23 +136,25 @@ def main():
         elif args.command == "weibo-fixture-hello":
             emit(weibo_fixture_hello())
         elif args.command == "weibo-workbench":
-            emit(weibo_workbench_payload())
+            emit(weibo_workbench_payload(args.payload_json))
         elif args.command == "weibo-discovery":
-            emit(real_weibo_endpoint_payload("POST /api/weibo/discovery", args.payload_json))
+            emit(weibo_discovery_payload(args.payload_json))
         elif args.command == "weibo-targets":
-            emit(real_weibo_endpoint_payload("GET /api/weibo/targets", args.payload_json))
+            emit(weibo_targets_payload(args.payload_json))
         elif args.command == "weibo-target-select":
-            emit(real_weibo_endpoint_payload("POST /api/weibo/targets/select", args.payload_json))
+            emit(weibo_target_state_payload(args.payload_json, "selected"))
         elif args.command == "weibo-target-ignore":
-            emit(real_weibo_endpoint_payload("POST /api/weibo/targets/ignore", args.payload_json))
+            emit(weibo_target_state_payload(args.payload_json, "ignored"))
+        elif args.command == "weibo-source-account-upsert":
+            emit(weibo_source_account_upsert_payload(args.payload_json))
         elif args.command == "weibo-collect-target":
-            emit(real_weibo_endpoint_payload("POST /api/weibo/targets/:id/collect-comments", args.payload_json, target_id=args.target_id))
+            emit(weibo_collect_target_payload(args.payload_json, args.target_id))
         elif args.command == "weibo-events":
             emit(real_weibo_endpoint_payload("GET /api/weibo/events", args.payload_json, event_id=args.event_id))
         elif args.command == "weibo-actions-pending":
-            emit(real_weibo_endpoint_payload("GET /api/weibo/actions/pending", args.payload_json))
+            emit(weibo_actions_pending_payload(args.payload_json))
         elif args.command == "weibo-action-confirm":
-            emit(real_weibo_endpoint_payload("PATCH /api/weibo/actions/:id/confirmation", args.payload_json, action_id=args.action_id))
+            emit(weibo_action_confirm_payload(args.payload_json, args.action_id))
         elif args.command == "weibo-action-backtest":
             emit(real_weibo_endpoint_payload("POST /api/weibo/actions/:id/backtest", args.payload_json, action_id=args.action_id))
         elif args.command == "weibo-bot-message":
@@ -127,15 +170,15 @@ def main():
         elif args.command == "weibo-analyze-comments-fixture":
             emit(analyze_weibo_comments_fixture(args.fixture, args.now))
         elif args.command == "weibo-deepseek-fixture":
-            emit(run_deepseek_fixture(args.comments, args.now, args.response, args.simulate_failure))
+            emit(run_deepseek_fixture(args.comments, args.now, args.response, args.simulate_failure, args.persist_project_id))
         elif args.command == "weibo-build-events-fixture":
-            emit(build_weibo_events_fixture(args.fixture))
+            emit(build_weibo_events_fixture(args.fixture, args.persist_project_id, args.deepseek_response, args.simulate_deepseek_failure))
         elif args.command == "weibo-actions-fixture":
-            emit(build_weibo_actions_fixture(args.accounts, args.posts, args.event_id, args.now))
+            emit(build_weibo_actions_fixture(args.accounts, args.posts, args.event_id, args.now, args.persist_project_id))
         elif args.command == "weibo-backtest-fixture":
-            emit(build_weibo_backtest_fixture(args.fixture))
+            emit(build_weibo_backtest_fixture(args.fixture, args.persist_project_id))
         elif args.command == "weibo-memory-report-fixture":
-            emit(build_weibo_memory_report_fixture(args.fixture, args.question, args.now))
+            emit(build_weibo_memory_report_fixture(args.fixture, args.question, args.now, args.persist_project_id))
         elif args.command == "snapshot":
             emit(snapshot_payload(args.project_id))
         elif args.command == "collect":
@@ -452,7 +495,10 @@ def upsert_post(project_id, platform, post):
                     json.dumps(post.get("raw_json", {}), ensure_ascii=False),
                 ),
             )
-            cur.execute("SELECT id FROM social_posts WHERE platform=%s AND external_id=%s", (platform, post["external_id"]))
+            cur.execute(
+                "SELECT id FROM social_posts WHERE project_id=%s AND platform=%s AND external_id=%s",
+                (project_id, platform, post["external_id"]),
+            )
             return cur.fetchone()["id"]
 
 
@@ -477,7 +523,10 @@ def upsert_comment(project_id, post_id, platform, comment):
                     json.dumps(comment, ensure_ascii=False),
                 ),
             )
-            cur.execute("SELECT id FROM social_comments WHERE platform=%s AND external_id=%s", (platform, external_id))
+            cur.execute(
+                "SELECT id FROM social_comments WHERE project_id=%s AND platform=%s AND external_id=%s",
+                (project_id, platform, external_id),
+            )
             return cur.fetchone()["id"]
 
 
@@ -692,30 +741,229 @@ def weibo_fixture_hello():
     }
 
 
-def weibo_workbench_payload():
+def weibo_workbench_payload(payload_json="{}"):
+    payload = json.loads(payload_json or "{}")
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload("GET /api/weibo/workbench", database)
+    project = project_from_payload(payload)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM discovered_targets
+                WHERE project_id=%s
+                ORDER BY selected_status='selected' DESC, `rank` IS NULL, `rank`, hot_score DESC, id DESC
+                LIMIT 20
+                """,
+                (project["id"],),
+            )
+            targets = cur.fetchall()
+            cur.execute(
+                """
+                SELECT *
+                FROM artist_public_opinion_events
+                WHERE project_id=%s
+                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                LIMIT 20
+                """,
+                (project["id"],),
+            )
+            events = cur.fetchall()
+            cur.execute(
+                """
+                SELECT *
+                FROM publicity_actions
+                WHERE project_id=%s AND confirmation_status='pending'
+                ORDER BY priority DESC, created_at DESC, id DESC
+                LIMIT 20
+                """,
+                (project["id"],),
+            )
+            actions = cur.fetchall()
+            cur.execute(
+                """
+                SELECT id, status, crawler_type, output_path, raw_files, parsed_records, failed_records, collected_posts, collected_comments, created_at
+                FROM collection_tasks
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project["id"],),
+            )
+            latest_task = cur.fetchone()
+            cur.execute("SELECT COUNT(*) AS count FROM social_comments WHERE project_id=%s AND platform='weibo'", (project["id"],))
+            comment_count = cur.fetchone()["count"]
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT sr.comment_id) AS count
+                FROM sentiment_results sr
+                JOIN social_comments c ON c.id=sr.comment_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                """,
+                (project["id"],),
+            )
+            sentiment_count = cur.fetchone()["count"]
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM bot_memory_items
+                WHERE project_id=%s AND source_kind='analysis'
+                """,
+                (project["id"],),
+            )
+            analysis_memory_count = cur.fetchone()["count"]
+            cur.execute("SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s", (project["id"],))
+            action_count = cur.fetchone()["count"]
+            cur.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM action_backtests WHERE project_id=%s) +
+                  (SELECT COUNT(*) FROM bot_memory_items WHERE project_id=%s AND source_kind='backtest') AS count
+                """,
+                (project["id"], project["id"]),
+            )
+            backtest_count = cur.fetchone()["count"]
+    target_payloads = [target_row_to_payload(row) for row in targets]
+    event_payloads = [event_row_to_payload(row) for row in events]
+    action_payloads = [action_row_to_payload(row) for row in actions]
+    progress = {
+        "target_count": len(target_payloads),
+        "comment_count": int(comment_count or 0),
+        "analysis_count": int((sentiment_count or 0) + (analysis_memory_count or 0)),
+        "event_count": len(event_payloads),
+        "action_count": int(action_count or 0),
+        "pending_action_count": len(action_payloads),
+        "backtest_count": int(backtest_count or 0),
+    }
+    data_gaps = workbench_data_gaps(progress, latest_task)
     return {
+        "ok": True,
         "mode": "weibo-agent-mvp",
         "setup": {
             "activePlatform": "weibo",
-            "partialState": "no-data",
+            "partialState": workbench_partial_state(progress),
             "health": health_payload(),
+            "projectId": project["id"],
+            "progress": progress,
+            "latestTask": collection_task_row_to_payload(latest_task) if latest_task else None,
         },
-        "judgments": [],
-        "recommendedTargets": [],
-        "events": [],
-        "pendingActions": [],
-        "dataGaps": [
+        "judgments": workbench_judgments(latest_task, target_payloads, event_payloads, action_payloads),
+        "recommendedTargets": target_payloads,
+        "events": event_payloads,
+        "pendingActions": action_payloads,
+        "dataGaps": data_gaps,
+        "citations": workbench_citations(target_payloads, event_payloads, action_payloads),
+    }
+
+
+def workbench_partial_state(progress):
+    if not progress["target_count"]:
+        return "no-data"
+    if not progress["comment_count"]:
+        return "search-only"
+    if not progress["analysis_count"]:
+        return "detail-without-analysis"
+    if not progress["event_count"]:
+        return "analysis-without-event"
+    if not progress["action_count"]:
+        return "event-without-action"
+    if not progress["backtest_count"]:
+        return "action-without-backtest"
+    return "backtested"
+
+
+def workbench_data_gaps(progress, latest_task):
+    if not progress["target_count"]:
+        return [
             {
                 "code": "weibo_real_data_missing",
                 "message": "No real Weibo targets, comments, events, or actions are available yet.",
                 "nextAction": "Run Weibo discovery after MediaCrawler and Weibo auth are configured.",
             }
-        ],
-        "citations": [],
-    }
+        ]
+    gaps = []
+    if not progress["comment_count"]:
+        gaps.append({
+            "code": "weibo_detail_or_analysis_needed",
+            "message": "Weibo search targets exist, but detail comments or analyzed events are not available yet.",
+            "nextAction": "Select a target, collect detail comments, then run analysis/event creation.",
+        })
+    elif not progress["analysis_count"]:
+        gaps.append({
+            "code": "weibo_analysis_needed",
+            "message": "Weibo detail comments exist, but no analyzed event has been created yet.",
+            "nextAction": "Run comment analysis and event creation.",
+        })
+    elif not progress["event_count"]:
+        gaps.append({
+            "code": "weibo_event_needed",
+            "message": "Weibo comments have analysis records, but no event has crossed the evidence threshold yet.",
+            "nextAction": "Keep monitoring or adjust event evidence thresholds before generating action suggestions.",
+        })
+    if progress["event_count"] and not progress["action_count"]:
+        gaps.append({
+            "code": "weibo_action_needed",
+            "message": "Weibo events exist, but no pending action has been generated yet.",
+            "nextAction": "Generate or log a publicity action before backtesting.",
+        })
+    if progress["action_count"] and not progress["backtest_count"]:
+        gaps.append({
+            "code": "weibo_backtest_needed",
+            "message": "Actions exist; backtest requires confirmed or observed action timing and post-action evidence windows.",
+            "nextAction": "Confirm/log action execution and collect post-action windows.",
+        })
+    if latest_task and latest_task.get("failed_records"):
+        gaps.append({
+            "code": "weibo_adapter_partial",
+            "message": f"{latest_task.get('failed_records')} MediaCrawler records were not parsed.",
+            "nextAction": "Inspect archived JSONL before relying on full coverage.",
+        })
+    if latest_task and latest_task.get("status") == "failed":
+        gaps.append({
+            "code": "weibo_latest_task_failed",
+            "message": "The latest Weibo collection task failed; displayed targets may come from earlier successful discovery.",
+            "nextAction": "Inspect the latest task error and rerun discovery after fixing the runtime issue.",
+        })
+    return gaps
+
+
+def workbench_judgments(latest_task, targets, events, actions):
+    judgments = []
+    if latest_task:
+        judgments.append({
+            "type": "collection_task",
+            "summary": f"Weibo {latest_task.get('crawler_type') or 'collection'} task {latest_task.get('id')} {latest_task.get('status')}.",
+            "evidence_ids": [latest_task.get("id")],
+        })
+    if targets:
+        judgments.append({
+            "type": "target_recommendation",
+            "summary": f"{len(targets)} Weibo targets are ready for selection.",
+            "evidence_ids": [target.get("external_id") or target.get("id") for target in targets[:5]],
+        })
+    if events:
+        judgments.append({
+            "type": "event_watch",
+            "summary": f"{len(events)} Weibo events are available for review.",
+            "evidence_ids": [event.get("id") for event in events[:5]],
+        })
+    if actions:
+        judgments.append({
+            "type": "action_queue",
+            "summary": f"{len(actions)} Weibo actions need confirmation.",
+            "evidence_ids": [action.get("id") for action in actions[:5]],
+        })
+    return judgments
+
+
+def workbench_citations(targets, events, actions):
+    citations = []
+    citations.extend([target.get("external_id") or target.get("id") for target in targets[:10]])
+    citations.extend([event.get("id") for event in events[:10]])
+    citations.extend([action.get("id") for action in actions[:10]])
+    return [item for item in citations if item is not None]
 
 
 def real_weibo_endpoint_payload(endpoint, payload_json="{}", **ids):
@@ -738,6 +986,1919 @@ def real_weibo_endpoint_payload(endpoint, payload_json="{}", **ids):
         "request": {key: value for key, value in ids.items() if value is not None},
     })
     return error
+
+
+def weibo_discovery_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/discovery"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    keyword = payload.get("keyword") or first_project_keyword(project)
+    limit = int(payload.get("limit") or 10)
+    fixture_path = payload.get("fixturePath")
+    if fixture_path:
+        fixture_path, fixture_error = resolve_fixture_path(fixture_path)
+        if fixture_error:
+            return fixture_error
+    task_id = create_weibo_collection_task(
+        project["id"],
+        keyword,
+        limit,
+        "search",
+        output_path=fixture_path,
+        raw_files=[fixture_path] if fixture_path else [],
+    )
+    if not fixture_path:
+        run = {"output_path": None, "raw_files": []}
+        try:
+            run = run_mediacrawler_search(project["id"], task_id, keyword, limit)
+            update_weibo_collection_task_paths(task_id, run.get("output_path"), run.get("raw_files", []))
+            if not run.get("ok"):
+                finish_weibo_collection_task(
+                    task_id,
+                    "failed",
+                    run["error"]["error_type"],
+                    run["error"]["message"],
+                    parsed_records=0,
+                    failed_records=0,
+                    posts=0,
+                    comments=0,
+                )
+                return {
+                    **run["error"],
+                    "task": task_payload(task_id, "weibo", keyword, "search"),
+                    "database": database,
+                }
+            search = parse_weibo_search_files(run["raw_files"], limit)
+        except MediaCrawlerParseError as exc:
+            error = weibo_error(
+                "mediacrawler_parse_failed",
+                "MediaCrawler search JSONL could not be parsed.",
+                str(exc),
+                "Inspect the archived search_contents JSONL and rerun the search task.",
+                docs_anchor="weibo-discovery",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "search"),
+                "database": database,
+            }
+        except Exception as exc:
+            error = weibo_error(
+                "mediacrawler_adapter_failed",
+                "MediaCrawler search adapter failed before persistence.",
+                type(exc).__name__,
+                "Check MediaCrawler output path permissions and worker configuration, then rerun the search task.",
+                docs_anchor="weibo-discovery",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "search"),
+                "database": database,
+            }
+    else:
+        search = parse_weibo_search_fixture(fixture_path, limit)
+    failed_records = int(search.get("failed_records") or 0)
+    try:
+        persisted_targets = persist_discovered_targets(project["id"], search["targets"])
+        task_status = "partial" if failed_records else "succeeded"
+        finish_weibo_collection_task(
+            task_id,
+            task_status,
+            None,
+            None,
+            parsed_records=len(persisted_targets),
+            failed_records=failed_records,
+            posts=len(persisted_targets),
+            comments=0,
+        )
+    except Exception as exc:
+        error = weibo_error(
+            "weibo_target_persist_failed",
+            "Weibo discovered targets could not be persisted.",
+            type(exc).__name__,
+            "Inspect the archived search JSONL and database schema, then rerun the discovery task.",
+            docs_anchor="weibo-discovery",
+        )
+        finish_weibo_collection_task(
+            task_id,
+            "failed",
+            error["error_type"],
+            error["message"],
+            parsed_records=0,
+            failed_records=max(failed_records, 1),
+            posts=0,
+            comments=0,
+        )
+        return {
+            **error,
+            "mode": "weibo-agent-mvp",
+            "database": database,
+            "task": task_payload(task_id, "weibo", keyword, "search"),
+        }
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "status": task_status,
+        "database": database,
+        "task": task_payload(task_id, "weibo", keyword, "search"),
+        "targets": persisted_targets,
+        "persisted_targets": len(persisted_targets),
+        "failed_records": failed_records,
+    }
+
+
+def weibo_targets_payload(payload_json="{}"):
+    endpoint = "GET /api/weibo/targets"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    status = payload.get("selectedStatus")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            if status:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM discovered_targets
+                    WHERE project_id=%s AND selected_status=%s
+                    ORDER BY selected_status='selected' DESC, `rank` IS NULL, `rank`, hot_score DESC, id DESC
+                    """,
+                    (project["id"], status),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM discovered_targets
+                    WHERE project_id=%s
+                    ORDER BY selected_status='selected' DESC, `rank` IS NULL, `rank`, hot_score DESC, id DESC
+                    """,
+                    (project["id"],),
+                )
+            rows = cur.fetchall()
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "database": database,
+        "targets": [target_row_to_payload(row) for row in rows],
+    }
+
+
+def weibo_target_state_payload(payload_json, selected_status):
+    endpoint = "POST /api/weibo/targets/select" if selected_status == "selected" else "POST /api/weibo/targets/ignore"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    target = find_discovered_target(project["id"], payload.get("targetId"))
+    if not target:
+        return weibo_error(
+            "target_not_found",
+            "Selected Weibo target was not found.",
+            "The targetId does not match a persisted discovered target.",
+            "Run discovery first and choose a target from GET /api/weibo/targets.",
+            docs_anchor="weibo-targets",
+        )
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE discovered_targets SET selected_status=%s WHERE id=%s",
+                (selected_status, target["id"]),
+            )
+            cur.execute("SELECT * FROM discovered_targets WHERE id=%s", (target["id"],))
+            updated = cur.fetchone()
+    if selected_status == "selected":
+        write_memory_item(
+            project["id"],
+            "target",
+            updated["id"],
+            updated.get("title") or "Weibo target selected",
+            updated.get("summary") or "Selected Weibo target for detail monitoring.",
+            [updated["id"]],
+            {"selected_status": selected_status, "external_id": updated.get("external_id")},
+            0.55,
+            memory_identity=f"target:{updated['id']}",
+        )
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "target": target_row_to_payload(updated),
+    }
+
+
+def weibo_source_account_upsert_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/source-accounts"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    source_type = payload.get("sourceType") or payload.get("source_type") or "unknown"
+    if source_type not in {"official", "artist", "producer", "marketing", "suspected_matrix", "media", "fan", "organic", "unknown"}:
+        return weibo_error(
+            "invalid_source_type",
+            "Weibo source account type is invalid.",
+            "sourceType is not supported by the MVP source account enum.",
+            "Use official, artist, producer, marketing, suspected_matrix, media, fan, organic, or unknown.",
+            docs_anchor="weibo-source-accounts",
+        )
+    account = {
+        "external_id": payload.get("externalId") or payload.get("external_id"),
+        "profile_url": payload.get("profileUrl") or payload.get("profile_url"),
+        "display_name": payload.get("displayName") or payload.get("display_name"),
+        "source_type": source_type,
+        "confirmed_by_user": bool(payload.get("confirmedByUser") or payload.get("confirmed_by_user")),
+        "match_confidence": float(payload.get("matchConfidence") or payload.get("match_confidence") or 1),
+    }
+    if not account["display_name"]:
+        return weibo_error(
+            "source_account_display_name_required",
+            "Weibo source account display name is required.",
+            "The source account payload did not include displayName.",
+            "Retry with displayName and a stable externalId or profileUrl when available.",
+            docs_anchor="weibo-source-accounts",
+        )
+    account_ids = persist_source_accounts(project["id"], [account])
+    account_id = account_ids["all_ids"][0]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM source_accounts WHERE id=%s", (account_id,))
+            row = cur.fetchone()
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "account": source_account_row_to_payload(row),
+    }
+
+
+def weibo_collect_target_payload(payload_json, target_id):
+    endpoint = "POST /api/weibo/targets/:id/collect-comments"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database, target_id=target_id)
+    project = project_from_payload(payload)
+    target = find_discovered_target(project["id"], target_id)
+    if not target:
+        return weibo_error(
+            "target_not_found",
+            "Selected Weibo target was not found.",
+            "The targetId does not match a persisted discovered target.",
+            "Run discovery first and choose a target from GET /api/weibo/targets.",
+            docs_anchor="weibo-targets",
+        )
+    if target["selected_status"] != "selected":
+        return {
+            **weibo_error(
+                "target_not_selected",
+                "Only selected Weibo targets can collect detail comments.",
+                f"Target {target_id} is {target['selected_status']}.",
+                "Select the target before running collect-comments.",
+                docs_anchor="weibo-target-selection",
+            ),
+            "target_selected_state": target["selected_status"],
+            "target": target_row_to_payload(target),
+        }
+    locator = db.jloads(target.get("target_locator"), {})
+    locator_check = validate_weibo_target_locator(locator)
+    keyword = target.get("keyword") or first_project_keyword(project)
+    fixture_path = payload.get("fixturePath")
+    if fixture_path:
+        fixture_path, fixture_error = resolve_fixture_path(fixture_path)
+        if fixture_error:
+            return fixture_error
+    task_id = create_weibo_collection_task(
+        project["id"],
+        keyword,
+        int(payload.get("limit") or 0),
+        "detail",
+        target_id=target["id"],
+        output_path=fixture_path,
+        raw_files=[fixture_path] if fixture_path else [],
+    )
+    try:
+        link_target_collection(target["id"], task_id)
+    except Exception as exc:
+        error = weibo_error(
+            "target_collection_link_failed",
+            "Weibo target detail task could not be linked to the selected target.",
+            type(exc).__name__,
+            "Check target_collection_links constraints and rerun the detail task.",
+            docs_anchor="weibo-detail",
+        )
+        finish_weibo_collection_task(
+            task_id,
+            "failed",
+            error["error_type"],
+            error["message"],
+            parsed_records=0,
+            failed_records=1,
+            posts=0,
+            comments=0,
+        )
+        return {
+            **error,
+            "mode": "weibo-agent-mvp",
+            "database": database,
+            "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+        }
+    if not locator_check.get("ok"):
+        finish_weibo_collection_task(
+            task_id,
+            "failed",
+            locator_check.get("error_type", "target_detail_unsupported"),
+            locator_check.get("message"),
+            parsed_records=0,
+            failed_records=1,
+            posts=0,
+            comments=0,
+        )
+        locator_check.update({"task": task_payload(task_id, "weibo", keyword, "detail", target["id"])})
+        return locator_check
+    if not fixture_path:
+        run = {"output_path": None, "raw_files": []}
+        try:
+            detail_locator = locator_check["detail_locator"]
+            run = run_mediacrawler_detail(
+                project["id"],
+                task_id,
+                keyword,
+                detail_locator["weibo_mid"],
+                int(payload.get("limit") or 50),
+            )
+            update_weibo_collection_task_paths(task_id, run.get("output_path"), run.get("raw_files", []))
+            if not run.get("ok"):
+                finish_weibo_collection_task(
+                    task_id,
+                    "failed",
+                    run["error"]["error_type"],
+                    run["error"]["message"],
+                    parsed_records=0,
+                    failed_records=0,
+                    posts=0,
+                    comments=0,
+                )
+                return {
+                    **run["error"],
+                    "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+                    "database": database,
+                }
+            detail = parse_weibo_detail_files(run["raw_files"], str(target["id"]), str(task_id))
+        except MediaCrawlerParseError as exc:
+            error = weibo_error(
+                "mediacrawler_detail_parse_failed",
+                "MediaCrawler detail JSONL could not be parsed.",
+                str(exc),
+                "Inspect the archived detail_contents/detail_comments JSONL and rerun the detail task.",
+                docs_anchor="weibo-detail",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+                "database": database,
+            }
+        except Exception as exc:
+            error = weibo_error(
+                "mediacrawler_detail_adapter_failed",
+                "MediaCrawler detail adapter failed before persistence.",
+                type(exc).__name__,
+                "Check MediaCrawler detail output path permissions and worker configuration, then rerun the task.",
+                docs_anchor="weibo-detail",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+                "database": database,
+            }
+    else:
+        detail = parse_weibo_detail_fixture(fixture_path, str(target["id"]), str(task_id))
+    try:
+        persisted_posts, post_ids_by_external = persist_detail_posts(project["id"], detail["posts"])
+        persisted_comments = persist_detail_comments(project["id"], detail["comments"], post_ids_by_external)
+        finish_weibo_collection_task(
+            task_id,
+            detail["status"],
+            "adapter_parse_failed" if detail["failed_records"] else None,
+            json.dumps(detail["errors"], ensure_ascii=False) if detail["errors"] else None,
+            parsed_records=detail["parsed_records"],
+            failed_records=detail["failed_records"],
+            posts=persisted_posts,
+            comments=persisted_comments,
+        )
+    except Exception as exc:
+        error = weibo_error(
+            "weibo_detail_persist_failed",
+            "Weibo detail posts or comments could not be persisted.",
+            type(exc).__name__,
+            "Inspect the archived detail JSONL and database schema, then rerun the detail task.",
+            docs_anchor="weibo-detail",
+        )
+        finish_weibo_collection_task(
+            task_id,
+            "failed",
+            error["error_type"],
+            error["message"],
+            parsed_records=0,
+            failed_records=max(int(detail.get("failed_records") or 0), 1),
+            posts=0,
+            comments=0,
+        )
+        return {
+            **error,
+            "mode": "weibo-agent-mvp",
+            "database": database,
+            "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+        }
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "database": database,
+        "status": detail["status"],
+        "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+        "target": target_row_to_payload(target),
+        "parsed_records": detail["parsed_records"],
+        "failed_records": detail["failed_records"],
+        "persisted_posts": persisted_posts,
+        "persisted_comments": persisted_comments,
+        "errors": detail["errors"],
+    }
+
+
+def project_from_payload(payload):
+    project = get_project(payload.get("projectId"))
+    if project:
+        return project
+    return get_project(db.ensure_default_project())
+
+
+def strict_project_from_payload(payload):
+    if payload.get("projectId") is None:
+        return project_from_payload(payload)
+    return get_project(payload.get("projectId"))
+
+
+def first_project_keyword(project):
+    keywords = project.get("keywords") or db.DEFAULT_PROJECT["keywords"]
+    return keywords[0] if keywords else db.DEFAULT_PROJECT["keywords"][0]
+
+
+def resolve_fixture_path(fixture_path):
+    if os.environ.get("WEIBO_FIXTURE_MODE") != "1":
+        return None, weibo_error(
+            "invalid_fixture_path",
+            "Fixture paths are only accepted in explicit fixture mode.",
+            "WEIBO_FIXTURE_MODE is not enabled for this worker process.",
+            "Do not pass fixturePath through production HTTP APIs; use local fixture tests instead.",
+            docs_anchor="weibo-fixtures",
+        )
+    root = Path.cwd().resolve()
+    allowed_root = (root / "test" / "fixtures").resolve()
+    candidate = (root / fixture_path).resolve()
+    if not candidate.is_file() or allowed_root not in [candidate, *candidate.parents]:
+        return None, weibo_error(
+            "invalid_fixture_path",
+            "Fixture path is outside the allowed test fixture directory.",
+            f"{fixture_path} is not under test/fixtures.",
+            "Use a fixture under test/fixtures for local persistence verification.",
+            docs_anchor="weibo-fixtures",
+        )
+    return str(candidate), None
+
+
+def create_weibo_collection_task(project_id, keyword, limit, crawler_type, target_id=None, output_path=None, raw_files=None):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO collection_tasks(
+                  project_id, platform, keyword, status, requested_limit, started_at,
+                  crawler_engine, crawler_type, output_path, raw_files, target_id
+                )
+                VALUES (%s,'weibo',%s,'running',%s,NOW(),%s,%s,%s,%s,%s)
+                """,
+                (
+                    project_id,
+                    keyword,
+                    int(limit or 0),
+                    "fixture" if output_path else "mediacrawler",
+                    crawler_type,
+                    output_path,
+                    json.dumps(raw_files or [], ensure_ascii=False),
+                    target_id,
+                ),
+            )
+            return cur.lastrowid
+
+
+def finish_weibo_collection_task(task_id, status, error_type, error_message, parsed_records, failed_records, posts, comments):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE collection_tasks
+                SET status=%s, error_type=%s, error_message=%s, parsed_records=%s,
+                    failed_records=%s, collected_posts=%s, collected_comments=%s, finished_at=NOW()
+                WHERE id=%s
+                """,
+                (status, error_type, error_message, parsed_records, failed_records, posts, comments, task_id),
+            )
+
+
+def update_weibo_collection_task_paths(task_id, output_path, raw_files):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE collection_tasks SET output_path=%s, raw_files=%s WHERE id=%s",
+                (output_path, json.dumps(raw_files or [], ensure_ascii=False), task_id),
+            )
+
+
+def task_payload(task_id, platform, keyword, crawler_type, target_id=None):
+    return {
+        "id": task_id,
+        "platform": platform,
+        "keyword": keyword,
+        "crawler_type": crawler_type,
+        "target_id": target_id,
+    }
+
+
+def run_mediacrawler_search(project_id, task_id, keyword, limit):
+    repo_root = Path.cwd()
+    home_value = os.environ.get("MEDIACRAWLER_HOME", "")
+    python_value = os.environ.get("MEDIACRAWLER_PYTHON", "")
+    home = resolve_repo_path(home_value)
+    python = resolve_repo_path(python_value)
+    output_dir = mediacrawler_task_output_dir(project_id, task_id, keyword)
+    output_path = repo_relative(output_dir, repo_root)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_output_unwritable",
+                "MediaCrawler output directory is not writable.",
+                type(exc).__name__,
+                "Choose a writable MEDIACRAWLER_OUTPUT_DIR and rerun the search task.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    if not home_value or not home.exists() or not home.is_dir():
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_missing",
+                "MediaCrawler home is unavailable.",
+                f"MEDIACRAWLER_HOME does not point to a directory: {home}",
+                "Set MEDIACRAWLER_HOME to your local MediaCrawler checkout.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    if not python_value or not python.exists() or not os.access(python, os.X_OK):
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_python_missing",
+                "MediaCrawler python executable is unavailable.",
+                f"MEDIACRAWLER_PYTHON does not point to an executable file: {python}",
+                "Set MEDIACRAWLER_PYTHON to the Python executable used by MediaCrawler.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    cookie_header, cookie_error = mediacrawler_cookie_header()
+    if cookie_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cookie_error,
+        }
+    cdp_port, cdp_error = mediacrawler_cdp_port()
+    if cdp_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cdp_error,
+        }
+    timeout_seconds, timeout_error = mediacrawler_timeout_seconds()
+    if timeout_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": timeout_error,
+        }
+    max_notes = max(int(limit or 0), 0)
+    command = [
+        str(python),
+        "-c",
+        MEDIACRAWLER_BOOTSTRAP,
+        "--platform",
+        "wb",
+        "--lt",
+        "cookie",
+        "--type",
+        "search",
+        "--keywords",
+        keyword,
+        "--save_data_option",
+        "jsonl",
+        "--save_data_path",
+        str(output_dir),
+        "--crawler_max_notes_count",
+        str(max_notes),
+        "--get_comment",
+        "false",
+        "--max_comments_count_singlenotes",
+        "0",
+    ]
+    env = mediacrawler_subprocess_env({
+        "MEDIACRAWLER_CDP_PORT": str(cdp_port),
+        "SAVE_DATA_OPTION": "jsonl",
+        "SAVE_DATA_PATH": str(output_dir),
+        "CRAWLER_MAX_NOTES_COUNT": str(max_notes),
+    })
+    try:
+        result = subprocess.run(
+            command,
+            cwd=home,
+            env=env,
+            capture_output=True,
+            text=True,
+            input=json.dumps({"cookies": cookie_header}),
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_timeout",
+                "MediaCrawler search timed out.",
+                f"timeout_seconds={exc.timeout}",
+                "Retry after checking Weibo login state, CDP, and MediaCrawler runtime health.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    raw_files = sorted(repo_relative(path, repo_root) for path in output_dir.rglob("*.jsonl") if path.is_file())
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": raw_files,
+            "error": weibo_error(
+                "mediacrawler_search_failed",
+                "MediaCrawler Weibo search failed.",
+                f"exit_code={result.returncode}",
+                "Check MediaCrawler configuration, Weibo login state, and the generated output directory.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    if not raw_files:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_jsonl_missing",
+                "MediaCrawler search did not produce JSONL output.",
+                f"No .jsonl files were found under {output_path}.",
+                "Check MediaCrawler SAVE_DATA_OPTION/SAVE_DATA_PATH and rerun the search task.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "raw_files": raw_files,
+    }
+
+
+def run_mediacrawler_detail(project_id, task_id, keyword, detail_id, comment_limit):
+    repo_root = Path.cwd()
+    home_value = os.environ.get("MEDIACRAWLER_HOME", "")
+    python_value = os.environ.get("MEDIACRAWLER_PYTHON", "")
+    home = resolve_repo_path(home_value)
+    python = resolve_repo_path(python_value)
+    output_dir = mediacrawler_task_output_dir(project_id, task_id, keyword)
+    output_path = repo_relative(output_dir, repo_root)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_output_unwritable",
+                "MediaCrawler output directory is not writable.",
+                type(exc).__name__,
+                "Choose a writable MEDIACRAWLER_OUTPUT_DIR and rerun the detail task.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    if not home_value or not home.exists() or not home.is_dir():
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_missing",
+                "MediaCrawler home is unavailable.",
+                f"MEDIACRAWLER_HOME does not point to a directory: {home}",
+                "Set MEDIACRAWLER_HOME to your local MediaCrawler checkout.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    if not python_value or not python.exists() or not os.access(python, os.X_OK):
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_python_missing",
+                "MediaCrawler python executable is unavailable.",
+                f"MEDIACRAWLER_PYTHON does not point to an executable file: {python}",
+                "Set MEDIACRAWLER_PYTHON to the Python executable used by MediaCrawler.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    cookie_header, cookie_error = mediacrawler_cookie_header()
+    if cookie_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cookie_error,
+        }
+    cdp_port, cdp_error = mediacrawler_cdp_port()
+    if cdp_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cdp_error,
+        }
+    timeout_seconds, timeout_error = mediacrawler_timeout_seconds()
+    if timeout_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": timeout_error,
+        }
+    max_comments = max(int(comment_limit or 0), 0)
+    command = [
+        str(python),
+        "-c",
+        MEDIACRAWLER_BOOTSTRAP,
+        "--platform",
+        "wb",
+        "--lt",
+        "cookie",
+        "--type",
+        "detail",
+        "--specified_id",
+        str(detail_id),
+        "--save_data_option",
+        "jsonl",
+        "--save_data_path",
+        str(output_dir),
+        "--crawler_max_notes_count",
+        "1",
+        "--get_comment",
+        "true",
+        "--max_comments_count_singlenotes",
+        str(max_comments),
+    ]
+    env = mediacrawler_subprocess_env({
+        "MEDIACRAWLER_CDP_PORT": str(cdp_port),
+        "SAVE_DATA_OPTION": "jsonl",
+        "SAVE_DATA_PATH": str(output_dir),
+        "CRAWLER_MAX_NOTES_COUNT": "1",
+    })
+    try:
+        result = subprocess.run(
+            command,
+            cwd=home,
+            env=env,
+            capture_output=True,
+            text=True,
+            input=json.dumps({"cookies": cookie_header}),
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_timeout",
+                "MediaCrawler detail timed out.",
+                f"timeout_seconds={exc.timeout}",
+                "Retry after checking Weibo login state, CDP, and MediaCrawler runtime health.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    raw_files = sorted(repo_relative(path, repo_root) for path in output_dir.rglob("*.jsonl") if path.is_file())
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": raw_files,
+            "error": weibo_error(
+                "mediacrawler_detail_failed",
+                "MediaCrawler Weibo detail failed.",
+                f"exit_code={result.returncode}",
+                "Check MediaCrawler configuration, Weibo login state, and the generated output directory.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    if not raw_files:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_jsonl_missing",
+                "MediaCrawler detail did not produce JSONL output.",
+                f"No .jsonl files were found under {output_path}.",
+                "Check MediaCrawler SAVE_DATA_OPTION/SAVE_DATA_PATH and rerun the detail task.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "raw_files": raw_files,
+    }
+
+
+def mediacrawler_cookie_header():
+    cookie_file = resolve_repo_path(os.environ.get("WEIBO_COOKIE_FILE", "config/cookies/weibo.json"))
+    if not cookie_file.exists() or not cookie_file.is_file():
+        return None, weibo_error(
+            "auth_required",
+            "Weibo auth cookie is missing.",
+            "WEIBO_COOKIE_FILE does not point to an existing cookie file.",
+            "Log in to Weibo, export cookies to WEIBO_COOKIE_FILE, and rerun the search task.",
+            docs_anchor="weibo-discovery",
+        )
+    try:
+        data = json.loads(cookie_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            f"Cookie file could not be parsed: {type(exc).__name__}.",
+            "Refresh WEIBO_COOKIE_FILE with a valid cookie list or Playwright storageState JSON.",
+            docs_anchor="weibo-discovery",
+        )
+    if isinstance(data, str):
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            "Raw cookie header strings are not accepted because domains cannot be filtered safely.",
+            "Refresh WEIBO_COOKIE_FILE with a browser cookie list or Playwright storageState JSON.",
+            docs_anchor="weibo-discovery",
+        )
+    cookies = data.get("cookies") if isinstance(data, dict) else data
+    if not isinstance(cookies, list):
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            "Cookie file must be a cookie list or a Playwright storageState JSON object.",
+            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            docs_anchor="weibo-discovery",
+        )
+    parts = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        if not is_weibo_cookie_domain(cookie.get("domain")):
+            continue
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if name and value is not None:
+            parts.append(f"{name}={value}")
+    cookie_header = "; ".join(parts)
+    if not cookie_header:
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            "Cookie file did not contain any usable cookie name/value pairs.",
+            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            docs_anchor="weibo-discovery",
+        )
+    return cookie_header, None
+
+
+def is_weibo_cookie_domain(domain):
+    normalized = str(domain or "").strip().lower().lstrip(".")
+    return normalized in {"weibo.com", "weibo.cn"} or normalized.endswith(".weibo.com") or normalized.endswith(".weibo.cn")
+
+
+def mediacrawler_cdp_port():
+    raw = os.environ.get("MEDIACRAWLER_CDP_PORT", "9222") or "9222"
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, weibo_error(
+            "chrome_cdp_port_invalid",
+            "Chrome CDP port configuration is invalid.",
+            "MEDIACRAWLER_CDP_PORT must be an integer.",
+            "Set MEDIACRAWLER_CDP_PORT to the port used by Chrome remote debugging.",
+            docs_anchor="weibo-discovery",
+        )
+    if value <= 0 or value > 65535:
+        return None, weibo_error(
+            "chrome_cdp_port_invalid",
+            "Chrome CDP port configuration is invalid.",
+            "MEDIACRAWLER_CDP_PORT must be between 1 and 65535.",
+            "Set MEDIACRAWLER_CDP_PORT to the port used by Chrome remote debugging.",
+            docs_anchor="weibo-discovery",
+        )
+    return value, None
+
+
+def mediacrawler_timeout_seconds():
+    raw = os.environ.get("MEDIACRAWLER_TIMEOUT_SECONDS", "180") or "180"
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, weibo_error(
+            "mediacrawler_timeout_invalid",
+            "MediaCrawler timeout configuration is invalid.",
+            "MEDIACRAWLER_TIMEOUT_SECONDS must be a positive integer.",
+            "Set MEDIACRAWLER_TIMEOUT_SECONDS to a positive integer number of seconds.",
+            docs_anchor="weibo-discovery",
+        )
+    if value <= 0:
+        return None, weibo_error(
+            "mediacrawler_timeout_invalid",
+            "MediaCrawler timeout configuration is invalid.",
+            "MEDIACRAWLER_TIMEOUT_SECONDS must be greater than zero.",
+            "Set MEDIACRAWLER_TIMEOUT_SECONDS to a positive integer number of seconds.",
+            docs_anchor="weibo-discovery",
+        )
+    return value, None
+
+
+def mediacrawler_subprocess_env(extra):
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PYTHONUNBUFFERED": "1",
+    }
+    if os.environ.get("LC_ALL"):
+        env["LC_ALL"] = os.environ["LC_ALL"]
+    if os.environ.get("MEDIACRAWLER_CDP_PORT"):
+        env["MEDIACRAWLER_CDP_PORT"] = os.environ["MEDIACRAWLER_CDP_PORT"]
+    env.update(extra)
+    return env
+
+
+def resolve_repo_path(value):
+    path = Path(value or "").expanduser()
+    if path.is_absolute():
+        return path
+    return (Path.cwd() / path).resolve()
+
+
+def mediacrawler_task_output_dir(project_id, task_id, keyword):
+    base = resolve_repo_path(os.environ.get("MEDIACRAWLER_OUTPUT_DIR", "storage/mediacrawler"))
+    return base / str(project_id) / str(task_id) / "weibo" / keyword_slug(keyword)
+
+
+def keyword_slug(keyword):
+    raw = str(keyword or "keyword").strip().lower()
+    slug = re.sub(r"-+", "-", "".join(char if char.isascii() and char.isalnum() else "-" for char in raw)).strip("-")
+    if not slug:
+        slug = "keyword-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+    return slug[:80]
+
+
+def repo_relative(path, repo_root):
+    path = Path(path).resolve()
+    try:
+        return str(path.relative_to(repo_root))
+    except ValueError:
+        return str(path)
+
+
+def persist_discovered_targets(project_id, targets):
+    persisted = []
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for target in targets:
+                source_match = match_persisted_source_account(
+                    cur,
+                    project_id,
+                    target.get("author_external_id"),
+                    target.get("author_url"),
+                    (target.get("raw_json") or {}).get("screen_name") or (target.get("raw_json") or {}).get("author_name") or (target.get("raw_json") or {}).get("nickname"),
+                )
+                values = (
+                    target["target_type"],
+                    target.get("external_id"),
+                    target.get("url"),
+                    target.get("weibo_mid"),
+                    target.get("author_external_id"),
+                    target.get("author_url"),
+                    target.get("title"),
+                    target.get("summary"),
+                    target.get("keyword") or "",
+                    target.get("rank"),
+                    target.get("hot_score") or 0,
+                    json.dumps(target.get("target_locator", {}), ensure_ascii=False),
+                    target.get("content_fingerprint"),
+                    json.dumps(target.get("raw_json", {}), ensure_ascii=False),
+                    json.dumps(target.get("recommendation_metadata", {}), ensure_ascii=False),
+                    target.get("selected_status", "pending"),
+                    source_match["source_type"],
+                    source_match["source_match_method"],
+                    source_match["source_match_confidence"],
+                )
+                cur.execute(
+                    """
+                    INSERT INTO discovered_targets(
+                      project_id, platform, target_type, external_id, url, weibo_mid,
+                      author_external_id, author_url, title, summary, keyword, `rank`,
+                      hot_score, target_locator, content_fingerprint, raw_json,
+                      recommendation_metadata, selected_status, source_type,
+                      source_match_method, source_match_confidence
+                    )
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      target_type=VALUES(target_type),
+                      url=VALUES(url),
+                      weibo_mid=VALUES(weibo_mid),
+                      author_external_id=VALUES(author_external_id),
+                      author_url=VALUES(author_url),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      keyword=VALUES(keyword),
+                      `rank`=VALUES(`rank`),
+                      hot_score=VALUES(hot_score),
+                      target_locator=VALUES(target_locator),
+                      content_fingerprint=VALUES(content_fingerprint),
+                      raw_json=VALUES(raw_json),
+                      recommendation_metadata=VALUES(recommendation_metadata),
+                      selected_status=IF(selected_status IN ('selected','ignored'), selected_status, VALUES(selected_status)),
+                      source_type=VALUES(source_type),
+                      source_match_method=VALUES(source_match_method),
+                      source_match_confidence=VALUES(source_match_confidence)
+                    """,
+                    (project_id, *values),
+                )
+                target_db_id = cur.lastrowid
+                cur.execute("SELECT * FROM discovered_targets WHERE id=%s", (target_db_id,))
+                persisted.append(target_row_to_payload(cur.fetchone()))
+    return persisted
+
+
+def find_discovered_target(project_id, target_id):
+    if target_id is None:
+        return None
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM discovered_targets
+                WHERE project_id=%s AND (CAST(id AS CHAR)=%s OR external_id=%s)
+                ORDER BY id
+                LIMIT 1
+                """,
+                (project_id, str(target_id), str(target_id)),
+            )
+            return cur.fetchone()
+
+
+def target_row_to_payload(row):
+    return {
+        "id": row["id"],
+        "targetId": str(row["id"]),
+        "platform": row["platform"],
+        "target_type": row["target_type"],
+        "external_id": row.get("external_id"),
+        "url": row.get("url"),
+        "weibo_mid": row.get("weibo_mid"),
+        "author_external_id": row.get("author_external_id"),
+        "author_url": row.get("author_url"),
+        "title": row.get("title"),
+        "summary": row.get("summary"),
+        "keyword": row.get("keyword"),
+        "rank": row.get("rank"),
+        "hot_score": float(row.get("hot_score") or 0),
+        "target_locator": db.jloads(row.get("target_locator"), {}),
+        "content_fingerprint": row.get("content_fingerprint"),
+        "raw_json": db.jloads(row.get("raw_json"), {}),
+        "recommendation_metadata": db.jloads(row.get("recommendation_metadata"), {}),
+        "selected_status": row.get("selected_status"),
+        "source_type": row.get("source_type", "unknown"),
+        "source_match_method": row.get("source_match_method", "unknown"),
+        "source_match_confidence": float(row.get("source_match_confidence") or 0),
+    }
+
+
+def collection_task_row_to_payload(row):
+    raw_files = db.jloads(row.get("raw_files"), [])
+    return {
+        "id": row["id"],
+        "status": row.get("status"),
+        "crawler_type": row.get("crawler_type"),
+        "has_archive": bool(row.get("output_path") or raw_files),
+        "raw_file_count": len(raw_files),
+        "parsed_records": int(row.get("parsed_records") or 0),
+        "failed_records": int(row.get("failed_records") or 0),
+        "collected_posts": int(row.get("collected_posts") or 0),
+        "collected_comments": int(row.get("collected_comments") or 0),
+        "created_at": iso_or_none(row.get("created_at")),
+    }
+
+
+def event_row_to_payload(row):
+    return {
+        "id": row["id"],
+        "platform": row["platform"],
+        "event_type": row.get("event_type"),
+        "title": row.get("title"),
+        "trigger_summary": row.get("trigger_summary"),
+        "related_artists": db.jloads(row.get("related_artists"), []),
+        "status": row.get("status"),
+        "risk_level": row.get("risk_level"),
+        "event_score": float(row.get("event_score") or 0),
+        "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+        "timeline": db.jloads(row.get("timeline_json"), []),
+        "impact_assessment": row.get("impact_assessment"),
+        "recommended_actions": db.jloads(row.get("recommended_actions"), []),
+        "first_seen_at": iso_or_none(row.get("first_seen_at")),
+        "last_seen_at": iso_or_none(row.get("last_seen_at")),
+    }
+
+
+def link_target_collection(target_id, task_id):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT IGNORE INTO target_collection_links(target_id, collection_task_id, link_type)
+                VALUES (%s,%s,'detail')
+                """,
+                (target_id, task_id),
+            )
+
+
+def persist_detail_posts(project_id, posts):
+    post_ids_by_external = {}
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for post in posts:
+                source_match = match_persisted_source_account(
+                    cur,
+                    project_id,
+                    post.get("source_account_external_id"),
+                    post.get("source_account_url"),
+                    post.get("author_name"),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO social_posts(
+                      project_id, platform, external_id, url, author_name, title, content,
+                      keyword, engagement, raw_json, source_account_external_id,
+                      source_account_url, source_type, source_match_method,
+                      source_match_confidence, content_fingerprint
+                    )
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      url=VALUES(url),
+                      author_name=VALUES(author_name),
+                      title=VALUES(title),
+                      content=VALUES(content),
+                      keyword=VALUES(keyword),
+                      engagement=VALUES(engagement),
+                      raw_json=VALUES(raw_json),
+                      source_account_external_id=VALUES(source_account_external_id),
+                      source_account_url=VALUES(source_account_url),
+                      source_type=VALUES(source_type),
+                      source_match_method=VALUES(source_match_method),
+                      source_match_confidence=VALUES(source_match_confidence),
+                      content_fingerprint=VALUES(content_fingerprint)
+                    """,
+                    (
+                        project_id,
+                        post["external_id"],
+                        post.get("url"),
+                        post.get("author_name"),
+                        post.get("title"),
+                        post.get("content") or "",
+                        post.get("keyword") or "",
+                        int(post.get("engagement") or 0),
+                        json.dumps(post.get("raw_json", {}), ensure_ascii=False),
+                        post.get("source_account_external_id"),
+                        post.get("source_account_url"),
+                        source_match["source_type"],
+                        source_match["source_match_method"],
+                        source_match["source_match_confidence"],
+                        post.get("content_fingerprint"),
+                    ),
+                )
+                cur.execute(
+                    "SELECT id FROM social_posts WHERE project_id=%s AND platform='weibo' AND external_id=%s",
+                    (project_id, post["external_id"]),
+                )
+                post_ids_by_external[post["external_id"]] = cur.fetchone()["id"]
+    return len(post_ids_by_external), post_ids_by_external
+
+
+def match_persisted_source_account(cur, project_id, author_external_id=None, author_url=None, display_name=None):
+    if author_external_id:
+        cur.execute(
+            """
+            SELECT external_id, profile_url, display_name, source_type
+            FROM source_accounts
+            WHERE project_id=%s AND platform='weibo' AND external_id=%s
+            ORDER BY confirmed_by_user DESC, id
+            LIMIT 1
+            """,
+            (project_id, author_external_id),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "source_type": row["source_type"],
+                "source_match_method": "stable_id",
+                "source_match_confidence": 1,
+            }
+    if author_url:
+        cur.execute(
+            """
+            SELECT external_id, profile_url, display_name, source_type
+            FROM source_accounts
+            WHERE project_id=%s AND platform='weibo' AND profile_url=%s
+            ORDER BY confirmed_by_user DESC, id
+            LIMIT 1
+            """,
+            (project_id, author_url),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "source_type": row["source_type"],
+                "source_match_method": "stable_url",
+                "source_match_confidence": 0.95,
+            }
+    if author_external_id or author_url:
+        return {
+            "source_type": "unknown",
+            "source_match_method": "stable_unmatched",
+            "source_match_confidence": 0.2,
+        }
+    if display_name:
+        cur.execute(
+            """
+            SELECT external_id, profile_url, display_name, source_type
+            FROM source_accounts
+            WHERE project_id=%s AND platform='weibo' AND display_name=%s
+            ORDER BY confirmed_by_user DESC, id
+            LIMIT 1
+            """,
+            (project_id, display_name),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "source_type": row["source_type"],
+                "source_match_method": "display_name",
+                "source_match_confidence": 0.55,
+            }
+    return dict(SOURCE_MATCH_UNKNOWN)
+
+
+def persist_detail_comments(project_id, comments, post_ids_by_external):
+    persisted = 0
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for comment in comments:
+                post_id = post_ids_by_external.get(comment.get("post_external_id"))
+                if not post_id:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO social_comments(
+                      post_id, project_id, platform, external_id, author_name, content,
+                      like_count, raw_json, source_account_external_id,
+                      content_fingerprint, comment_weight, reply_count
+                    )
+                    VALUES (%s,%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      post_id=VALUES(post_id),
+                      content=VALUES(content),
+                      like_count=VALUES(like_count),
+                      raw_json=VALUES(raw_json),
+                      source_account_external_id=VALUES(source_account_external_id),
+                      content_fingerprint=VALUES(content_fingerprint),
+                      comment_weight=VALUES(comment_weight),
+                      reply_count=VALUES(reply_count)
+                    """,
+                    (
+                        post_id,
+                        project_id,
+                        comment["external_id"],
+                        comment.get("author_name"),
+                        comment.get("content") or "",
+                        int(comment.get("like_count") or 0),
+                        json.dumps(comment.get("raw_json", {}), ensure_ascii=False),
+                        comment.get("source_account_external_id"),
+                        comment.get("content_fingerprint"),
+                        float(comment.get("comment_weight") or 1),
+                        int(comment.get("reply_count") or 0),
+                    ),
+                )
+                persisted += 1
+    return persisted
+
+
+def weibo_actions_pending_payload(payload_json="{}"):
+    endpoint = "GET /api/weibo/actions/pending"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = strict_project_from_payload(payload)
+    if not project:
+        return weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The request projectId does not match an existing monitor project.",
+            "Refresh the project context and retry.",
+            docs_anchor="weibo-project",
+        )
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM publicity_actions
+                WHERE project_id=%s AND confirmation_status='pending'
+                ORDER BY priority DESC, created_at DESC, id DESC
+                """,
+                (project["id"],),
+            )
+            actions = cur.fetchall()
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "actions": [action_row_to_payload(action) for action in actions],
+    }
+
+
+def weibo_action_confirm_payload(payload_json, action_id):
+    endpoint = "PATCH /api/weibo/actions/:id/confirmation"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database, action_id=action_id)
+    status = payload.get("confirmationStatus") or payload.get("confirmation_status")
+    if status not in {"confirmed", "rejected", "partial", "uncertain"}:
+        return weibo_error(
+            "invalid_confirmation_status",
+            "Action confirmation status is invalid.",
+            "confirmationStatus must be confirmed, rejected, partial, or uncertain.",
+            "Retry with one of the supported confirmation statuses.",
+            docs_anchor="weibo-action-confirmation",
+        )
+    confirmation_note = str(payload.get("note") or payload.get("confirmation_note") or "").strip()
+    effective_at = mysql_timestamp(payload.get("effectiveAt") or payload.get("effective_at"))
+    project = strict_project_from_payload(payload)
+    if not project:
+        return weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The request projectId does not match an existing monitor project.",
+            "Refresh the project context and retry.",
+            docs_anchor="weibo-project",
+        )
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM publicity_actions WHERE id=%s AND project_id=%s", (action_id, project["id"]))
+            before = cur.fetchone()
+            if not before:
+                return weibo_error(
+                    "action_not_found",
+                    "Weibo publicity action was not found.",
+                    "The action id does not match a persisted action.",
+                    "Refresh pending actions and retry.",
+                    docs_anchor="weibo-action-confirmation",
+                )
+            cur.execute(
+                """
+                UPDATE publicity_actions
+                SET confirmation_status=%s,
+                    confirmed_at=NOW(),
+                    effective_at=COALESCE(%s, effective_at)
+                WHERE id=%s AND project_id=%s AND confirmation_status='pending'
+                """,
+                (status, effective_at, action_id, project["id"]),
+            )
+            changed = cur.rowcount
+            cur.execute("SELECT * FROM publicity_actions WHERE id=%s AND project_id=%s", (action_id, project["id"]))
+            updated = cur.fetchone()
+            if changed == 0:
+                return weibo_error(
+                    "action_already_confirmed",
+                    "Weibo publicity action was already confirmed.",
+                    f"The action is currently {updated.get('confirmation_status') if updated else 'missing'} and cannot be overwritten.",
+                    "Refresh pending actions before applying another confirmation.",
+                    docs_anchor="weibo-action-confirmation",
+                )
+    write_memory_item(
+        updated["project_id"],
+        "action",
+        updated["id"],
+        f"Weibo action {status}",
+        confirmation_note or updated.get("content_summary") or updated.get("reason") or "User updated a Weibo action confirmation.",
+        [updated["id"]],
+        {
+            "from_status": before.get("confirmation_status"),
+            "to_status": status,
+            "confirmation_note": confirmation_note,
+        },
+        0.65,
+    )
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "action": action_row_to_payload(updated),
+    }
+
+
+def action_row_to_payload(row):
+    return {
+        "id": row["id"],
+        "platform": row["platform"],
+        "related_event_id": row.get("related_event_id"),
+        "related_target_id": row.get("related_target_id"),
+        "source": row["source"],
+        "confirmation_status": row["confirmation_status"],
+        "action_type": row["action_type"],
+        "content_summary": row.get("content_summary"),
+        "reason": row.get("reason"),
+        "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+        "priority": row.get("priority"),
+        "confidence": float(row.get("confidence") or 0),
+        "source_account_id": row.get("source_account_id"),
+        "url": row.get("url"),
+        "observed_at": iso_or_none(row.get("observed_at")),
+        "confirmed_at": iso_or_none(row.get("confirmed_at")),
+        "effective_at": iso_or_none(row.get("effective_at")),
+        "recommended_check_after_at": iso_or_none(row.get("recommended_check_after_at")),
+        "raw_json": db.jloads(row.get("raw_json"), {}),
+    }
+
+
+def source_account_row_to_payload(row):
+    return {
+        "id": row["id"],
+        "platform": row["platform"],
+        "external_id": row.get("external_id"),
+        "profile_url": row.get("profile_url"),
+        "display_name": row.get("display_name"),
+        "source_type": row.get("source_type"),
+        "match_confidence": float(row.get("match_confidence") or 0),
+        "confirmed_by_user": bool(row.get("confirmed_by_user")),
+        "raw_json": db.jloads(row.get("raw_json"), {}),
+    }
+
+
+def persist_analysis_payload(payload, project_id, comments_path):
+    if not project_id:
+        return
+    persisted = 0
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for run in payload.get("agent_runs", []):
+                status = run.get("status", "succeeded")
+                error_message = run.get("error_type") or run.get("fallback_type")
+                cur.execute(
+                    """
+                    INSERT INTO agent_runs(project_id, agent_name, status, input_json, output_json, error_message, finished_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        project_id,
+                        run.get("agent_name", "DeepSeek Weibo Analysis"),
+                        status,
+                        json.dumps({"comments_path": comments_path}, ensure_ascii=False),
+                        json.dumps(run, ensure_ascii=False),
+                        error_message if status == "failed" else None,
+                        None if status == "running" else datetime.utcnow(),
+                    ),
+                )
+                persisted += 1
+    write_memory_item(
+        project_id,
+        "analysis",
+        None,
+        "Weibo analysis fixture run",
+        f"Persisted {len(payload.get('analyses', []))} Weibo analysis records with agent run lifecycle.",
+        [item.get("comment_id") for item in payload.get("analyses", []) if item.get("comment_id")],
+        {"deepseek": payload.get("deepseek"), "defaults": payload.get("defaults")},
+        0.6,
+        memory_identity=f"analysis:{Path(comments_path).name}",
+    )
+    payload["persisted_agent_runs"] = persisted
+
+
+def persist_events(project_id, events):
+    persisted = 0
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for event in events:
+                title = event.get("title") or "Weibo observation"
+                first_seen_at = mysql_timestamp(event.get("first_seen_at"))
+                identity = event.get("event_identity") or event_identity(title, first_seen_at)
+                values = (
+                    identity,
+                    event.get("event_type", "observation_lead"),
+                    title,
+                    event.get("trigger_summary") or "",
+                    json.dumps(event.get("related_artists", []), ensure_ascii=False),
+                    event.get("status", "observing"),
+                    event.get("risk_level", "unknown"),
+                    float(event.get("event_score") or 0),
+                    json.dumps(event.get("evidence_ids", []), ensure_ascii=False),
+                    json.dumps(event.get("timeline_json") or [], ensure_ascii=False),
+                    event.get("impact_assessment"),
+                    json.dumps(event.get("recommended_actions") or [], ensure_ascii=False),
+                    first_seen_at,
+                    mysql_timestamp(event.get("last_seen_at")),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO artist_public_opinion_events(
+                      project_id, platform, event_identity, event_type, title, trigger_summary,
+                      related_artists, status, risk_level, event_score, evidence_ids,
+                      timeline_json, impact_assessment, recommended_actions,
+                      first_seen_at, last_seen_at
+                    )
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      event_type=VALUES(event_type),
+                      title=VALUES(title),
+                      trigger_summary=VALUES(trigger_summary),
+                      related_artists=VALUES(related_artists),
+                      status=VALUES(status),
+                      risk_level=VALUES(risk_level),
+                      event_score=VALUES(event_score),
+                      evidence_ids=VALUES(evidence_ids),
+                      timeline_json=VALUES(timeline_json),
+                      impact_assessment=VALUES(impact_assessment),
+                      recommended_actions=VALUES(recommended_actions),
+                      first_seen_at=VALUES(first_seen_at),
+                      last_seen_at=VALUES(last_seen_at)
+                    """,
+                    (project_id, *values),
+                )
+                event_id = cur.lastrowid
+                cur.execute("DELETE FROM event_evidence_links WHERE event_id=%s", (event_id,))
+                cur.execute("DELETE FROM event_status_history WHERE event_id=%s", (event_id,))
+                persisted += 1
+                for evidence_id in event.get("evidence_ids", []):
+                    cur.execute(
+                        """
+                        INSERT IGNORE INTO event_evidence_links(event_id, evidence_type, evidence_id, weight)
+                        VALUES (%s,'comment',%s,%s)
+                        """,
+                        (event_id, numeric_id(evidence_id), 1),
+                    )
+                for history in event.get("status_history", []):
+                    cur.execute(
+                        """
+                        INSERT INTO event_status_history(event_id, from_status, to_status, reason)
+                        VALUES (%s,%s,%s,%s)
+                        """,
+                        (
+                            event_id,
+                            history.get("from_status"),
+                            history.get("to_status", event.get("status", "observing")),
+                            history.get("reason"),
+                        ),
+                    )
+                write_memory_item(
+                    project_id,
+                    "event",
+                    event_id,
+                    event.get("title") or "Weibo event",
+                    event.get("trigger_summary") or "Persisted Weibo event from evidence.",
+                    event.get("evidence_ids", []),
+                    event,
+                    0.75,
+                    memory_identity=f"event:{event_id}",
+                )
+    return persisted
+
+
+def event_identity(title, first_seen_at):
+    return f"{title}::{first_seen_at or 'no-first-seen'}"
+
+
+def deterministic_event_identity(issue_key, first_seen_at, evidence_ids):
+    raw = json.dumps(
+        {
+            "issue_key": issue_key,
+            "first_seen_at": first_seen_at or "no-first-seen",
+            "evidence_ids": sorted(str(item) for item in evidence_ids),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"{issue_key or 'event'}::{first_seen_at or 'no-first-seen'}::{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def persist_source_accounts(project_id, accounts):
+    by_external_id = {}
+    by_display_name = {}
+    all_ids = []
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for account in accounts:
+                external_id = account.get("external_id")
+                display_name = account.get("display_name") or external_id or "unknown"
+                values = (
+                    project_id,
+                    external_id,
+                    account.get("profile_url"),
+                    display_name,
+                    account.get("source_type", "unknown"),
+                    float(account.get("match_confidence") or (1 if account.get("confirmed_by_user") else 0.5)),
+                    1 if account.get("confirmed_by_user") else 0,
+                    json.dumps(account, ensure_ascii=False),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO source_accounts(
+                      project_id, platform, external_id, profile_url, display_name,
+                      source_type, match_confidence, confirmed_by_user, raw_json
+                    )
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      external_id=VALUES(external_id),
+                      profile_url=VALUES(profile_url),
+                      display_name=VALUES(display_name),
+                      source_type=VALUES(source_type),
+                      match_confidence=VALUES(match_confidence),
+                      confirmed_by_user=VALUES(confirmed_by_user),
+                      raw_json=VALUES(raw_json)
+                    """,
+                    values,
+                )
+                account_id = cur.lastrowid
+                all_ids.append(account_id)
+                if external_id:
+                    by_external_id[external_id] = account_id
+                by_display_name[display_name] = account_id
+    return {"by_external_id": by_external_id, "by_display_name": by_display_name, "all_ids": sorted(set(all_ids))}
+
+
+def persist_publicity_actions(project_id, actions, account_ids):
+    persisted = 0
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            for action in actions:
+                source_account_id = account_ids["by_external_id"].get(action.get("source_account_external_id"))
+                related_event_id = int(action["related_event_id"]) if str(action.get("related_event_id") or "").isdigit() else None
+                cur.execute(
+                    """
+                    INSERT INTO publicity_actions(
+                      project_id, platform, related_event_id, related_target_id, source,
+                      confirmation_status, action_type, content_summary, reason, evidence_ids,
+                      priority, owner_suggestion, confidence, source_account_id, url,
+                      observed_at, confirmed_at, effective_at, recommended_check_after_at, raw_json
+                    )
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        project_id,
+                        related_event_id,
+                        numeric_nullable(action.get("related_target_id")),
+                        action.get("source"),
+                        action.get("confirmation_status", "pending"),
+                        action.get("action_type", "unknown"),
+                        action.get("content_summary"),
+                        action.get("reason"),
+                        json.dumps(action.get("evidence_ids", []), ensure_ascii=False),
+                        action.get("priority", "medium"),
+                        action.get("owner_suggestion"),
+                        float(action.get("confidence") or 0),
+                        source_account_id,
+                        action.get("url"),
+                        mysql_timestamp(action.get("observed_at")),
+                        mysql_timestamp(action.get("confirmed_at")),
+                        mysql_timestamp(action.get("effective_at")),
+                        mysql_timestamp(action.get("recommended_check_after_at")),
+                        json.dumps(action, ensure_ascii=False),
+                    ),
+                )
+                action_id = cur.lastrowid
+                persisted += 1
+                write_memory_item(
+                    project_id,
+                    "action",
+                    action_id,
+                    f"Weibo action: {action.get('action_type', 'unknown')}",
+                    action.get("content_summary") or action.get("reason") or "Persisted Weibo publicity action.",
+                    action.get("evidence_ids", []),
+                    action,
+                    0.7,
+                    memory_identity=f"action:{action.get('id') or action_id}",
+                )
+    return persisted
+
+
+def persist_memory_report(project_id, records, report, now):
+    report_date = (now or datetime.utcnow().isoformat())[:10]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO daily_reports(report_date, project_id, markdown_body, data_coverage, top_judgments, evidence_ids)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                  markdown_body=VALUES(markdown_body),
+                  data_coverage=VALUES(data_coverage),
+                  top_judgments=VALUES(top_judgments),
+                  evidence_ids=VALUES(evidence_ids)
+                """,
+                (
+                    report_date,
+                    project_id,
+                    report.get("markdown", ""),
+                    json.dumps(report.get("dataCoverage", {}), ensure_ascii=False),
+                    json.dumps(records.get("events", []), ensure_ascii=False),
+                    json.dumps(report.get("evidence_ids", []), ensure_ascii=False),
+                ),
+            )
+            cur.execute("SELECT id FROM daily_reports WHERE project_id=%s AND report_date=%s", (project_id, report_date))
+            report_id = cur.fetchone()["id"]
+    write_memory_item(
+        project_id,
+        "report",
+        report_id,
+        f"Weibo daily report {report_date}",
+        report.get("markdown", "")[:500] or "Persisted Weibo daily report.",
+        report.get("evidence_ids", []),
+        {"dataCoverage": report.get("dataCoverage", {})},
+        0.5,
+        memory_identity=f"report:{report_date}",
+    )
+    persisted = 1
+    for item in records.get("memory", []):
+        source_kind = item.get("source_kind", "event") if item.get("source_kind") in {"target", "comment", "analysis", "event", "action", "backtest", "report", "preference", "conversation"} else "event"
+        write_memory_item(
+            project_id,
+            source_kind,
+            numeric_nullable(item.get("source_id")),
+            item.get("title") or "Imported Weibo memory",
+            item.get("summary") or "",
+            item.get("evidence_ids", []),
+            item,
+            0.4,
+            memory_identity=memory_item_identity(source_kind, item),
+        )
+        persisted += 1
+    return persisted
+
+
+def memory_item_identity(source_kind, item):
+    stable_id = item.get("id") or item.get("source_id") or item.get("title")
+    if not stable_id:
+        return None
+    return f"{source_kind}:{stable_id}"
+
+
+def write_memory_item(project_id, source_kind, source_id, title, summary, evidence_ids, memory_json, importance, memory_identity=None):
+    if not project_id:
+        return None
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bot_memory_items(
+                  project_id, source_kind, source_id, memory_identity, title, summary,
+                  evidence_ids, memory_json, importance
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                  id=LAST_INSERT_ID(id),
+                  source_id=VALUES(source_id),
+                  title=VALUES(title),
+                  summary=VALUES(summary),
+                  evidence_ids=VALUES(evidence_ids),
+                  memory_json=VALUES(memory_json),
+                  importance=VALUES(importance)
+                """,
+                (
+                    project_id,
+                    source_kind,
+                    numeric_nullable(source_id),
+                    memory_identity,
+                    str(title or source_kind)[:240],
+                    summary or "",
+                    json.dumps(evidence_ids or [], ensure_ascii=False),
+                    json.dumps(memory_json or {}, ensure_ascii=False, default=str),
+                    float(importance or 0),
+                ),
+            )
+            return cur.lastrowid
+
+
+def numeric_nullable(value):
+    if value is None:
+        return None
+    text = str(value)
+    return int(text) if text.isdigit() else None
+
+
+def numeric_id(value):
+    numeric = numeric_nullable(value)
+    if numeric is not None:
+        return numeric
+    return int(hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:15], 16)
+
+
+def mysql_timestamp(value):
+    if not value:
+        return None
+    return str(value).replace("T", " ").replace("Z", "")
+
+
+def iso_or_none(value):
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 def mysql_unavailable_payload(endpoint, database, **ids):
@@ -837,17 +2998,40 @@ def fixture_workbench(search, events, actions, qa):
 
 
 def parse_weibo_search_fixture(fixture_path, limit=10):
+    return parse_weibo_search_files([fixture_path], limit, fixture=True)
+
+
+def parse_weibo_search_files(paths, limit=10, fixture=False):
     records = []
-    for line in Path(fixture_path).read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        records.append(json.loads(line))
+    failed_records = 0
+    adapter_errors = []
+    content_paths = list(paths) if fixture else [path for path in paths if is_weibo_search_content_file(path)]
+    if not content_paths:
+        raise MediaCrawlerParseError("No search_contents JSONL files were archived for the Weibo search task.")
+    for path in content_paths:
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise MediaCrawlerParseError(f"Unable to read archived JSONL file {path}: {type(exc).__name__}.") from exc
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                failed_records += 1
+                adapter_errors.append(f"Invalid JSON in {path} at line {line_number}.")
+                continue
+    if failed_records and not records:
+        raise MediaCrawlerParseError(adapter_errors[0])
     targets = [normalize_weibo_search_target(record) for record in records]
     targets.sort(key=lambda target: (-target["hot_score"], target["external_id"]))
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "fixture": True,
+        "fixture": fixture,
+        "failed_records": failed_records,
+        "adapter_errors": adapter_errors[:5],
         "targets": [
             {**target, "rank": index + 1}
             for index, target in enumerate(targets[: max(limit, 0)])
@@ -855,18 +3039,25 @@ def parse_weibo_search_fixture(fixture_path, limit=10):
     }
 
 
+def is_weibo_search_content_file(path):
+    return Path(path).name.startswith("search_contents") and Path(path).suffix == ".jsonl"
+
+
 def normalize_weibo_search_target(raw):
     text = raw.get("text") or raw.get("content") or raw.get("title") or ""
-    external_id = str(raw.get("id") or raw.get("mid") or content_fingerprint(text))
+    external_id = str(raw.get("id") or raw.get("mid") or raw.get("note_id") or content_fingerprint(text))
+    url = raw.get("url") or raw.get("note_url")
+    weibo_mid = raw.get("mid") or raw.get("note_id")
     author_external_id = raw.get("author_id") or raw.get("user_id")
+    author_url = raw.get("author_url") or raw.get("user_link") or raw.get("profile_url")
     target_locator = {
         "platform": "weibo",
         "target_type": "weibo_post",
         "external_id": external_id,
-        "url": raw.get("url"),
-        "weibo_mid": raw.get("mid"),
+        "url": url,
+        "weibo_mid": weibo_mid,
         "author_external_id": author_external_id,
-        "author_url": raw.get("author_url"),
+        "author_url": author_url,
         "raw_json": raw,
     }
     recommendation = recommend_weibo_target(external_id, text, raw)
@@ -874,13 +3065,13 @@ def normalize_weibo_search_target(raw):
         "platform": "weibo",
         "target_type": "weibo_post",
         "external_id": external_id,
-        "url": raw.get("url"),
-        "weibo_mid": raw.get("mid"),
+        "url": url,
+        "weibo_mid": weibo_mid,
         "author_external_id": author_external_id,
-        "author_url": raw.get("author_url"),
+        "author_url": author_url,
         "title": raw.get("title") or text[:80],
         "summary": text[:200],
-        "keyword": raw.get("keyword") or "",
+        "keyword": raw.get("keyword") or raw.get("source_keyword") or "",
         "hot_score": hot_score(text, raw),
         "target_locator": target_locator,
         "content_fingerprint": content_fingerprint(text),
@@ -891,10 +3082,19 @@ def normalize_weibo_search_target(raw):
 
 
 def hot_score(text, raw):
-    likes = int(raw.get("attitudes_count") or raw.get("likes") or 0)
-    comments = int(raw.get("comments_count") or raw.get("comments") or 0)
-    reposts = int(raw.get("reposts_count") or raw.get("reposts") or 0)
+    likes = numeric_count(raw.get("attitudes_count") or raw.get("likes") or raw.get("liked_count"))
+    comments = numeric_count(raw.get("comments_count") or raw.get("comments"))
+    reposts = numeric_count(raw.get("reposts_count") or raw.get("reposts") or raw.get("shared_count"))
     return likes + comments * 2 + reposts * 3
+
+
+def numeric_count(value):
+    if value is None or value == "":
+        return 0
+    try:
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return 0
 
 
 def recommend_weibo_target(external_id, text, raw):
@@ -907,8 +3107,8 @@ def recommend_weibo_target(external_id, text, raw):
             "expected_question_answered": "该目标暂不能回答项目相关舆情问题。",
             "confidence": 0.2,
         }
-    likes = int(raw.get("attitudes_count") or raw.get("likes") or 0)
-    comments = int(raw.get("comments_count") or 0)
+    likes = numeric_count(raw.get("attitudes_count") or raw.get("likes") or raw.get("liked_count"))
+    comments = numeric_count(raw.get("comments_count") or raw.get("comments"))
     confidence = min(0.95, 0.45 + len(terms) * 0.12 + min(likes + comments, 120) / 400)
     return {
         "state": "recommended",
@@ -930,7 +3130,9 @@ def content_fingerprint(text):
 def validate_weibo_target_locator(locator):
     if locator.get("platform") != "weibo":
         return unsupported_target_locator(locator, "Target locator platform must be weibo.")
-    detail_id = locator.get("weibo_mid") or status_id_from_weibo_url(locator.get("url"))
+    if locator.get("target_type") != "weibo_post":
+        return unsupported_target_locator(locator, "Target locator type must be weibo_post for detail collection.")
+    detail_id = locator.get("weibo_mid") or status_id_from_weibo_url(locator.get("url")) or locator.get("external_id")
     if not detail_id:
         return unsupported_target_locator(locator, "Selected target cannot be resolved for MediaCrawler detail collection.")
     return {
@@ -1013,21 +3215,116 @@ def parse_weibo_detail_fixture(fixture_path, target_id, task_id):
     }
 
 
+def parse_weibo_detail_files(paths, target_id, task_id):
+    content_paths = [path for path in paths if is_weibo_detail_content_file(path)]
+    comment_paths = [path for path in paths if is_weibo_detail_comment_file(path)]
+    if not content_paths:
+        raise MediaCrawlerParseError("No detail_contents JSONL files were archived for the Weibo detail task.")
+    posts = {}
+    comments = {}
+    errors = []
+    parsed = 0
+    for path in content_paths:
+        for raw, error in read_jsonl_records(path):
+            if error:
+                errors.append(error)
+                continue
+            try:
+                normalized_post = normalize_weibo_detail_post(raw)
+                posts[normalized_post["external_id"]] = {**posts.get(normalized_post["external_id"], {}), **normalized_post}
+                parsed += 1
+            except Exception as exc:
+                errors.append({
+                    "path": path,
+                    "error_type": "adapter_parse_failed",
+                    "message": str(exc),
+                })
+    if not posts:
+        if errors:
+            raise MediaCrawlerParseError(errors[0]["message"])
+        raise MediaCrawlerParseError("MediaCrawler detail output did not contain any valid post rows.")
+    for path in comment_paths:
+        for raw, error in read_jsonl_records(path):
+            if error:
+                errors.append(error)
+                continue
+            try:
+                post_external_id = str(raw.get("note_id") or raw.get("post_id") or next(iter(posts.keys())))
+                normalized_comment = normalize_weibo_detail_comment(post_external_id, raw)
+                comments[normalized_comment["external_id"]] = {**comments.get(normalized_comment["external_id"], {}), **normalized_comment}
+                parsed += 1
+            except Exception as exc:
+                errors.append({
+                    "path": path,
+                    "error_type": "adapter_parse_failed",
+                    "message": str(exc),
+                })
+    failed = len(errors)
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "fixture": False,
+        "status": "partial" if failed and parsed else ("failed" if failed else "succeeded"),
+        "parsed_records": parsed,
+        "failed_records": failed,
+        "posts": list(posts.values()),
+        "comments": list(comments.values()),
+        "errors": errors,
+        "target_collection_link": {
+            "target_id": str(target_id),
+            "collection_task_id": str(task_id),
+            "link_type": "detail",
+        },
+    }
+
+
+def read_jsonl_records(path):
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        yield None, {
+            "path": path,
+            "error_type": "adapter_parse_failed",
+            "message": f"Unable to read JSONL file: {type(exc).__name__}",
+        }
+        return
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            yield json.loads(line), None
+        except json.JSONDecodeError as exc:
+            yield None, {
+                "path": path,
+                "line": line_number,
+                "error_type": "adapter_parse_failed",
+                "message": f"Invalid JSON: {exc.msg}",
+            }
+
+
+def is_weibo_detail_content_file(path):
+    return Path(path).name.startswith("detail_contents") and Path(path).suffix == ".jsonl"
+
+
+def is_weibo_detail_comment_file(path):
+    return Path(path).name.startswith("detail_comments") and Path(path).suffix == ".jsonl"
+
+
 def normalize_weibo_detail_post(raw):
-    post = raw["post"]
+    post = raw.get("post") if isinstance(raw, dict) and isinstance(raw.get("post"), dict) else raw
     text = post.get("text") or post.get("content") or ""
     return {
         "platform": "weibo",
-        "external_id": str(post.get("id") or post.get("mid") or content_fingerprint(text)),
-        "weibo_mid": post.get("mid"),
-        "url": post.get("url"),
-        "author_name": post.get("screen_name") or post.get("author"),
+        "external_id": str(post.get("id") or post.get("mid") or post.get("note_id") or content_fingerprint(text)),
+        "weibo_mid": post.get("mid") or post.get("note_id"),
+        "url": post.get("url") or post.get("note_url"),
+        "author_name": post.get("screen_name") or post.get("author") or post.get("nickname"),
         "source_account_external_id": post.get("author_id") or post.get("user_id"),
-        "source_account_url": post.get("author_url"),
+        "source_account_url": post.get("author_url") or post.get("profile_url"),
         "title": post.get("title") or text[:80],
         "content": text,
-        "keyword": post.get("keyword") or "",
-        "engagement": int(post.get("attitudes_count") or post.get("likes") or 0),
+        "keyword": post.get("keyword") or post.get("source_keyword") or "",
+        "engagement": numeric_count(post.get("attitudes_count") or post.get("likes") or post.get("liked_count")),
         "content_fingerprint": content_fingerprint(text),
         "raw_json": raw,
     }
@@ -1037,14 +3334,14 @@ def normalize_weibo_detail_comment(post_external_id, comment):
     if not isinstance(comment, dict):
         raise ValueError("comment must be an object")
     text = comment.get("text") or comment.get("content") or ""
-    external_id = str(comment.get("id") or content_fingerprint(post_external_id + text))
-    like_count = int(comment.get("like_count") or comment.get("likes") or 0)
-    reply_count = int(comment.get("reply_count") or 0)
+    external_id = str(comment.get("id") or comment.get("comment_id") or content_fingerprint(post_external_id + text))
+    like_count = numeric_count(comment.get("like_count") or comment.get("likes") or comment.get("comment_like_count"))
+    reply_count = numeric_count(comment.get("reply_count") or comment.get("sub_comment_count"))
     return {
         "platform": "weibo",
         "post_external_id": post_external_id,
         "external_id": external_id,
-        "author_name": comment.get("screen_name") or comment.get("author"),
+        "author_name": comment.get("screen_name") or comment.get("author") or comment.get("nickname"),
         "source_account_external_id": comment.get("user_id") or comment.get("author_id"),
         "content": text,
         "like_count": like_count,
@@ -1154,11 +3451,11 @@ def issue_summary(content, risks):
     return "综合讨论"
 
 
-def run_deepseek_fixture(comments_path, now, response_path=None, simulate_failure=None):
+def run_deepseek_fixture(comments_path, now, response_path=None, simulate_failure=None, persist_project_id=None):
     comments = load_jsonl(comments_path)
     defaults = {"batch_size": 20, "timeout_seconds": 60, "retries": 1}
     if simulate_failure:
-        return {
+        payload = {
             "ok": True,
             "mode": "weibo-agent-mvp",
             "fixture": True,
@@ -1173,16 +3470,19 @@ def run_deepseek_fixture(comments_path, now, response_path=None, simulate_failur
             "agent_runs": [
                 {"agent_name": "DeepSeek Weibo Analysis", "status": "running"},
                 {"agent_name": "DeepSeek Weibo Analysis", "status": "failed", "error_type": "deepseek_failed"},
+                {"agent_name": "DeepSeek Weibo Analysis", "status": "failed", "error_type": "retry_exhausted", "retries": defaults["retries"]},
                 {"agent_name": "DeepSeek Weibo Analysis", "status": "succeeded", "fallback_type": "local_rules"},
             ],
         }
+        persist_analysis_payload(payload, persist_project_id, comments_path)
+        return payload
     response_items = parse_deepseek_response(Path(response_path).read_text(encoding="utf-8"))
     response_by_id = {str(item.get("comment_id")): item for item in response_items}
     analyses = [
         analysis_from_deepseek(comment, response_by_id.get(str(comment.get("id")), {}), now)
         for comment in comments
     ]
-    return {
+    payload = {
         "ok": True,
         "mode": "weibo-agent-mvp",
         "fixture": True,
@@ -1195,6 +3495,8 @@ def run_deepseek_fixture(comments_path, now, response_path=None, simulate_failur
             {"agent_name": "DeepSeek Weibo Analysis", "status": "succeeded"},
         ],
     }
+    persist_analysis_payload(payload, persist_project_id, comments_path)
+    return payload
 
 
 def load_jsonl(path):
@@ -1247,10 +3549,17 @@ def analysis_from_deepseek(comment, model_item, now):
     }
 
 
-def build_weibo_events_fixture(fixture_path):
+def build_weibo_events_fixture(fixture_path, persist_project_id=None, deepseek_response_path=None, simulate_deepseek_failure=None):
     evidence = load_jsonl(fixture_path)
     if not evidence:
-        return {"ok": True, "mode": "weibo-agent-mvp", "fixture": True, "events": [], "data_gap": "no_evidence"}
+        return {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "fixture": True,
+            "events": [],
+            "data_gap": "no_evidence",
+            "deepseek_event_explanation": {"status": "not_run", "reason": "no_evidence"},
+        }
     grouped = {}
     for item in evidence:
         for issue in recall_issue_keys(item):
@@ -1259,7 +3568,160 @@ def build_weibo_events_fixture(fixture_path):
     for issue_key, items in grouped.items():
         for cluster in merge_evidence_window(items):
             events.append(build_event_from_evidence(issue_key, cluster))
-    return {"ok": True, "mode": "weibo-agent-mvp", "fixture": True, "events": events}
+    explanation = explain_weibo_events(events, evidence, deepseek_response_path, simulate_deepseek_failure)
+    payload = {"ok": True, "mode": "weibo-agent-mvp", "fixture": True, "events": events, "deepseek_event_explanation": explanation}
+    if persist_project_id:
+        payload["persisted_events"] = persist_events(persist_project_id, events)
+    return payload
+
+
+def explain_weibo_events(events, evidence, response_path=None, simulate_failure=None):
+    if not events:
+        return {"status": "not_run", "reason": "no_events"}
+    if simulate_failure:
+        for event in events:
+            event["event_explanation"] = {
+                "model": "local-rules",
+                "fallback_type": "deepseek_failed",
+                "error_type": "deepseek_failed",
+                "message": f"Simulated DeepSeek event explanation failure: {simulate_failure}",
+            }
+        return {"status": "failed", "error_type": "deepseek_failed", "fallback_type": "deterministic_events"}
+    response_text = None
+    if response_path:
+        response_text = Path(response_path).read_text(encoding="utf-8")
+    elif os.environ.get("DEEPSEEK_API_KEY"):
+        response_text = call_deepseek_event_explanation(events, evidence)
+    if not response_text:
+        for event in events:
+            event["event_explanation"] = {"model": "local-rules", "fallback_type": "no_deepseek_response"}
+        return {"status": "not_run", "reason": "deepseek_unavailable", "fallback_type": "deterministic_events"}
+    try:
+        model_items = parse_deepseek_response(response_text)
+    except Exception as exc:
+        for event in events:
+            event["event_explanation"] = {
+                "model": "local-rules",
+                "fallback_type": "deepseek_parse_failed",
+                "error_type": "deepseek_parse_failed",
+            }
+        return {"status": "failed", "error_type": "deepseek_parse_failed", "cause": type(exc).__name__, "fallback_type": "deterministic_events"}
+    items_by_issue = {str(item.get("issue_key") or ""): item for item in model_items if isinstance(item, dict)}
+    applied = 0
+    for event in events:
+        model_item = items_by_issue.get(str(event.get("issue_key"))) or {}
+        if apply_deepseek_event_explanation(event, model_item):
+            applied += 1
+    if applied == 0:
+        return {
+            "status": "not_run",
+            "reason": "no_allowed_event_explanation_fields",
+            "model": "deepseek-chat",
+            "fallback_type": "deterministic_events",
+        }
+    return {
+        "status": "succeeded",
+        "model": "deepseek-chat",
+        "applied_events": applied,
+        "fallback_events": max(len(events) - applied, 0),
+    }
+
+
+def call_deepseek_event_explanation(events, evidence):
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    api_url = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions")
+    prompt = {
+        "instruction": "Generate Weibo public-opinion event explanation fields only. Do not provide numeric risk, score, or backtest values.",
+        "events": [
+            {
+                "issue_key": event.get("issue_key"),
+                "event_type": event.get("event_type"),
+                "status": event.get("status"),
+                "risk_level": event.get("risk_level"),
+                "event_score": event.get("event_score"),
+                "evidence_ids": event.get("evidence_ids"),
+            }
+            for event in events
+        ],
+        "evidence": evidence[:30],
+        "required_json_fields": ["issue_key", "title", "trigger_summary", "main_stances", "impact_assessment", "recommended_actions"],
+    }
+    body = json.dumps(
+        {
+            "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+            "messages": [
+                {"role": "system", "content": "You explain Weibo public-opinion events for a film publicity team. Return JSON only."},
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            ],
+            "temperature": 0.2,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        api_url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "60"))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return None
+    return (((payload.get("choices") or [{}])[0].get("message") or {}).get("content")) or None
+
+
+def apply_deepseek_event_explanation(event, model_item):
+    if not model_item:
+        event["event_explanation"] = {"model": "local-rules", "fallback_type": "missing_model_item"}
+        return False
+    ignored = {
+        key: model_item.get(key)
+        for key in ["event_score", "risk_level", "status", "backtest_signal"]
+        if key in model_item
+    }
+    applied_fields = []
+    if model_item.get("title"):
+        event["title"] = str(model_item["title"])[:240]
+        applied_fields.append("title")
+    if model_item.get("trigger_summary"):
+        event["trigger_summary"] = str(model_item["trigger_summary"])
+        applied_fields.append("trigger_summary")
+    main_stances = model_item.get("main_stances") if isinstance(model_item.get("main_stances"), list) else []
+    if main_stances:
+        event["main_stances"] = [str(item) for item in main_stances[:8]]
+        applied_fields.append("main_stances")
+    if model_item.get("impact_assessment"):
+        event["impact_assessment"] = str(model_item["impact_assessment"])
+        applied_fields.append("impact_assessment")
+    recommended_actions = model_item.get("recommended_actions")
+    if isinstance(recommended_actions, list) and recommended_actions:
+        event["recommended_actions"] = recommended_actions[:8]
+        applied_fields.append("recommended_actions")
+    if not applied_fields:
+        event["event_explanation"] = {
+            "model": "local-rules",
+            "fallback_type": "missing_allowed_event_explanation_fields",
+            "ignored_model_numbers": ignored,
+        }
+        return False
+    timeline = event.get("timeline_json") or []
+    timeline.append({
+        "type": "deepseek_event_explanation",
+        "main_stances": event.get("main_stances", []),
+        "model": "deepseek-chat",
+    })
+    event["timeline_json"] = timeline
+    event["event_explanation"] = {
+        "model": "deepseek-chat",
+        "fallback_type": "none",
+        "applied_fields": applied_fields,
+        "ignored_model_numbers": ignored,
+    }
+    return True
 
 
 def recall_issue_keys(item):
@@ -1302,6 +3764,7 @@ def build_event_from_evidence(issue_key, evidence_items):
     last_seen = max([item.get("created_at") for item in evidence_items if item.get("created_at")] or [None])
     return {
         "issue_key": issue_key,
+        "event_identity": deterministic_event_identity(issue_key, first_seen, evidence_ids),
         "platform": "weibo",
         "event_type": event_type,
         "title": f"微博{issue_key}观察",
@@ -1361,7 +3824,7 @@ def parse_time(value):
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
-def build_weibo_actions_fixture(accounts_path, posts_path, event_id, now):
+def build_weibo_actions_fixture(accounts_path, posts_path, event_id, now, persist_project_id=None):
     accounts = json.loads(Path(accounts_path).read_text(encoding="utf-8"))
     posts = [normalize_action_post(post, accounts) for post in load_jsonl(posts_path)]
     actions = []
@@ -1373,13 +3836,18 @@ def build_weibo_actions_fixture(accounts_path, posts_path, event_id, now):
         actions.append(matrix)
     actions.append(agent_recommended_action(event_id, now))
     actions.append(user_confirmed_action(event_id, actions[0] if actions else None, now))
-    return {
+    payload = {
         "ok": True,
         "mode": "weibo-agent-mvp",
         "fixture": True,
         "posts": posts,
         "actions": actions,
     }
+    if persist_project_id:
+        account_ids = persist_source_accounts(persist_project_id, accounts)
+        payload["persisted_source_accounts"] = len(account_ids["all_ids"])
+        payload["persisted_actions"] = persist_publicity_actions(persist_project_id, actions, account_ids)
+    return payload
 
 
 def normalize_action_post(raw, accounts):
@@ -1497,14 +3965,48 @@ def is_project_related(text):
     return any(term in (text or "") for term in ["海岛舒服日志", "刘昊然", "李兰迪"])
 
 
-def build_weibo_backtest_fixture(fixture_path):
+def build_weibo_backtest_fixture(fixture_path, persist_project_id=None):
     scenarios = json.loads(Path(fixture_path).read_text(encoding="utf-8"))
-    return {
+    results = [backtest_scenario(scenario) for scenario in scenarios]
+    payload = {
         "ok": True,
         "mode": "weibo-agent-mvp",
         "fixture": True,
-        "results": [backtest_scenario(scenario) for scenario in scenarios],
+        "results": results,
     }
+    if persist_project_id:
+        payload["persisted_memory_items"] = persist_backtest_memory(persist_project_id, results)
+    return payload
+
+
+def persist_backtest_memory(project_id, results):
+    persisted = 0
+    for result in results:
+        action_id = result.get("action_id")
+        scenario_id = result.get("scenario_id") or action_id or "unknown"
+        write_memory_item(
+            project_id,
+            "backtest",
+            numeric_nullable(action_id),
+            f"Weibo backtest: {scenario_id}",
+            backtest_memory_summary(result),
+            [action_id] if action_id else [],
+            result,
+            0.58 if result.get("eligible") else 0.35,
+            memory_identity=f"backtest:{scenario_id}",
+        )
+        persisted += 1
+    return persisted
+
+
+def backtest_memory_summary(result):
+    signal = result.get("signal_level") or result.get("result") or "unknown"
+    recommendation = result.get("next_recommendation") or "monitor more windows before changing strategy"
+    if result.get("eligible"):
+        confidence = result.get("attribution_confidence", 0)
+        return f"Backtest signal {signal} with attribution confidence {confidence}. Next: {recommendation}."
+    missing = result.get("missing_data_reason") or "insufficient evidence"
+    return f"Backtest signal {signal}; missing {missing}. Next: {recommendation}."
 
 
 def backtest_scenario(scenario):
@@ -1607,16 +4109,19 @@ def next_backtest_recommendation(result):
     return "monitor more windows before changing strategy"
 
 
-def build_weibo_memory_report_fixture(fixture_path, question, now):
+def build_weibo_memory_report_fixture(fixture_path, question, now, persist_project_id=None):
     records = load_memory_fixture(fixture_path)
     answer = answer_weibo_question(records, question)
-    return {
+    payload = {
         "ok": True,
         "mode": "weibo-agent-mvp",
         "fixture": True,
         "answer": answer,
         "dailyReport": daily_report(records, now),
     }
+    if persist_project_id:
+        payload["persisted_memory_items"] = persist_memory_report(persist_project_id, records, payload["dailyReport"], now)
+    return payload
 
 
 def load_memory_fixture(path):

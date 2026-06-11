@@ -14,6 +14,7 @@
   ],
   "backtests": [],
   "memory": [
-    {"id": "memory-1", "source_kind": "event", "source_id": "event-1", "summary": "官宣可信度风险正在升高。"}
+    {"id": "memory-1", "source_kind": "event", "source_id": "event-1", "summary": "官宣可信度风险正在升高。"},
+    {"id": "preference-1", "source_kind": "preference", "source_id": null, "title": "用户偏好：先看可引用证据", "summary": "用户希望微博研判先给可追溯证据，再给行动建议。"}
   ]
 }

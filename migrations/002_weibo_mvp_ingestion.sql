@@ -18,12 +18,36 @@ CREATE TABLE IF NOT EXISTS discovered_targets (
   raw_json JSON NULL,
   recommendation_metadata JSON NULL,
   selected_status ENUM('pending','selected','ignored') NOT NULL DEFAULT 'pending',
+  source_type ENUM('official','artist','producer','marketing','suspected_matrix','media','fan','organic','unknown') NOT NULL DEFAULT 'unknown',
+  source_match_method ENUM('stable_id','stable_url','display_name','stable_unmatched','unknown') NOT NULL DEFAULT 'unknown',
+  source_match_confidence DECIMAL(5,4) NOT NULL DEFAULT 0.2000,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_discovered_project_platform_external (project_id, platform, external_id),
   KEY idx_discovered_project_status (project_id, selected_status),
   KEY idx_discovered_fingerprint (platform, content_fingerprint),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE discovered_targets ADD UNIQUE KEY uniq_discovered_project_platform_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'discovered_targets' AND INDEX_NAME = 'uniq_discovered_project_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE discovered_targets ADD COLUMN source_type ENUM(''official'',''artist'',''producer'',''marketing'',''suspected_matrix'',''media'',''fan'',''organic'',''unknown'') NOT NULL DEFAULT ''unknown''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'discovered_targets' AND COLUMN_NAME = 'source_type');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE discovered_targets ADD COLUMN source_match_method ENUM(''stable_id'',''stable_url'',''display_name'',''stable_unmatched'',''unknown'') NOT NULL DEFAULT ''unknown''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'discovered_targets' AND COLUMN_NAME = 'source_match_method');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE discovered_targets ADD COLUMN source_match_confidence DECIMAL(5,4) NOT NULL DEFAULT 0.2000', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'discovered_targets' AND COLUMN_NAME = 'source_match_confidence');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS target_collection_links (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -82,10 +106,13 @@ PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
-SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD COLUMN source_type ENUM(''official'',''artist'',''marketing'',''fan'',''media'',''unknown'') NOT NULL DEFAULT ''unknown''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND COLUMN_NAME = 'source_type');
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD COLUMN source_type ENUM(''official'',''artist'',''producer'',''marketing'',''suspected_matrix'',''media'',''fan'',''organic'',''unknown'') NOT NULL DEFAULT ''unknown''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND COLUMN_NAME = 'source_type');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
+
+ALTER TABLE social_posts
+  MODIFY COLUMN source_type ENUM('official','artist','producer','marketing','suspected_matrix','media','fan','organic','unknown') NOT NULL DEFAULT 'unknown';
 
 SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD COLUMN source_account_external_id VARCHAR(220) NULL', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND COLUMN_NAME = 'source_account_external_id');
 PREPARE stmt FROM @sql;
@@ -93,6 +120,16 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
 SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD COLUMN source_account_url VARCHAR(1000) NULL', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND COLUMN_NAME = 'source_account_url');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD COLUMN source_match_method ENUM(''stable_id'',''stable_url'',''display_name'',''stable_unmatched'',''unknown'') NOT NULL DEFAULT ''unknown''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND COLUMN_NAME = 'source_match_method');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD COLUMN source_match_confidence DECIMAL(5,4) NOT NULL DEFAULT 0.2000', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND COLUMN_NAME = 'source_match_confidence');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
@@ -143,6 +180,26 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
 SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_comments ADD COLUMN reply_count INT NOT NULL DEFAULT 0', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_comments' AND COLUMN_NAME = 'reply_count');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) > 0, 'ALTER TABLE social_posts DROP INDEX uniq_platform_external', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND INDEX_NAME = 'uniq_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_posts ADD UNIQUE KEY uniq_project_platform_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_posts' AND INDEX_NAME = 'uniq_project_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) > 0, 'ALTER TABLE social_comments DROP INDEX uniq_comment_platform_external', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_comments' AND INDEX_NAME = 'uniq_comment_platform_external');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE social_comments ADD UNIQUE KEY uniq_comment_project_platform_external (project_id, platform, external_id)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'social_comments' AND INDEX_NAME = 'uniq_comment_project_platform_external');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;

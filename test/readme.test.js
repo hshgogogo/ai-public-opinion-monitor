@@ -13,8 +13,13 @@ test("README documents Weibo MVP setup, fixture E2E, auth troubleshooting, and l
     "WEIBO_COOKIE_FILE",
     "target_detail_unsupported",
     "real_weibo_auth_missing",
-    "No Xiaohongshu or Douyin collection"
+    "No Xiaohongshu or Douyin collection",
+    "fixture-driven MySQL persistence",
+    "MediaCrawler Weibo search/detail adapters",
+    "tasks.md"
   ]) {
     assert.equal(readme.includes(text), true, text);
   }
+
+  assert.equal(readme.includes("MySQL task 入库、DeepSeek 线上调用"), false);
 });

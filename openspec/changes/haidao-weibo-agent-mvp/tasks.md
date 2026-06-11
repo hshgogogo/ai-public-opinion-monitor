@@ -22,25 +22,25 @@
 
 ## 3. Weibo Discovery and Target Recommendation
 
-- [ ] 3.1 Add `POST /api/weibo/discovery` and a matching internal worker command to create Weibo search discovery tasks for a single project keyword.
-- [ ] 3.2 Invoke MediaCrawler in Weibo `search` mode with generated runtime config and task-specific output path.
-- [ ] 3.3 Archive raw Weibo search JSONL under `storage/mediacrawler/<project_id>/<task_id>/weibo/<keyword_slug>/`.
-- [ ] 3.4 Parse Weibo search JSONL into at most 10 `discovered_targets` per keyword with rank, hot score, title/summary, author, URL, engagement fields, content fingerprint, and raw JSON.
-- [ ] 3.5 Extract and persist target locator fields for each Weibo target, including Weibo mid or equivalent status ID and author external ID/profile URL when available.
+- [x] 3.1 Add `POST /api/weibo/discovery` and a matching internal worker command to create Weibo search discovery tasks for a single project keyword.
+- [x] 3.2 Invoke MediaCrawler in Weibo `search` mode with generated runtime config and task-specific output path.
+- [x] 3.3 Archive raw Weibo search JSONL under `storage/mediacrawler/<project_id>/<task_id>/weibo/<keyword_slug>/`.
+- [x] 3.4 Parse Weibo search JSONL into at most 10 `discovered_targets` per keyword with rank, hot score, title/summary, author, URL, engagement fields, content fingerprint, and raw JSON.
+- [x] 3.5 Extract and persist target locator fields for each Weibo target, including Weibo mid or equivalent status ID and author external ID/profile URL when available.
 - [x] 3.6 Generate Agent recommendation metadata for each Weibo target, including recommendation state, reason, expected question answered, confidence, and target ID.
 - [x] 3.7 Add fixture-based unit tests for Weibo search JSONL parsing, target locator extraction, hot score calculation, top-10 retention, and recommendation state.
 
 ## 4. Target Selection and Weibo Detail Collection
 
-- [ ] 4.1 Add `GET /api/weibo/targets`, `POST /api/weibo/targets/select`, and `POST /api/weibo/targets/ignore` backed by explicit worker subcommands.
-- [ ] 4.2 Prevent comment collection for pending or ignored Weibo targets.
-- [ ] 4.3 Add detail collection task creation for selected Weibo targets and link each task through `target_collection_links`.
-- [ ] 4.4 Add `POST /api/weibo/targets/:id/collect-comments` backed by an internal `weibo-collect-target` worker command.
+- [x] 4.1 Add `GET /api/weibo/targets`, `POST /api/weibo/targets/select`, and `POST /api/weibo/targets/ignore` backed by explicit worker subcommands.
+- [x] 4.2 Prevent comment collection for pending or ignored Weibo targets.
+- [x] 4.3 Add detail collection task creation for selected Weibo targets and link each task through `target_collection_links`.
+- [x] 4.4 Add `POST /api/weibo/targets/:id/collect-comments` backed by an internal `weibo-collect-target` worker command.
 - [x] 4.5 Validate the selected target's `target_locator` before MediaCrawler detail execution.
 - [x] 4.6 If the target cannot be resolved for MediaCrawler detail, fail the task with `target_detail_unsupported`, keep the target selected, and return an actionable remediation payload.
-- [ ] 4.7 Invoke MediaCrawler in Weibo `detail` mode for selected targets and archive raw detail JSONL.
-- [ ] 4.8 Parse Weibo detail JSONL into `social_posts` and `social_comments` with stable deduplication by platform and external ID.
-- [ ] 4.9 Record adapter failed record counts and partial/failure task status when detail JSONL contains bad records.
+- [x] 4.7 Invoke MediaCrawler in Weibo `detail` mode for selected targets and archive raw detail JSONL.
+- [x] 4.8 Parse Weibo detail JSONL into `social_posts` and `social_comments` with stable deduplication by platform and external ID.
+- [x] 4.9 Record adapter failed record counts and partial/failure task status when detail JSONL contains bad records.
 - [x] 4.10 Add fixture-based unit tests for Weibo detail parsing, deduplication, bad rows, unsupported locators, and target-task linking.
 
 ## 5. Weibo Topic Analysis
@@ -49,7 +49,7 @@
 - [x] 5.2 Extend the comment analysis worker to output sentiment, score, confidence, topics, risks, stance, issue summary, intensity, weight, evidence, model, fallback type, and analyzed time.
 - [x] 5.3 Batch pending Weibo comments for DeepSeek analysis with MVP defaults: 20 comments per batch, 60 second timeout, and 1 retry.
 - [x] 5.4 Preserve raw comments when DeepSeek fails and clearly mark local-rule fallback results.
-- [ ] 5.5 Write `agent_runs` for analysis start, success, failure, retry exhaustion, and fallback usage.
+- [x] 5.5 Write `agent_runs` for analysis start, success, failure, retry exhaustion, and fallback usage.
 - [x] 5.6 Ignore any LLM-provided numeric weights, event scores, or backtest signal levels in favor of deterministic calculations.
 - [x] 5.7 Add tests for DeepSeek JSON parsing, Markdown-wrapped JSON parsing, timeout/retry behavior, fallback marking, pending comments after failure, and no-comment data behavior.
 
@@ -58,20 +58,20 @@
 - [x] 6.1 Implement rule recall for Weibo comments/targets by drama name, actor names, configured keywords, topics, risks, and stance.
 - [x] 6.2 Implement event evidence thresholds that distinguish observation leads from formal events.
 - [x] 6.3 Implement event score and status assignment using deterministic counts/weights before any LLM explanation.
-- [ ] 6.4 Use DeepSeek to generate event title, trigger summary, main stances, impact assessment, and recommended actions only after evidence exists.
-- [ ] 6.5 Write or update Weibo events only in `artist_public_opinion_events`, plus evidence links and status history records.
+- [x] 6.4 Use DeepSeek to generate event title, trigger summary, main stances, impact assessment, and recommended actions only after evidence exists.
+- [x] 6.5 Write or update Weibo events only in `artist_public_opinion_events`, plus evidence links and status history records.
 - [x] 6.6 Add tests for evidence thresholds, event upsert within the 72-hour merge window, status transitions, and no-evidence behavior.
 
 ## 7. Weibo Source Accounts and Action Ledger
 
-- [ ] 7.1 Add CRUD or worker support for Weibo source accounts and user-confirmed source types.
+- [x] 7.1 Add CRUD or worker support for Weibo source accounts and user-confirmed source types.
 - [x] 7.2 Assign source type to Weibo targets/posts from known account records using author external ID or profile URL before falling back to display-name-derived matching.
 - [x] 7.3 Implement text content fingerprinting for Weibo targets/posts.
 - [x] 7.4 Detect simple suspected matrix actions from similar content fingerprints in a short time window.
-- [ ] 7.5 Create `official_observed` actions when known official Weibo accounts post project-related content.
-- [ ] 7.6 Create `agent_recommended` action records from event suggestions without marking them executed.
-- [ ] 7.7 Add user confirmation, rejection, partial, and uncertain state transitions for Weibo actions.
-- [ ] 7.8 Preserve action timing fields: observed time, confirmed time, and effective time used for backtest windows.
+- [x] 7.5 Create `official_observed` actions when known official Weibo accounts post project-related content.
+- [x] 7.6 Create `agent_recommended` action records from event suggestions without marking them executed.
+- [x] 7.7 Add user confirmation, rejection, partial, and uncertain state transitions for Weibo actions.
+- [x] 7.8 Preserve action timing fields: observed time, confirmed time, and effective time used for backtest windows.
 - [x] 7.9 Add tests proving Agent recommendations are separate from user-confirmed real-world actions and stable account identifiers outrank display-name fallback matching.
 
 ## 8. Weibo Action Backtesting
@@ -95,10 +95,14 @@
 - [x] 9.8 Show Weibo event cards and event detail with timeline, evidence, impact assessment, recommended actions, and citations.
 - [x] 9.9 Show pending action confirmations in the first-screen queue and allow confirm/reject/uncertain/partial updates.
 - [x] 9.10 Clearly label the current MVP as Weibo-only and avoid presenting Xiaohongshu/Douyin as active MVP sources.
+- [x] 9.11 Refactor the front-end workbench around the current Weibo MVP capabilities.
+- [x] 9.12 Run a local Claude Code design pass when subscription quota is available.
+  - 2026-06-10: Local Claude Code returned quota error `403 当前订阅额度已使用完毕`; Codex fallback front-end refactor was applied and verified first.
+  - 2026-06-11: Local Claude Code design pass succeeded via `npx @anthropic-ai/claude-code`; applied the MVP-scope recommendations for next-step CTA navigation, action confirmation review state, risk/data-gap visual hierarchy, actionable empty states, busy buttons, and mobile list scrolling.
 
 ## 10. Weibo Memory, Reports, and Q&A
 
-- [ ] 10.1 Write target selections, analysis summaries, events, action records, backtest results, reports, and user preferences into `bot_memory_items`.
+- [x] 10.1 Write target selections, analysis summaries, events, action records, backtest results, reports, and user preferences into `bot_memory_items`.
 - [x] 10.2 Implement retrieval-first Q&A over Weibo targets, comments, events, actions, backtests, reports, and memory.
 - [x] 10.3 Ensure Q&A responses include source IDs or explicit insufficient-data messages.
 - [x] 10.4 Generate a Weibo MVP daily Markdown report with data coverage, top Agent judgments, events, actions, evidence, and next monitoring steps.
@@ -111,5 +115,6 @@
 - [x] 11.2 Run existing Node and Python test suites and fix regressions caused by the Weibo MVP scope.
 - [x] 11.3 Add a fixture E2E command or test that proves the full loop without real Weibo auth or MediaCrawler availability.
 - [x] 11.4 Run an end-to-end fixture flow: migrate, parse fixture search targets, recommend target, select target, parse fixture detail comments, analyze locally or with mocked DeepSeek, create event/lead, create action suggestion, confirm/log action, produce backtest or unknown result, ask a cited Q&A question, and render workbench payload.
-- [ ] 11.5 If a real Weibo login/CDP/MediaCrawler environment is available, run one real Weibo search task and document the raw JSONL path and task ID.
+- [x] 11.5 If a real Weibo login/CDP/MediaCrawler environment is available, run one real Weibo search task and document the raw JSONL path and task ID.
+  - 2026-06-11: Real Weibo search ran with MySQL, Chrome CDP, Weibo auth cookie, and MediaCrawler commit `165776886faf56d44651d4dbd290b015582a97f2`. Task ID `1` succeeded for keyword `海岛舒服日志`; raw JSONL archived at `storage/mediacrawler/1/1/weibo/keyword-9a28545390/weibo/jsonl/search_contents_2026-06-11.jsonl`; parsed/persisted 10 targets with 0 failed records.
 - [x] 11.6 Update README or implementation notes with setup, environment variables, fixture E2E command, Weibo auth troubleshooting, real-data-only rules, error payload examples, and MVP limitations.
