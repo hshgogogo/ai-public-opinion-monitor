@@ -14,6 +14,7 @@ test(
     resetTestDatabase();
     const migration = runWorker(["migrate"]);
     assert.equal(migration.ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
 
     const discovery = runWorker([
       "weibo-discovery",
@@ -31,6 +32,25 @@ test(
     assert.equal(discovery.task.keyword, "海岛舒服日志");
     assert.equal(discovery.persisted_targets, 10);
     assert.equal(discovery.targets.length, 10);
+
+    const workbenchAfterDiscovery = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
+    assert.equal(workbenchAfterDiscovery.mode, "weibo-agent-mvp");
+    assert.equal(workbenchAfterDiscovery.setup.partialState, "search-only");
+    assert.equal(workbenchAfterDiscovery.recommendedTargets.length, 10);
+    assert.equal(workbenchAfterDiscovery.recommendedTargets[0].external_id, "1004");
+    assert.equal(workbenchAfterDiscovery.dataGaps.some((gap) => gap.code === "weibo_real_data_missing"), false);
+    assert.equal(workbenchAfterDiscovery.dataGaps.some((gap) => gap.code === "weibo_detail_or_analysis_needed"), true);
+    assert.equal(Object.hasOwn(workbenchAfterDiscovery.setup.latestTask, "output_path"), false);
+    assert.equal(Object.hasOwn(workbenchAfterDiscovery.setup.latestTask, "raw_files"), false);
+    assert.equal(workbenchAfterDiscovery.setup.latestTask.raw_file_count, 1);
+    queryRows(
+      "INSERT INTO collection_tasks(project_id, platform, keyword, status, requested_limit, crawler_engine, crawler_type, error_type, error_message, output_path, raw_files, parsed_records, failed_records, collected_posts, collected_comments, finished_at) VALUES (%s,'weibo',%s,'failed',10,'mediacrawler','search','mediacrawler_runtime_failed','simulated latest failure','storage/mediacrawler/latest-failed',JSON_ARRAY(),0,0,0,0,NOW())",
+      [projectId, "海岛舒服日志"]
+    );
+    const workbenchAfterFailedRetry = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
+    assert.equal(workbenchAfterFailedRetry.recommendedTargets.length, 10);
+    assert.equal(workbenchAfterFailedRetry.setup.latestTask.status, "failed");
+    assert.equal(workbenchAfterFailedRetry.dataGaps.some((gap) => gap.code === "weibo_latest_task_failed"), true);
 
     const taskRows = queryRows(
       "SELECT platform, keyword, status, requested_limit, crawler_type, parsed_records, failed_records, collected_posts FROM collection_tasks WHERE id=%s",
@@ -132,6 +152,26 @@ test(
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts")[0].count, 2);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments")[0].count, 4);
     assert.equal(queryRows("SELECT like_count, reply_count FROM social_comments WHERE external_id='c1002'")[0].like_count, 21);
+    const workbenchAfterDetail = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
+    assert.equal(workbenchAfterDetail.setup.partialState, "detail-without-analysis");
+    assert.equal(workbenchAfterDetail.setup.progress.analysis_count, 0);
+    assert.equal(workbenchAfterDetail.dataGaps.some((gap) => gap.code === "weibo_analysis_needed"), true);
+    const analysisOnly = runWorker([
+      "weibo-deepseek-fixture",
+      "--comments",
+      "test/fixtures/deepseek-comments.jsonl",
+      "--now",
+      "2026-06-10T12:00:00Z",
+      "--simulate-failure",
+      "timeout",
+      "--persist-project-id",
+      String(projectId)
+    ]);
+    assert.equal(analysisOnly.ok, true);
+    const workbenchAfterAnalysisOnly = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
+    assert.equal(workbenchAfterAnalysisOnly.setup.partialState, "analysis-without-event");
+    assert.equal(workbenchAfterAnalysisOnly.setup.progress.analysis_count > 0, true);
+    assert.equal(workbenchAfterAnalysisOnly.dataGaps.some((gap) => gap.code === "weibo_event_needed"), true);
 
     queryRows(
       "INSERT INTO monitor_projects(project_name, category, audience, keywords, actors, active_platforms) VALUES (%s,%s,%s,%s,%s,%s)",
@@ -720,6 +760,27 @@ test(
     resetTestDatabase();
     assert.equal(runWorker(["migrate"]).ok, true);
     const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const discovery = runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        keyword: "海岛舒服日志",
+        limit: 10,
+        fixturePath: "test/fixtures/weibo-search.jsonl"
+      })
+    ]);
+    assert.equal(discovery.ok, true);
+    assert.equal(runWorker(["weibo-target-select", "--payload-json", JSON.stringify({ projectId, targetId: "1001" })]).ok, true);
+    const detail = runWorker([
+      "weibo-collect-target",
+      "--target-id",
+      "1001",
+      "--payload-json",
+      JSON.stringify({ projectId, fixturePath: "test/fixtures/weibo-detail.jsonl" })
+    ]);
+    assert.equal(detail.ok, true);
+    assert.equal(detail.persisted_comments > 0, true);
 
     const analysis = runWorker([
       "weibo-deepseek-fixture",
@@ -890,6 +951,10 @@ test(
     assert.equal(backtest.ok, true);
     assert.equal(backtest.persisted_memory_items, backtest.results.length);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='backtest'", [projectId])[0].count, backtest.results.length);
+    const workbenchAfterBacktestMemory = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
+    assert.equal(workbenchAfterBacktestMemory.setup.progress.backtest_count, backtest.results.length);
+    assert.equal(workbenchAfterBacktestMemory.setup.partialState, "backtested");
+    assert.equal(workbenchAfterBacktestMemory.dataGaps.some((gap) => gap.code === "weibo_backtest_needed"), false);
     const persistedBacktest = queryRows(
       "SELECT title, summary, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.result')) AS result FROM bot_memory_items WHERE project_id=%s AND source_kind='backtest' AND JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.scenario_id'))='strong' LIMIT 1",
       [projectId]
@@ -947,6 +1012,9 @@ function runWorker(args, envOverrides = {}) {
     env: {
       ...process.env,
       MYSQL_URL: testMysqlUrl,
+      DEEPSEEK_API_KEY: "",
+      DEEPSEEK_API_URL: "",
+      DEEPSEEK_MODEL: "",
       WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json",
       MEDIACRAWLER_HOME: "/tmp/mediacrawler-does-not-exist",
       MEDIACRAWLER_PYTHON: "/tmp/python-does-not-exist",

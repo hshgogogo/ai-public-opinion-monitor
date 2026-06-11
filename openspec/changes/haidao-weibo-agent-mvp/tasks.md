@@ -114,5 +114,6 @@
 - [x] 11.2 Run existing Node and Python test suites and fix regressions caused by the Weibo MVP scope.
 - [x] 11.3 Add a fixture E2E command or test that proves the full loop without real Weibo auth or MediaCrawler availability.
 - [x] 11.4 Run an end-to-end fixture flow: migrate, parse fixture search targets, recommend target, select target, parse fixture detail comments, analyze locally or with mocked DeepSeek, create event/lead, create action suggestion, confirm/log action, produce backtest or unknown result, ask a cited Q&A question, and render workbench payload.
-- [ ] 11.5 If a real Weibo login/CDP/MediaCrawler environment is available, run one real Weibo search task and document the raw JSONL path and task ID.
+- [x] 11.5 If a real Weibo login/CDP/MediaCrawler environment is available, run one real Weibo search task and document the raw JSONL path and task ID.
+  - 2026-06-11: Real Weibo search ran with MySQL, Chrome CDP, Weibo auth cookie, and MediaCrawler commit `165776886faf56d44651d4dbd290b015582a97f2`. Task ID `1` succeeded for keyword `海岛舒服日志`; raw JSONL archived at `storage/mediacrawler/1/1/weibo/keyword-9a28545390/weibo/jsonl/search_contents_2026-06-11.jsonl`; parsed/persisted 10 targets with 0 failed records.
 - [x] 11.6 Update README or implementation notes with setup, environment variables, fixture E2E command, Weibo auth troubleshooting, real-data-only rules, error payload examples, and MVP limitations.

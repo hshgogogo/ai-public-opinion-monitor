@@ -3,6 +3,13 @@ import assert from "node:assert/strict";
 import { server } from "../src/server.js";
 
 test("exposes explicit Weibo MVP API endpoints with safe no-database errors", async (t) => {
+  const originalMysqlUrl = process.env.MYSQL_URL;
+  process.env.MYSQL_URL = "";
+  t.after(() => {
+    if (originalMysqlUrl === undefined) delete process.env.MYSQL_URL;
+    else process.env.MYSQL_URL = originalMysqlUrl;
+  });
+
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const address = server.address();

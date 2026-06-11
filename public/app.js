@@ -135,7 +135,7 @@ function renderOverview(workbench, dataGaps) {
 }
 
 function nextStepCard(workbench, targets, events, actions, gaps) {
-  const blockingGap = gaps.find((gap) => /mysql|mediacrawler|cdp|auth|login|unavailable|missing/i.test(`${gap.code || ""} ${gap.message || ""}`));
+  const blockingGap = gaps.find((gap) => gap.blocking || /mysql|mediacrawler|cdp|auth|login|unavailable/i.test(`${gap.code || ""} ${gap.message || ""}`));
   if (blockingGap) {
     return stepMarkup("补齐依赖", blockingGap.message || blockingGap.code, blockingGap.nextAction || "先修复依赖状态，再创建微博发现任务。", "warn");
   }

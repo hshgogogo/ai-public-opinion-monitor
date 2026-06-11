@@ -190,11 +190,12 @@ test("OpenSpec tasks keep only external dependency work unchecked", () => {
     assert.match(tasks, new RegExp(`- \\[x\\] ${taskId.replace(".", "\\.")}\\b`));
   }
 
-  for (const taskId of ["9.12", "11.5"]) {
+  for (const taskId of ["9.12"]) {
     assert.match(tasks, new RegExp(`- \\[ \\] ${taskId.replace(".", "\\.")}\\b`));
   }
 
   assert.match(tasks, /- \[x\] 10\.1\b/);
+  assert.match(tasks, /- \[x\] 11\.5\b/);
 });
 
 test("Weibo discovery target persistence uses atomic MySQL upsert", () => {

@@ -136,7 +136,7 @@ def main():
         elif args.command == "weibo-fixture-hello":
             emit(weibo_fixture_hello())
         elif args.command == "weibo-workbench":
-            emit(weibo_workbench_payload())
+            emit(weibo_workbench_payload(args.payload_json))
         elif args.command == "weibo-discovery":
             emit(weibo_discovery_payload(args.payload_json))
         elif args.command == "weibo-targets":
@@ -741,30 +741,229 @@ def weibo_fixture_hello():
     }
 
 
-def weibo_workbench_payload():
+def weibo_workbench_payload(payload_json="{}"):
+    payload = json.loads(payload_json or "{}")
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload("GET /api/weibo/workbench", database)
+    project = project_from_payload(payload)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM discovered_targets
+                WHERE project_id=%s
+                ORDER BY selected_status='selected' DESC, `rank` IS NULL, `rank`, hot_score DESC, id DESC
+                LIMIT 20
+                """,
+                (project["id"],),
+            )
+            targets = cur.fetchall()
+            cur.execute(
+                """
+                SELECT *
+                FROM artist_public_opinion_events
+                WHERE project_id=%s
+                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                LIMIT 20
+                """,
+                (project["id"],),
+            )
+            events = cur.fetchall()
+            cur.execute(
+                """
+                SELECT *
+                FROM publicity_actions
+                WHERE project_id=%s AND confirmation_status='pending'
+                ORDER BY priority DESC, created_at DESC, id DESC
+                LIMIT 20
+                """,
+                (project["id"],),
+            )
+            actions = cur.fetchall()
+            cur.execute(
+                """
+                SELECT id, status, crawler_type, output_path, raw_files, parsed_records, failed_records, collected_posts, collected_comments, created_at
+                FROM collection_tasks
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project["id"],),
+            )
+            latest_task = cur.fetchone()
+            cur.execute("SELECT COUNT(*) AS count FROM social_comments WHERE project_id=%s AND platform='weibo'", (project["id"],))
+            comment_count = cur.fetchone()["count"]
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT sr.comment_id) AS count
+                FROM sentiment_results sr
+                JOIN social_comments c ON c.id=sr.comment_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                """,
+                (project["id"],),
+            )
+            sentiment_count = cur.fetchone()["count"]
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM bot_memory_items
+                WHERE project_id=%s AND source_kind='analysis'
+                """,
+                (project["id"],),
+            )
+            analysis_memory_count = cur.fetchone()["count"]
+            cur.execute("SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s", (project["id"],))
+            action_count = cur.fetchone()["count"]
+            cur.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM action_backtests WHERE project_id=%s) +
+                  (SELECT COUNT(*) FROM bot_memory_items WHERE project_id=%s AND source_kind='backtest') AS count
+                """,
+                (project["id"], project["id"]),
+            )
+            backtest_count = cur.fetchone()["count"]
+    target_payloads = [target_row_to_payload(row) for row in targets]
+    event_payloads = [event_row_to_payload(row) for row in events]
+    action_payloads = [action_row_to_payload(row) for row in actions]
+    progress = {
+        "target_count": len(target_payloads),
+        "comment_count": int(comment_count or 0),
+        "analysis_count": int((sentiment_count or 0) + (analysis_memory_count or 0)),
+        "event_count": len(event_payloads),
+        "action_count": int(action_count or 0),
+        "pending_action_count": len(action_payloads),
+        "backtest_count": int(backtest_count or 0),
+    }
+    data_gaps = workbench_data_gaps(progress, latest_task)
     return {
+        "ok": True,
         "mode": "weibo-agent-mvp",
         "setup": {
             "activePlatform": "weibo",
-            "partialState": "no-data",
+            "partialState": workbench_partial_state(progress),
             "health": health_payload(),
+            "projectId": project["id"],
+            "progress": progress,
+            "latestTask": collection_task_row_to_payload(latest_task) if latest_task else None,
         },
-        "judgments": [],
-        "recommendedTargets": [],
-        "events": [],
-        "pendingActions": [],
-        "dataGaps": [
+        "judgments": workbench_judgments(latest_task, target_payloads, event_payloads, action_payloads),
+        "recommendedTargets": target_payloads,
+        "events": event_payloads,
+        "pendingActions": action_payloads,
+        "dataGaps": data_gaps,
+        "citations": workbench_citations(target_payloads, event_payloads, action_payloads),
+    }
+
+
+def workbench_partial_state(progress):
+    if not progress["target_count"]:
+        return "no-data"
+    if not progress["comment_count"]:
+        return "search-only"
+    if not progress["analysis_count"]:
+        return "detail-without-analysis"
+    if not progress["event_count"]:
+        return "analysis-without-event"
+    if not progress["action_count"]:
+        return "event-without-action"
+    if not progress["backtest_count"]:
+        return "action-without-backtest"
+    return "backtested"
+
+
+def workbench_data_gaps(progress, latest_task):
+    if not progress["target_count"]:
+        return [
             {
                 "code": "weibo_real_data_missing",
                 "message": "No real Weibo targets, comments, events, or actions are available yet.",
                 "nextAction": "Run Weibo discovery after MediaCrawler and Weibo auth are configured.",
             }
-        ],
-        "citations": [],
-    }
+        ]
+    gaps = []
+    if not progress["comment_count"]:
+        gaps.append({
+            "code": "weibo_detail_or_analysis_needed",
+            "message": "Weibo search targets exist, but detail comments or analyzed events are not available yet.",
+            "nextAction": "Select a target, collect detail comments, then run analysis/event creation.",
+        })
+    elif not progress["analysis_count"]:
+        gaps.append({
+            "code": "weibo_analysis_needed",
+            "message": "Weibo detail comments exist, but no analyzed event has been created yet.",
+            "nextAction": "Run comment analysis and event creation.",
+        })
+    elif not progress["event_count"]:
+        gaps.append({
+            "code": "weibo_event_needed",
+            "message": "Weibo comments have analysis records, but no event has crossed the evidence threshold yet.",
+            "nextAction": "Keep monitoring or adjust event evidence thresholds before generating action suggestions.",
+        })
+    if progress["event_count"] and not progress["action_count"]:
+        gaps.append({
+            "code": "weibo_action_needed",
+            "message": "Weibo events exist, but no pending action has been generated yet.",
+            "nextAction": "Generate or log a publicity action before backtesting.",
+        })
+    if progress["action_count"] and not progress["backtest_count"]:
+        gaps.append({
+            "code": "weibo_backtest_needed",
+            "message": "Actions exist; backtest requires confirmed or observed action timing and post-action evidence windows.",
+            "nextAction": "Confirm/log action execution and collect post-action windows.",
+        })
+    if latest_task and latest_task.get("failed_records"):
+        gaps.append({
+            "code": "weibo_adapter_partial",
+            "message": f"{latest_task.get('failed_records')} MediaCrawler records were not parsed.",
+            "nextAction": "Inspect archived JSONL before relying on full coverage.",
+        })
+    if latest_task and latest_task.get("status") == "failed":
+        gaps.append({
+            "code": "weibo_latest_task_failed",
+            "message": "The latest Weibo collection task failed; displayed targets may come from earlier successful discovery.",
+            "nextAction": "Inspect the latest task error and rerun discovery after fixing the runtime issue.",
+        })
+    return gaps
+
+
+def workbench_judgments(latest_task, targets, events, actions):
+    judgments = []
+    if latest_task:
+        judgments.append({
+            "type": "collection_task",
+            "summary": f"Weibo {latest_task.get('crawler_type') or 'collection'} task {latest_task.get('id')} {latest_task.get('status')}.",
+            "evidence_ids": [latest_task.get("id")],
+        })
+    if targets:
+        judgments.append({
+            "type": "target_recommendation",
+            "summary": f"{len(targets)} Weibo targets are ready for selection.",
+            "evidence_ids": [target.get("external_id") or target.get("id") for target in targets[:5]],
+        })
+    if events:
+        judgments.append({
+            "type": "event_watch",
+            "summary": f"{len(events)} Weibo events are available for review.",
+            "evidence_ids": [event.get("id") for event in events[:5]],
+        })
+    if actions:
+        judgments.append({
+            "type": "action_queue",
+            "summary": f"{len(actions)} Weibo actions need confirmation.",
+            "evidence_ids": [action.get("id") for action in actions[:5]],
+        })
+    return judgments
+
+
+def workbench_citations(targets, events, actions):
+    citations = []
+    citations.extend([target.get("external_id") or target.get("id") for target in targets[:10]])
+    citations.extend([event.get("id") for event in events[:10]])
+    citations.extend([action.get("id") for action in actions[:10]])
+    return [item for item in citations if item is not None]
 
 
 def real_weibo_endpoint_payload(endpoint, payload_json="{}", **ids):
@@ -1959,6 +2158,42 @@ def target_row_to_payload(row):
         "source_type": row.get("source_type", "unknown"),
         "source_match_method": row.get("source_match_method", "unknown"),
         "source_match_confidence": float(row.get("source_match_confidence") or 0),
+    }
+
+
+def collection_task_row_to_payload(row):
+    raw_files = db.jloads(row.get("raw_files"), [])
+    return {
+        "id": row["id"],
+        "status": row.get("status"),
+        "crawler_type": row.get("crawler_type"),
+        "has_archive": bool(row.get("output_path") or raw_files),
+        "raw_file_count": len(raw_files),
+        "parsed_records": int(row.get("parsed_records") or 0),
+        "failed_records": int(row.get("failed_records") or 0),
+        "collected_posts": int(row.get("collected_posts") or 0),
+        "collected_comments": int(row.get("collected_comments") or 0),
+        "created_at": iso_or_none(row.get("created_at")),
+    }
+
+
+def event_row_to_payload(row):
+    return {
+        "id": row["id"],
+        "platform": row["platform"],
+        "event_type": row.get("event_type"),
+        "title": row.get("title"),
+        "trigger_summary": row.get("trigger_summary"),
+        "related_artists": db.jloads(row.get("related_artists"), []),
+        "status": row.get("status"),
+        "risk_level": row.get("risk_level"),
+        "event_score": float(row.get("event_score") or 0),
+        "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+        "timeline": db.jloads(row.get("timeline_json"), []),
+        "impact_assessment": row.get("impact_assessment"),
+        "recommended_actions": db.jloads(row.get("recommended_actions"), []),
+        "first_seen_at": iso_or_none(row.get("first_seen_at")),
+        "last_seen_at": iso_or_none(row.get("last_seen_at")),
     }
 
 
