@@ -2428,6 +2428,7 @@ def weibo_action_confirm_payload(payload_json, action_id):
             "Retry with one of the supported confirmation statuses.",
             docs_anchor="weibo-action-confirmation",
         )
+    confirmation_note = str(payload.get("note") or payload.get("confirmation_note") or "").strip()
     effective_at = mysql_timestamp(payload.get("effectiveAt") or payload.get("effective_at"))
     project = strict_project_from_payload(payload)
     if not project:
@@ -2456,20 +2457,33 @@ def weibo_action_confirm_payload(payload_json, action_id):
                 SET confirmation_status=%s,
                     confirmed_at=NOW(),
                     effective_at=COALESCE(%s, effective_at)
-                WHERE id=%s AND project_id=%s
+                WHERE id=%s AND project_id=%s AND confirmation_status='pending'
                 """,
                 (status, effective_at, action_id, project["id"]),
             )
+            changed = cur.rowcount
             cur.execute("SELECT * FROM publicity_actions WHERE id=%s AND project_id=%s", (action_id, project["id"]))
             updated = cur.fetchone()
+            if changed == 0:
+                return weibo_error(
+                    "action_already_confirmed",
+                    "Weibo publicity action was already confirmed.",
+                    f"The action is currently {updated.get('confirmation_status') if updated else 'missing'} and cannot be overwritten.",
+                    "Refresh pending actions before applying another confirmation.",
+                    docs_anchor="weibo-action-confirmation",
+                )
     write_memory_item(
         updated["project_id"],
         "action",
         updated["id"],
         f"Weibo action {status}",
-        updated.get("content_summary") or updated.get("reason") or "User updated a Weibo action confirmation.",
+        confirmation_note or updated.get("content_summary") or updated.get("reason") or "User updated a Weibo action confirmation.",
         [updated["id"]],
-        {"from_status": before.get("confirmation_status"), "to_status": status},
+        {
+            "from_status": before.get("confirmation_status"),
+            "to_status": status,
+            "confirmation_note": confirmation_note,
+        },
         0.65,
     )
     return {

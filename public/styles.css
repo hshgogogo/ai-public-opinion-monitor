@@ -172,6 +172,11 @@ button {
   white-space: nowrap;
 }
 
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 button.secondary {
   background: #e8eef6;
   color: var(--ink);
@@ -216,7 +221,7 @@ button.secondary {
 
 .overview {
   display: grid;
-  grid-template-columns: minmax(280px, 1.2fr) minmax(260px, 0.9fr) minmax(220px, 0.8fr);
+  grid-template-columns: minmax(300px, 1.15fr) minmax(300px, 0.95fr);
   gap: 14px;
 }
 
@@ -343,6 +348,14 @@ canvas {
   text-decoration: none;
 }
 
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
 .target-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(168px, auto);
@@ -380,9 +393,23 @@ canvas {
   background: #f6f8fb;
 }
 
+.empty p {
+  margin-bottom: 10px;
+}
+
+.empty-cta,
+.step-cta {
+  margin-top: 10px;
+}
+
 .data-gap {
   border-color: #ead8b2;
   background: #fffaf0;
+}
+
+.data-gap.blocking {
+  border-color: #f2aaa5;
+  background: #fff3f1;
 }
 
 .status-grid div {
@@ -396,6 +423,7 @@ canvas {
 }
 
 .metric-panel {
+  grid-column: 1 / -1;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
@@ -452,6 +480,10 @@ canvas {
   font-weight: 800;
 }
 
+.step-cta {
+  width: auto;
+}
+
 .step-card.ok {
   border-color: #b6dfd2;
   background: #f0faf7;
@@ -487,6 +519,93 @@ canvas {
 .warn {
   color: var(--red);
   font-weight: 800;
+}
+
+.chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 10px 0 8px;
+}
+
+.chip,
+.risk-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.chip.neutral {
+  background: #eef3f7;
+  color: #465569;
+}
+
+.chip.hot,
+.chip.warning {
+  background: #fff2d5;
+  color: #8a5a05;
+}
+
+.chip.trust,
+.chip.success {
+  background: #e4f7ef;
+  color: var(--green);
+}
+
+.chip.danger {
+  background: #ffe3e0;
+  color: var(--red);
+}
+
+.risk-chip {
+  border: 1px solid #d7dee8;
+  background: #f4f7fb;
+  color: #465569;
+}
+
+.risk-critical,
+.risk-high {
+  border-color: #f2aaa5;
+  background: #ffe3e0;
+  color: var(--red);
+}
+
+.risk-medium {
+  border-color: #ecd3a0;
+  background: #fff2d5;
+  color: #8a5a05;
+}
+
+.risk-low {
+  border-color: #b6dfd2;
+  background: #e4f7ef;
+  color: var(--green);
+}
+
+.strong-meta {
+  color: var(--ink);
+}
+
+.confirmation-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #ecd3a0;
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.confirmation-panel p {
+  margin-bottom: 10px;
+}
+
+.confirmation-panel textarea {
+  margin-bottom: 10px;
+  min-height: 74px;
 }
 
 .play,
@@ -586,6 +705,7 @@ canvas {
   .status-strip {
     align-items: flex-start;
     flex-wrap: wrap;
+    white-space: normal;
   }
 
   .kpi-grid {
@@ -598,5 +718,28 @@ canvas {
 
   button {
     width: 100%;
+  }
+
+  .focus-panel .list,
+  .side-stack .list {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .button-row,
+  .action-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .target-card .button-row,
+  .confirmation-panel .button-row,
+  .qa-row {
+    grid-template-columns: 1fr;
+  }
+
+  .card-head {
+    display: grid;
   }
 }

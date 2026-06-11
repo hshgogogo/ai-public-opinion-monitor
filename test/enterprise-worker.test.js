@@ -183,17 +183,15 @@ test("Weibo MVP sentiment migration extends analysis fields and migration order"
   }
 });
 
-test("OpenSpec tasks keep only external dependency work unchecked", () => {
+test("OpenSpec tasks include real environment and design pass evidence", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md");
 
   for (const taskId of ["3.1", "3.2", "3.3", "3.4", "3.5", "4.1", "4.2", "4.3", "4.4", "4.7", "4.8", "4.9", "5.5", "6.4", "6.5", "7.1", "7.2", "7.5", "7.6", "7.7", "7.8"]) {
     assert.match(tasks, new RegExp(`- \\[x\\] ${taskId.replace(".", "\\.")}\\b`));
   }
 
-  for (const taskId of ["9.12"]) {
-    assert.match(tasks, new RegExp(`- \\[ \\] ${taskId.replace(".", "\\.")}\\b`));
-  }
-
+  assert.match(tasks, /- \[x\] 9\.12\b/);
+  assert.match(tasks, /Local Claude Code design pass succeeded/);
   assert.match(tasks, /- \[x\] 10\.1\b/);
   assert.match(tasks, /- \[x\] 11\.5\b/);
 });

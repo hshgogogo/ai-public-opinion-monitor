@@ -935,11 +935,36 @@ test(
       "--action-id",
       String(officialAction.id),
       "--payload-json",
-      JSON.stringify({ projectId, confirmationStatus: "confirmed", effectiveAt: "2026-06-10T08:00:00Z" })
+      JSON.stringify({
+        projectId,
+        confirmationStatus: "confirmed",
+        effectiveAt: "2026-06-10T08:00:00Z",
+        note: "已核对官号发布时间和事件证据"
+      })
     ]);
     assert.equal(confirmation.ok, true);
     assert.equal(confirmation.action.confirmation_status, "confirmed");
     assert.notEqual(queryRows("SELECT confirmed_at FROM publicity_actions WHERE id=%s", [officialAction.id])[0].confirmed_at, null);
+    const confirmationMemory = queryRows(
+      "SELECT summary, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.confirmation_note')) AS note FROM bot_memory_items WHERE project_id=%s AND source_kind='action' AND source_id=%s ORDER BY id DESC LIMIT 1",
+      [projectId, officialAction.id]
+    )[0];
+    assert.equal(confirmationMemory.summary, "已核对官号发布时间和事件证据");
+    assert.equal(confirmationMemory.note, "已核对官号发布时间和事件证据");
+
+    const repeatedConfirmation = runWorker([
+      "weibo-action-confirm",
+      "--action-id",
+      String(officialAction.id),
+      "--payload-json",
+      JSON.stringify({ projectId, confirmationStatus: "rejected" })
+    ]);
+    assert.equal(repeatedConfirmation.ok, false);
+    assert.equal(repeatedConfirmation.error_type, "action_already_confirmed");
+    assert.equal(
+      queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [officialAction.id])[0].confirmation_status,
+      "confirmed"
+    );
 
     const backtest = runWorker([
       "weibo-backtest-fixture",
