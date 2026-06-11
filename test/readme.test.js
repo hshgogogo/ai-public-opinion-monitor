@@ -15,8 +15,7 @@ test("README documents Weibo MVP setup, fixture E2E, auth troubleshooting, and l
     "real_weibo_auth_missing",
     "No Xiaohongshu or Douyin collection",
     "fixture-driven MySQL persistence",
-    "MediaCrawler Weibo search adapter",
-    "真实 MediaCrawler detail",
+    "MediaCrawler Weibo search/detail adapters",
     "tasks.md"
   ]) {
     assert.equal(readme.includes(text), true, text);

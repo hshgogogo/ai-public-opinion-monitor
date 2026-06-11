@@ -38,7 +38,7 @@
 - [x] 4.4 Add `POST /api/weibo/targets/:id/collect-comments` backed by an internal `weibo-collect-target` worker command.
 - [x] 4.5 Validate the selected target's `target_locator` before MediaCrawler detail execution.
 - [x] 4.6 If the target cannot be resolved for MediaCrawler detail, fail the task with `target_detail_unsupported`, keep the target selected, and return an actionable remediation payload.
-- [ ] 4.7 Invoke MediaCrawler in Weibo `detail` mode for selected targets and archive raw detail JSONL.
+- [x] 4.7 Invoke MediaCrawler in Weibo `detail` mode for selected targets and archive raw detail JSONL.
 - [x] 4.8 Parse Weibo detail JSONL into `social_posts` and `social_comments` with stable deduplication by platform and external ID.
 - [x] 4.9 Record adapter failed record counts and partial/failure task status when detail JSONL contains bad records.
 - [x] 4.10 Add fixture-based unit tests for Weibo detail parsing, deduplication, bad rows, unsupported locators, and target-task linking.

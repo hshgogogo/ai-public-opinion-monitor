@@ -322,6 +322,88 @@ test(
 );
 
 test(
+  "runs MediaCrawler detail for a selected target and archives raw Weibo detail JSONL",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    rmSync("storage/mediacrawler", { recursive: true, force: true });
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const discovery = runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        keyword: "海岛舒服日志",
+        limit: 10,
+        fixturePath: "test/fixtures/weibo-search.jsonl"
+      })
+    ]);
+    assert.equal(discovery.ok, true);
+    const selected = runWorker(["weibo-target-select", "--payload-json", JSON.stringify({ targetId: "1001" })]);
+    assert.equal(selected.ok, true);
+
+    const detail = runWorker(
+      [
+        "weibo-collect-target",
+        "--target-id",
+        "1001",
+        "--payload-json",
+        JSON.stringify({
+          keyword: "海岛舒服日志",
+          limit: 25
+        })
+      ],
+      {
+        MEDIACRAWLER_HOME: "test/fixtures/fake-mediacrawler",
+        MEDIACRAWLER_PYTHON: python,
+        MEDIACRAWLER_OUTPUT_DIR: "storage/mediacrawler",
+        MEDIACRAWLER_COMMIT: "fake-mediacrawler-test",
+        MEDIACRAWLER_CDP_PORT: "65533",
+        WEIBO_COOKIE_FILE: fakeWeiboCookieFile
+      }
+    );
+
+    assert.equal(detail.ok, true);
+    assert.equal(detail.status, "succeeded");
+    assert.equal(detail.persisted_posts, 1);
+    assert.equal(detail.persisted_comments, 2);
+
+    const taskRows = queryRows(
+      "SELECT crawler_engine, status, output_path, raw_files, parsed_records, failed_records, collected_posts, collected_comments FROM collection_tasks WHERE id=%s",
+      [detail.task.id]
+    );
+    const task = taskRows[0];
+    assert.equal(task.crawler_engine, "mediacrawler");
+    assert.equal(task.status, "succeeded");
+    assert.equal(task.parsed_records, 3);
+    assert.equal(task.failed_records, 0);
+    assert.equal(task.collected_posts, 1);
+    assert.equal(task.collected_comments, 2);
+    assert.match(task.output_path, new RegExp(`storage/mediacrawler/${projectId}/${detail.task.id}/weibo/`));
+
+    const rawFiles = JSON.parse(task.raw_files);
+    assert.equal(rawFiles.length, 2);
+    assert.equal(rawFiles.every((file) => existsSync(file)), true);
+    assert.equal(rawFiles.some((file) => file.includes("detail_contents_")), true);
+    assert.equal(rawFiles.some((file) => file.includes("detail_comments_")), true);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM target_collection_links WHERE collection_task_id=%s", [detail.task.id])[0].count, 1);
+    assert.equal(queryRows("SELECT external_id, source_account_external_id FROM social_posts WHERE external_id='m1001'")[0].source_account_external_id, "mc-detail-user");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments WHERE post_id=(SELECT id FROM social_posts WHERE external_id='m1001')")[0].count, 2);
+
+    const invocation = JSON.parse(readFileSync(`${task.output_path}/invocation.json`, "utf8"));
+    assert.equal(flagValue(invocation.argv, "--type"), "detail");
+    assert.equal(flagValue(invocation.argv, "--specified_id"), "m1001");
+    assert.equal(flagValue(invocation.argv, "--get_comment"), "true");
+    assert.equal(flagValue(invocation.argv, "--max_comments_count_singlenotes"), "25");
+    assert.equal(invocation.has_cookies_arg, false);
+    assert.equal(invocation.argv.includes("fake-sub-for-tests"), false);
+    assert.equal(invocation.config_cookie_present, true);
+    assert.equal(invocation.config_cdp_port, 65533);
+  }
+);
+
+test(
   "does not leak child process environment or stderr when MediaCrawler search fails",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -353,6 +435,42 @@ test(
     assert.equal(failed.cause, "exit_code=2");
     assert.equal(JSON.stringify(failed).includes("sk-parent-secret"), false);
     assert.equal(JSON.stringify(failed).includes("should-not-leak"), false);
+  }
+);
+
+test(
+  "returns a standard MediaCrawler missing error for selected-target detail when runtime is unavailable",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const discovery = runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        keyword: "海岛舒服日志",
+        limit: 10,
+        fixturePath: "test/fixtures/weibo-search.jsonl"
+      })
+    ]);
+    assert.equal(discovery.ok, true);
+    assert.equal(runWorker(["weibo-target-select", "--payload-json", JSON.stringify({ targetId: "1001" })]).ok, true);
+
+    const blocked = runWorker([
+      "weibo-collect-target",
+      "--target-id",
+      "1001",
+      "--payload-json",
+      JSON.stringify({
+        keyword: "海岛舒服日志",
+        limit: 25
+      })
+    ]);
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error_type, "mediacrawler_missing");
+    const taskRows = queryRows("SELECT status, error_type FROM collection_tasks WHERE id=%s", [blocked.task.id]);
+    assert.deepEqual(taskRows[0], { status: "failed", error_type: "mediacrawler_missing" });
   }
 );
 
@@ -429,6 +547,39 @@ test(
     assert.equal(blocked.error_type, "auth_required");
     const taskRows = queryRows("SELECT status, error_type FROM collection_tasks WHERE id=%s", [blocked.task.id]);
     assert.deepEqual(taskRows[0], { status: "failed", error_type: "auth_required" });
+  }
+);
+
+test(
+  "rejects raw cookie header files because Weibo domains cannot be filtered",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const blocked = runWorker(
+      [
+        "weibo-discovery",
+        "--payload-json",
+        JSON.stringify({
+          keyword: "海岛舒服日志",
+          limit: 10
+        })
+      ],
+      {
+        MEDIACRAWLER_HOME: "test/fixtures/fake-mediacrawler",
+        MEDIACRAWLER_PYTHON: python,
+        MEDIACRAWLER_OUTPUT_DIR: "storage/mediacrawler",
+        MEDIACRAWLER_COMMIT: "fake-mediacrawler-test",
+        WEIBO_COOKIE_FILE: "test/fixtures/weibo-cookie-header.json"
+      }
+    );
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error_type, "auth_invalid");
+    assert.equal(blocked.cause.includes("Raw cookie header strings are not accepted"), true);
+    const taskRows = queryRows("SELECT status, error_type FROM collection_tasks WHERE id=%s", [blocked.task.id]);
+    assert.deepEqual(taskRows[0], { status: "failed", error_type: "auth_invalid" });
   }
 );
 

@@ -1097,7 +1097,32 @@ def weibo_collect_target_payload(payload_json, target_id):
         output_path=fixture_path,
         raw_files=[fixture_path] if fixture_path else [],
     )
-    link_target_collection(target["id"], task_id)
+    try:
+        link_target_collection(target["id"], task_id)
+    except Exception as exc:
+        error = weibo_error(
+            "target_collection_link_failed",
+            "Weibo target detail task could not be linked to the selected target.",
+            type(exc).__name__,
+            "Check target_collection_links constraints and rerun the detail task.",
+            docs_anchor="weibo-detail",
+        )
+        finish_weibo_collection_task(
+            task_id,
+            "failed",
+            error["error_type"],
+            error["message"],
+            parsed_records=0,
+            failed_records=1,
+            posts=0,
+            comments=0,
+        )
+        return {
+            **error,
+            "mode": "weibo-agent-mvp",
+            "database": database,
+            "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+        }
     if not locator_check.get("ok"):
         finish_weibo_collection_task(
             task_id,
@@ -1112,39 +1137,119 @@ def weibo_collect_target_payload(payload_json, target_id):
         locator_check.update({"task": task_payload(task_id, "weibo", keyword, "detail", target["id"])})
         return locator_check
     if not fixture_path:
+        run = {"output_path": None, "raw_files": []}
+        try:
+            detail_locator = locator_check["detail_locator"]
+            run = run_mediacrawler_detail(
+                project["id"],
+                task_id,
+                keyword,
+                detail_locator["weibo_mid"],
+                int(payload.get("limit") or 50),
+            )
+            update_weibo_collection_task_paths(task_id, run.get("output_path"), run.get("raw_files", []))
+            if not run.get("ok"):
+                finish_weibo_collection_task(
+                    task_id,
+                    "failed",
+                    run["error"]["error_type"],
+                    run["error"]["message"],
+                    parsed_records=0,
+                    failed_records=0,
+                    posts=0,
+                    comments=0,
+                )
+                return {
+                    **run["error"],
+                    "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+                    "database": database,
+                }
+            detail = parse_weibo_detail_files(run["raw_files"], str(target["id"]), str(task_id))
+        except MediaCrawlerParseError as exc:
+            error = weibo_error(
+                "mediacrawler_detail_parse_failed",
+                "MediaCrawler detail JSONL could not be parsed.",
+                str(exc),
+                "Inspect the archived detail_contents/detail_comments JSONL and rerun the detail task.",
+                docs_anchor="weibo-detail",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+                "database": database,
+            }
+        except Exception as exc:
+            error = weibo_error(
+                "mediacrawler_detail_adapter_failed",
+                "MediaCrawler detail adapter failed before persistence.",
+                type(exc).__name__,
+                "Check MediaCrawler detail output path permissions and worker configuration, then rerun the task.",
+                docs_anchor="weibo-detail",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
+                "database": database,
+            }
+    else:
+        detail = parse_weibo_detail_fixture(fixture_path, str(target["id"]), str(task_id))
+    try:
+        persisted_posts, post_ids_by_external = persist_detail_posts(project["id"], detail["posts"])
+        persisted_comments = persist_detail_comments(project["id"], detail["comments"], post_ids_by_external)
+        finish_weibo_collection_task(
+            task_id,
+            detail["status"],
+            "adapter_parse_failed" if detail["failed_records"] else None,
+            json.dumps(detail["errors"], ensure_ascii=False) if detail["errors"] else None,
+            parsed_records=detail["parsed_records"],
+            failed_records=detail["failed_records"],
+            posts=persisted_posts,
+            comments=persisted_comments,
+        )
+    except Exception as exc:
+        error = weibo_error(
+            "weibo_detail_persist_failed",
+            "Weibo detail posts or comments could not be persisted.",
+            type(exc).__name__,
+            "Inspect the archived detail JSONL and database schema, then rerun the detail task.",
+            docs_anchor="weibo-detail",
+        )
         finish_weibo_collection_task(
             task_id,
             "failed",
-            "mediacrawler_not_run",
-            "Local persistence slice requires fixturePath and does not invoke real MediaCrawler.",
+            error["error_type"],
+            error["message"],
             parsed_records=0,
-            failed_records=0,
+            failed_records=max(int(detail.get("failed_records") or 0), 1),
             posts=0,
             comments=0,
         )
         return {
-            **weibo_error(
-                "mediacrawler_not_run",
-                "Weibo detail task was created but real MediaCrawler detail was not invoked.",
-                "This local slice only persists fixture detail JSONL into MySQL.",
-                "Pass fixturePath for local verification, or complete the real MediaCrawler detail task later.",
-                docs_anchor="weibo-detail",
-            ),
+            **error,
+            "mode": "weibo-agent-mvp",
+            "database": database,
             "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
         }
-    detail = parse_weibo_detail_fixture(fixture_path, str(target["id"]), str(task_id))
-    persisted_posts, post_ids_by_external = persist_detail_posts(project["id"], detail["posts"])
-    persisted_comments = persist_detail_comments(project["id"], detail["comments"], post_ids_by_external)
-    finish_weibo_collection_task(
-        task_id,
-        detail["status"],
-        "adapter_parse_failed" if detail["failed_records"] else None,
-        json.dumps(detail["errors"], ensure_ascii=False) if detail["errors"] else None,
-        parsed_records=detail["parsed_records"],
-        failed_records=detail["failed_records"],
-        posts=persisted_posts,
-        comments=persisted_comments,
-    )
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
@@ -1420,6 +1525,167 @@ def run_mediacrawler_search(project_id, task_id, keyword, limit):
     }
 
 
+def run_mediacrawler_detail(project_id, task_id, keyword, detail_id, comment_limit):
+    repo_root = Path.cwd()
+    home_value = os.environ.get("MEDIACRAWLER_HOME", "")
+    python_value = os.environ.get("MEDIACRAWLER_PYTHON", "")
+    home = resolve_repo_path(home_value)
+    python = resolve_repo_path(python_value)
+    output_dir = mediacrawler_task_output_dir(project_id, task_id, keyword)
+    output_path = repo_relative(output_dir, repo_root)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_output_unwritable",
+                "MediaCrawler output directory is not writable.",
+                type(exc).__name__,
+                "Choose a writable MEDIACRAWLER_OUTPUT_DIR and rerun the detail task.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    if not home_value or not home.exists() or not home.is_dir():
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_missing",
+                "MediaCrawler home is unavailable.",
+                f"MEDIACRAWLER_HOME does not point to a directory: {home}",
+                "Set MEDIACRAWLER_HOME to your local MediaCrawler checkout.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    if not python_value or not python.exists() or not os.access(python, os.X_OK):
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_python_missing",
+                "MediaCrawler python executable is unavailable.",
+                f"MEDIACRAWLER_PYTHON does not point to an executable file: {python}",
+                "Set MEDIACRAWLER_PYTHON to the Python executable used by MediaCrawler.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    cookie_header, cookie_error = mediacrawler_cookie_header()
+    if cookie_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cookie_error,
+        }
+    cdp_port, cdp_error = mediacrawler_cdp_port()
+    if cdp_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cdp_error,
+        }
+    timeout_seconds, timeout_error = mediacrawler_timeout_seconds()
+    if timeout_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": timeout_error,
+        }
+    max_comments = max(int(comment_limit or 0), 0)
+    command = [
+        str(python),
+        "-c",
+        MEDIACRAWLER_BOOTSTRAP,
+        "--platform",
+        "wb",
+        "--lt",
+        "cookie",
+        "--type",
+        "detail",
+        "--specified_id",
+        str(detail_id),
+        "--save_data_option",
+        "jsonl",
+        "--save_data_path",
+        str(output_dir),
+        "--crawler_max_notes_count",
+        "1",
+        "--get_comment",
+        "true",
+        "--max_comments_count_singlenotes",
+        str(max_comments),
+    ]
+    env = mediacrawler_subprocess_env({
+        "MEDIACRAWLER_CDP_PORT": str(cdp_port),
+        "SAVE_DATA_OPTION": "jsonl",
+        "SAVE_DATA_PATH": str(output_dir),
+        "CRAWLER_MAX_NOTES_COUNT": "1",
+    })
+    try:
+        result = subprocess.run(
+            command,
+            cwd=home,
+            env=env,
+            capture_output=True,
+            text=True,
+            input=json.dumps({"cookies": cookie_header}),
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_timeout",
+                "MediaCrawler detail timed out.",
+                f"timeout_seconds={exc.timeout}",
+                "Retry after checking Weibo login state, CDP, and MediaCrawler runtime health.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    raw_files = sorted(repo_relative(path, repo_root) for path in output_dir.rglob("*.jsonl") if path.is_file())
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": raw_files,
+            "error": weibo_error(
+                "mediacrawler_detail_failed",
+                "MediaCrawler Weibo detail failed.",
+                f"exit_code={result.returncode}",
+                "Check MediaCrawler configuration, Weibo login state, and the generated output directory.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    if not raw_files:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_jsonl_missing",
+                "MediaCrawler detail did not produce JSONL output.",
+                f"No .jsonl files were found under {output_path}.",
+                "Check MediaCrawler SAVE_DATA_OPTION/SAVE_DATA_PATH and rerun the detail task.",
+                docs_anchor="weibo-detail",
+            ),
+        }
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "raw_files": raw_files,
+    }
+
+
 def mediacrawler_cookie_header():
     cookie_file = resolve_repo_path(os.environ.get("WEIBO_COOKIE_FILE", "config/cookies/weibo.json"))
     if not cookie_file.exists() or not cookie_file.is_file():
@@ -1441,28 +1707,33 @@ def mediacrawler_cookie_header():
             docs_anchor="weibo-discovery",
         )
     if isinstance(data, str):
-        cookie_header = data.strip()
-    else:
-        cookies = data.get("cookies") if isinstance(data, dict) else data
-        if not isinstance(cookies, list):
-            return None, weibo_error(
-                "auth_invalid",
-                "Weibo auth cookie is invalid.",
-                "Cookie file must be a cookie list, a Playwright storageState JSON object, or a cookie header string.",
-                "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
-                docs_anchor="weibo-discovery",
-            )
-        parts = []
-        for cookie in cookies:
-            if not isinstance(cookie, dict):
-                continue
-            if not is_weibo_cookie_domain(cookie.get("domain")):
-                continue
-            name = cookie.get("name")
-            value = cookie.get("value")
-            if name and value is not None:
-                parts.append(f"{name}={value}")
-        cookie_header = "; ".join(parts)
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            "Raw cookie header strings are not accepted because domains cannot be filtered safely.",
+            "Refresh WEIBO_COOKIE_FILE with a browser cookie list or Playwright storageState JSON.",
+            docs_anchor="weibo-discovery",
+        )
+    cookies = data.get("cookies") if isinstance(data, dict) else data
+    if not isinstance(cookies, list):
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            "Cookie file must be a cookie list or a Playwright storageState JSON object.",
+            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            docs_anchor="weibo-discovery",
+        )
+    parts = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        if not is_weibo_cookie_domain(cookie.get("domain")):
+            continue
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if name and value is not None:
+            parts.append(f"{name}={value}")
+    cookie_header = "; ".join(parts)
     if not cookie_header:
         return None, weibo_error(
             "auth_invalid",
@@ -2569,7 +2840,9 @@ def content_fingerprint(text):
 def validate_weibo_target_locator(locator):
     if locator.get("platform") != "weibo":
         return unsupported_target_locator(locator, "Target locator platform must be weibo.")
-    detail_id = locator.get("weibo_mid") or status_id_from_weibo_url(locator.get("url"))
+    if locator.get("target_type") != "weibo_post":
+        return unsupported_target_locator(locator, "Target locator type must be weibo_post for detail collection.")
+    detail_id = locator.get("weibo_mid") or status_id_from_weibo_url(locator.get("url")) or locator.get("external_id")
     if not detail_id:
         return unsupported_target_locator(locator, "Selected target cannot be resolved for MediaCrawler detail collection.")
     return {
@@ -2652,21 +2925,116 @@ def parse_weibo_detail_fixture(fixture_path, target_id, task_id):
     }
 
 
+def parse_weibo_detail_files(paths, target_id, task_id):
+    content_paths = [path for path in paths if is_weibo_detail_content_file(path)]
+    comment_paths = [path for path in paths if is_weibo_detail_comment_file(path)]
+    if not content_paths:
+        raise MediaCrawlerParseError("No detail_contents JSONL files were archived for the Weibo detail task.")
+    posts = {}
+    comments = {}
+    errors = []
+    parsed = 0
+    for path in content_paths:
+        for raw, error in read_jsonl_records(path):
+            if error:
+                errors.append(error)
+                continue
+            try:
+                normalized_post = normalize_weibo_detail_post(raw)
+                posts[normalized_post["external_id"]] = {**posts.get(normalized_post["external_id"], {}), **normalized_post}
+                parsed += 1
+            except Exception as exc:
+                errors.append({
+                    "path": path,
+                    "error_type": "adapter_parse_failed",
+                    "message": str(exc),
+                })
+    if not posts:
+        if errors:
+            raise MediaCrawlerParseError(errors[0]["message"])
+        raise MediaCrawlerParseError("MediaCrawler detail output did not contain any valid post rows.")
+    for path in comment_paths:
+        for raw, error in read_jsonl_records(path):
+            if error:
+                errors.append(error)
+                continue
+            try:
+                post_external_id = str(raw.get("note_id") or raw.get("post_id") or next(iter(posts.keys())))
+                normalized_comment = normalize_weibo_detail_comment(post_external_id, raw)
+                comments[normalized_comment["external_id"]] = {**comments.get(normalized_comment["external_id"], {}), **normalized_comment}
+                parsed += 1
+            except Exception as exc:
+                errors.append({
+                    "path": path,
+                    "error_type": "adapter_parse_failed",
+                    "message": str(exc),
+                })
+    failed = len(errors)
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "fixture": False,
+        "status": "partial" if failed and parsed else ("failed" if failed else "succeeded"),
+        "parsed_records": parsed,
+        "failed_records": failed,
+        "posts": list(posts.values()),
+        "comments": list(comments.values()),
+        "errors": errors,
+        "target_collection_link": {
+            "target_id": str(target_id),
+            "collection_task_id": str(task_id),
+            "link_type": "detail",
+        },
+    }
+
+
+def read_jsonl_records(path):
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        yield None, {
+            "path": path,
+            "error_type": "adapter_parse_failed",
+            "message": f"Unable to read JSONL file: {type(exc).__name__}",
+        }
+        return
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            yield json.loads(line), None
+        except json.JSONDecodeError as exc:
+            yield None, {
+                "path": path,
+                "line": line_number,
+                "error_type": "adapter_parse_failed",
+                "message": f"Invalid JSON: {exc.msg}",
+            }
+
+
+def is_weibo_detail_content_file(path):
+    return Path(path).name.startswith("detail_contents") and Path(path).suffix == ".jsonl"
+
+
+def is_weibo_detail_comment_file(path):
+    return Path(path).name.startswith("detail_comments") and Path(path).suffix == ".jsonl"
+
+
 def normalize_weibo_detail_post(raw):
-    post = raw["post"]
+    post = raw.get("post") if isinstance(raw, dict) and isinstance(raw.get("post"), dict) else raw
     text = post.get("text") or post.get("content") or ""
     return {
         "platform": "weibo",
-        "external_id": str(post.get("id") or post.get("mid") or content_fingerprint(text)),
-        "weibo_mid": post.get("mid"),
-        "url": post.get("url"),
-        "author_name": post.get("screen_name") or post.get("author"),
+        "external_id": str(post.get("id") or post.get("mid") or post.get("note_id") or content_fingerprint(text)),
+        "weibo_mid": post.get("mid") or post.get("note_id"),
+        "url": post.get("url") or post.get("note_url"),
+        "author_name": post.get("screen_name") or post.get("author") or post.get("nickname"),
         "source_account_external_id": post.get("author_id") or post.get("user_id"),
-        "source_account_url": post.get("author_url"),
+        "source_account_url": post.get("author_url") or post.get("profile_url"),
         "title": post.get("title") or text[:80],
         "content": text,
-        "keyword": post.get("keyword") or "",
-        "engagement": int(post.get("attitudes_count") or post.get("likes") or 0),
+        "keyword": post.get("keyword") or post.get("source_keyword") or "",
+        "engagement": numeric_count(post.get("attitudes_count") or post.get("likes") or post.get("liked_count")),
         "content_fingerprint": content_fingerprint(text),
         "raw_json": raw,
     }
@@ -2676,14 +3044,14 @@ def normalize_weibo_detail_comment(post_external_id, comment):
     if not isinstance(comment, dict):
         raise ValueError("comment must be an object")
     text = comment.get("text") or comment.get("content") or ""
-    external_id = str(comment.get("id") or content_fingerprint(post_external_id + text))
-    like_count = int(comment.get("like_count") or comment.get("likes") or 0)
-    reply_count = int(comment.get("reply_count") or 0)
+    external_id = str(comment.get("id") or comment.get("comment_id") or content_fingerprint(post_external_id + text))
+    like_count = numeric_count(comment.get("like_count") or comment.get("likes") or comment.get("comment_like_count"))
+    reply_count = numeric_count(comment.get("reply_count") or comment.get("sub_comment_count"))
     return {
         "platform": "weibo",
         "post_external_id": post_external_id,
         "external_id": external_id,
-        "author_name": comment.get("screen_name") or comment.get("author"),
+        "author_name": comment.get("screen_name") or comment.get("author") or comment.get("nickname"),
         "source_account_external_id": comment.get("user_id") or comment.get("author_id"),
         "content": text,
         "like_count": like_count,

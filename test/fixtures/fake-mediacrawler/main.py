@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--get_comment", default="false")
     parser.add_argument("--crawler_max_notes_count")
     parser.add_argument("--max_comments_count_singlenotes")
+    parser.add_argument("--specified_id")
     args, _ = parser.parse_known_args()
 
     output_dir = Path(args.save_data_path)
@@ -62,6 +63,57 @@ def main():
         encoding="utf-8",
     )
     keyword = args.keywords or "\u6d77\u5c9b\u8212\u670d\u65e5\u5fd7"
+    if args.type == "detail":
+        note_id = args.specified_id or "mc-detail-1"
+        content_file = jsonl_dir / "detail_contents_2026-06-10.jsonl"
+        content_file.write_text(
+            json.dumps(
+                {
+                    "note_id": note_id,
+                    "content": "\u6d77\u5c9b\u8212\u670d\u65e5\u5fd7 \u5218\u660a\u7136 \u8be6\u60c5\u91c7\u96c6\u5e16",
+                    "source_keyword": keyword,
+                    "note_url": f"https://m.weibo.cn/detail/{note_id}",
+                    "user_id": "mc-detail-user",
+                    "nickname": "\u8be6\u60c5\u5b98\u53f7",
+                    "liked_count": 77,
+                    "comments_count": 2,
+                    "shared_count": 4,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if str_to_bool(args.get_comment):
+            (jsonl_dir / "detail_comments_2026-06-10.jsonl").write_text(
+                "\n".join(
+                    json.dumps(record, ensure_ascii=False)
+                    for record in [
+                        {
+                            "comment_id": "mc-detail-comment-1",
+                            "note_id": note_id,
+                            "content": "\u5b98\u53f7\u8bc4\u8bba\u91cc\u7684\u6b63\u5411\u53cd\u9988",
+                            "user_id": "comment-user-1",
+                            "nickname": "\u8bc4\u8bba\u7528\u62371",
+                            "comment_like_count": "9",
+                            "sub_comment_count": "1",
+                        },
+                        {
+                            "comment_id": "mc-detail-comment-2",
+                            "note_id": note_id,
+                            "content": "\u62c5\u5fc3\u8282\u594f\u7684\u8bc4\u8bba",
+                            "user_id": "comment-user-2",
+                            "nickname": "\u8bc4\u8bba\u7528\u62372",
+                            "comment_like_count": "4",
+                            "sub_comment_count": "0",
+                        },
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        print(json.dumps({"ok": True, "output": str(content_file), "platform": args.platform, "type": args.type}))
+        return
     if "fail-runtime" in keyword:
         print("MYSQL_URL=mysql://should-not-leak DEEPSEEK_API_KEY=sk-should-not-leak", file=sys.stderr)
         raise SystemExit(2)
