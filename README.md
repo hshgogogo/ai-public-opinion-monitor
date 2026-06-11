@@ -40,7 +40,8 @@ python workers/enterprise_worker.py weibo-fixture-e2e --now 2026-06-10T12:00:00Z
 ### MVP Limitations
 
 - 已完成 fixture-driven MySQL persistence，可在本地测试 Weibo task、target、detail posts/comments、event、action、memory/report 的部分入库链路。
-- 真实 MediaCrawler search/detail 仍未完成；当前不会启动真实采集任务。
+- 已完成 MediaCrawler Weibo search adapter、task-specific output path、raw JSONL 归档和 search JSONL 入库链路；真实环境验收仍以 11.5 为准。
+- 真实 MediaCrawler detail 仍未完成；当前不会对选中目标启动真实 detail 采集任务。
 - 真实微博登录态、Chrome CDP、MediaCrawler 环境验收仍未完成。
 - 真实 DeepSeek 事件解释仍未完成；当前事件标题、解释和行动建议以确定性/fixture 路径为主。
 - 剩余未完成或部分保留的工作以 `openspec/changes/haidao-weibo-agent-mvp/tasks.md` 为准。

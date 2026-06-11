@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 
 const python = process.env.PYTHON_BIN || "/Users/mini-002/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
 const testMysqlUrl = process.env.WEIBO_DB_PERSISTENCE_TEST_URL;
+const fakeWeiboCookieFile = "test/fixtures/weibo-cookie.json";
 
 test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
@@ -168,6 +170,193 @@ test(
 );
 
 test(
+  "runs MediaCrawler search and archives raw Weibo search JSONL before persisting targets",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    rmSync("storage/mediacrawler", { recursive: true, force: true });
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const discovery = runWorker(
+      [
+        "weibo-discovery",
+        "--payload-json",
+        JSON.stringify({
+          keyword: "海岛舒服日志",
+          limit: 10
+        })
+      ],
+      {
+        MEDIACRAWLER_HOME: "test/fixtures/fake-mediacrawler",
+        MEDIACRAWLER_PYTHON: python,
+        MEDIACRAWLER_OUTPUT_DIR: "storage/mediacrawler",
+        MEDIACRAWLER_COMMIT: "fake-mediacrawler-test",
+        MEDIACRAWLER_CDP_PORT: "65533",
+        WEIBO_COOKIE_FILE: fakeWeiboCookieFile
+      }
+    );
+
+    assert.equal(discovery.ok, true);
+    assert.equal(discovery.task.crawler_type, "search");
+    assert.equal(discovery.persisted_targets, 2);
+    assert.equal(discovery.targets[0].external_id, "mc-search-1");
+    assert.equal(discovery.targets[0].url, "https://weibo.com/status/mc-search-1");
+    assert.equal(discovery.targets[0].keyword, "海岛舒服日志");
+
+    const taskRows = queryRows(
+      "SELECT crawler_engine, status, output_path, raw_files, parsed_records, failed_records, collected_posts FROM collection_tasks WHERE id=%s",
+      [discovery.task.id]
+    );
+    const task = taskRows[0];
+    assert.equal(task.crawler_engine, "mediacrawler");
+    assert.equal(task.status, "succeeded");
+    assert.equal(task.parsed_records, 2);
+    assert.equal(task.failed_records, 0);
+    assert.equal(task.collected_posts, 2);
+    assert.match(task.output_path, new RegExp(`storage/mediacrawler/${projectId}/${discovery.task.id}/weibo/`));
+
+    const rawFiles = JSON.parse(task.raw_files);
+    assert.equal(rawFiles.length, 1);
+    assert.equal(rawFiles.every((file) => existsSync(file)), true);
+    assert.equal(rawFiles.some((file) => file.includes("search_contents_")), true);
+    assert.match(readFileSync(rawFiles.find((file) => file.includes("search_contents_")), "utf8"), /mc-search-1/);
+
+    const targetIds = queryRows("SELECT external_id FROM discovered_targets ORDER BY `rank`, id").map((row) => row.external_id);
+    assert.deepEqual(targetIds, ["mc-search-1", "mc-search-2"]);
+
+    const invocation = JSON.parse(readFileSync(`${task.output_path}/invocation.json`, "utf8"));
+    assert.equal(invocation.has_mysql_url, false);
+    assert.equal(invocation.has_deepseek_key, false);
+    assert.equal(invocation.has_cookies_arg, false);
+    assert.equal(invocation.cookie_value_redacted, true);
+    assert.equal(invocation.argv.includes("fake-sub-for-tests"), false);
+    assert.equal(invocation.argv.includes("other-site-token"), false);
+    assert.equal(invocation.config_cookie_present, true);
+    assert.equal(invocation.config_cookie_value_recorded, false);
+    assert.equal(invocation.config_cookie_has_unrelated, false);
+    assert.equal(invocation.config_cdp_port, 65533);
+    assert.equal(invocation.mediacrawler_cdp_port, "65533");
+    assert.deepEqual(flagValue(invocation.argv, "--crawler_max_notes_count"), "10");
+    assert.deepEqual(flagValue(invocation.argv, "--get_comment"), "false");
+    assert.deepEqual(flagValue(invocation.argv, "--max_comments_count_singlenotes"), "0");
+  }
+);
+
+test(
+  "marks MediaCrawler search tasks failed when archived JSONL cannot be parsed",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    rmSync("storage/mediacrawler", { recursive: true, force: true });
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const failed = runWorker(
+      [
+        "weibo-discovery",
+        "--payload-json",
+        JSON.stringify({
+          keyword: "海岛舒服日志 bad-json",
+          limit: 10
+        })
+      ],
+      {
+        MEDIACRAWLER_HOME: "test/fixtures/fake-mediacrawler",
+        MEDIACRAWLER_PYTHON: python,
+        MEDIACRAWLER_OUTPUT_DIR: "storage/mediacrawler",
+        MEDIACRAWLER_COMMIT: "fake-mediacrawler-test",
+        WEIBO_COOKIE_FILE: fakeWeiboCookieFile
+      }
+    );
+
+    assert.equal(failed.ok, false);
+    assert.equal(failed.error_type, "mediacrawler_parse_failed");
+    const taskRows = queryRows("SELECT status, error_type, parsed_records, failed_records FROM collection_tasks WHERE id=%s", [failed.task.id]);
+    assert.deepEqual(taskRows[0], {
+      status: "failed",
+      error_type: "mediacrawler_parse_failed",
+      parsed_records: 0,
+      failed_records: 1
+    });
+  }
+);
+
+test(
+  "keeps valid MediaCrawler search rows and marks the task partial when some JSONL lines fail",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    rmSync("storage/mediacrawler", { recursive: true, force: true });
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const partial = runWorker(
+      [
+        "weibo-discovery",
+        "--payload-json",
+        JSON.stringify({
+          keyword: "海岛舒服日志 partial-json",
+          limit: 10
+        })
+      ],
+      {
+        MEDIACRAWLER_HOME: "test/fixtures/fake-mediacrawler",
+        MEDIACRAWLER_PYTHON: python,
+        MEDIACRAWLER_OUTPUT_DIR: "storage/mediacrawler",
+        MEDIACRAWLER_COMMIT: "fake-mediacrawler-test",
+        WEIBO_COOKIE_FILE: fakeWeiboCookieFile
+      }
+    );
+
+    assert.equal(partial.ok, true);
+    assert.equal(partial.status, "partial");
+    assert.equal(partial.persisted_targets, 1);
+    assert.equal(partial.failed_records, 1);
+    const taskRows = queryRows("SELECT status, parsed_records, failed_records, collected_posts FROM collection_tasks WHERE id=%s", [partial.task.id]);
+    assert.deepEqual(taskRows[0], {
+      status: "partial",
+      parsed_records: 1,
+      failed_records: 1,
+      collected_posts: 1
+    });
+  }
+);
+
+test(
+  "does not leak child process environment or stderr when MediaCrawler search fails",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    rmSync("storage/mediacrawler", { recursive: true, force: true });
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const failed = runWorker(
+      [
+        "weibo-discovery",
+        "--payload-json",
+        JSON.stringify({
+          keyword: "海岛舒服日志 fail-runtime",
+          limit: 10
+        })
+      ],
+      {
+        MEDIACRAWLER_HOME: "test/fixtures/fake-mediacrawler",
+        MEDIACRAWLER_PYTHON: python,
+        MEDIACRAWLER_OUTPUT_DIR: "storage/mediacrawler",
+        MEDIACRAWLER_COMMIT: "fake-mediacrawler-test",
+        WEIBO_COOKIE_FILE: fakeWeiboCookieFile,
+        DEEPSEEK_API_KEY: "sk-parent-secret"
+      }
+    );
+
+    assert.equal(failed.ok, false);
+    assert.equal(failed.error_type, "mediacrawler_search_failed");
+    assert.equal(failed.cause, "exit_code=2");
+    assert.equal(JSON.stringify(failed).includes("sk-parent-secret"), false);
+    assert.equal(JSON.stringify(failed).includes("should-not-leak"), false);
+  }
+);
+
+test(
   "rejects fixture paths outside the allowlisted test fixture directory",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -186,6 +375,60 @@ test(
 
     assert.equal(rejected.ok, false);
     assert.equal(rejected.error_type, "invalid_fixture_path");
+  }
+);
+
+test(
+  "returns a standard MediaCrawler missing error when real search runtime is unavailable",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const blocked = runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        keyword: "海岛舒服日志",
+        limit: 10
+      })
+    ]);
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error_type, "mediacrawler_missing");
+    const taskRows = queryRows("SELECT status, error_type FROM collection_tasks WHERE id=%s", [blocked.task.id]);
+    assert.deepEqual(taskRows[0], { status: "failed", error_type: "mediacrawler_missing" });
+  }
+);
+
+test(
+  "returns a standard auth error when MediaCrawler search has no Weibo cookie file",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const blocked = runWorker(
+      [
+        "weibo-discovery",
+        "--payload-json",
+        JSON.stringify({
+          keyword: "海岛舒服日志",
+          limit: 10
+        })
+      ],
+      {
+        MEDIACRAWLER_HOME: "test/fixtures/fake-mediacrawler",
+        MEDIACRAWLER_PYTHON: python,
+        MEDIACRAWLER_OUTPUT_DIR: "storage/mediacrawler",
+        MEDIACRAWLER_COMMIT: "fake-mediacrawler-test"
+      }
+    );
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error_type, "auth_required");
+    const taskRows = queryRows("SELECT status, error_type FROM collection_tasks WHERE id=%s", [blocked.task.id]);
+    assert.deepEqual(taskRows[0], { status: "failed", error_type: "auth_required" });
   }
 );
 
@@ -489,7 +732,7 @@ test(
   }
 );
 
-function runWorker(args) {
+function runWorker(args, envOverrides = {}) {
   const result = spawnSync(python, ["workers/enterprise_worker.py", ...args], {
     cwd: process.cwd(),
     encoding: "utf8",
@@ -501,7 +744,8 @@ function runWorker(args) {
       MEDIACRAWLER_PYTHON: "/tmp/python-does-not-exist",
       MEDIACRAWLER_OUTPUT_DIR: "/tmp/weibo-mvp-test-output",
       MEDIACRAWLER_CDP_PORT: "65534",
-      WEIBO_FIXTURE_MODE: "1"
+      WEIBO_FIXTURE_MODE: "1",
+      ...envOverrides
     }
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -579,4 +823,9 @@ print(json.dumps(rows, ensure_ascii=False, default=str))
   );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
+}
+
+function flagValue(argv, flag) {
+  const index = argv.indexOf(flag);
+  return index >= 0 ? argv[index + 1] : undefined;
 }

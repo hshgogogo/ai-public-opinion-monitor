@@ -3,7 +3,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import socket
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +32,29 @@ SOURCE_MATCH_UNKNOWN = {
     "source_match_method": "unknown",
     "source_match_confidence": 0.2,
 }
+
+
+class MediaCrawlerParseError(Exception):
+    pass
+
+
+MEDIACRAWLER_BOOTSTRAP = """
+import json
+import os
+import runpy
+import sys
+
+try:
+    import config
+
+    config.CDP_DEBUG_PORT = int(os.environ.get("MEDIACRAWLER_CDP_PORT", "9222") or "9222")
+    config.CDP_CONNECT_EXISTING = True
+    config.COOKIES = json.loads(sys.stdin.read() or "{}").get("cookies", "")
+except Exception:
+    pass
+
+runpy.run_path("main.py", run_name="__main__")
+""".strip()
 
 
 def main():
@@ -782,46 +807,122 @@ def weibo_discovery_payload(payload_json="{}"):
         raw_files=[fixture_path] if fixture_path else [],
     )
     if not fixture_path:
+        run = {"output_path": None, "raw_files": []}
+        try:
+            run = run_mediacrawler_search(project["id"], task_id, keyword, limit)
+            update_weibo_collection_task_paths(task_id, run.get("output_path"), run.get("raw_files", []))
+            if not run.get("ok"):
+                finish_weibo_collection_task(
+                    task_id,
+                    "failed",
+                    run["error"]["error_type"],
+                    run["error"]["message"],
+                    parsed_records=0,
+                    failed_records=0,
+                    posts=0,
+                    comments=0,
+                )
+                return {
+                    **run["error"],
+                    "task": task_payload(task_id, "weibo", keyword, "search"),
+                    "database": database,
+                }
+            search = parse_weibo_search_files(run["raw_files"], limit)
+        except MediaCrawlerParseError as exc:
+            error = weibo_error(
+                "mediacrawler_parse_failed",
+                "MediaCrawler search JSONL could not be parsed.",
+                str(exc),
+                "Inspect the archived search_contents JSONL and rerun the search task.",
+                docs_anchor="weibo-discovery",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "search"),
+                "database": database,
+            }
+        except Exception as exc:
+            error = weibo_error(
+                "mediacrawler_adapter_failed",
+                "MediaCrawler search adapter failed before persistence.",
+                type(exc).__name__,
+                "Check MediaCrawler output path permissions and worker configuration, then rerun the search task.",
+                docs_anchor="weibo-discovery",
+            )
+            finish_weibo_collection_task(
+                task_id,
+                "failed",
+                error["error_type"],
+                error["message"],
+                parsed_records=0,
+                failed_records=1,
+                posts=0,
+                comments=0,
+            )
+            return {
+                **error,
+                "task": task_payload(task_id, "weibo", keyword, "search"),
+                "database": database,
+            }
+    else:
+        search = parse_weibo_search_fixture(fixture_path, limit)
+    failed_records = int(search.get("failed_records") or 0)
+    try:
+        persisted_targets = persist_discovered_targets(project["id"], search["targets"])
+        task_status = "partial" if failed_records else "succeeded"
+        finish_weibo_collection_task(
+            task_id,
+            task_status,
+            None,
+            None,
+            parsed_records=len(persisted_targets),
+            failed_records=failed_records,
+            posts=len(persisted_targets),
+            comments=0,
+        )
+    except Exception as exc:
+        error = weibo_error(
+            "weibo_target_persist_failed",
+            "Weibo discovered targets could not be persisted.",
+            type(exc).__name__,
+            "Inspect the archived search JSONL and database schema, then rerun the discovery task.",
+            docs_anchor="weibo-discovery",
+        )
         finish_weibo_collection_task(
             task_id,
             "failed",
-            "mediacrawler_not_run",
-            "Local persistence slice requires fixturePath and does not invoke real MediaCrawler.",
+            error["error_type"],
+            error["message"],
             parsed_records=0,
-            failed_records=0,
+            failed_records=max(failed_records, 1),
             posts=0,
             comments=0,
         )
         return {
-            **weibo_error(
-                "mediacrawler_not_run",
-                "Weibo discovery task was created but real MediaCrawler search was not invoked.",
-                "This local slice only persists fixture search JSONL into MySQL.",
-                "Pass fixturePath for local verification, or complete the real MediaCrawler search task later.",
-                docs_anchor="weibo-discovery",
-            ),
-            "task": task_payload(task_id, "weibo", keyword, "search"),
+            **error,
+            "mode": "weibo-agent-mvp",
             "database": database,
+            "task": task_payload(task_id, "weibo", keyword, "search"),
         }
-    search = parse_weibo_search_fixture(fixture_path, limit)
-    persisted_targets = persist_discovered_targets(project["id"], search["targets"])
-    finish_weibo_collection_task(
-        task_id,
-        "succeeded",
-        None,
-        None,
-        parsed_records=len(persisted_targets),
-        failed_records=0,
-        posts=len(persisted_targets),
-        comments=0,
-    )
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
+        "status": task_status,
         "database": database,
         "task": task_payload(task_id, "weibo", keyword, "search"),
         "targets": persisted_targets,
         "persisted_targets": len(persisted_targets),
+        "failed_records": failed_records,
     }
 
 
@@ -1139,6 +1240,15 @@ def finish_weibo_collection_task(task_id, status, error_type, error_message, par
             )
 
 
+def update_weibo_collection_task_paths(task_id, output_path, raw_files):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE collection_tasks SET output_path=%s, raw_files=%s WHERE id=%s",
+                (output_path, json.dumps(raw_files or [], ensure_ascii=False), task_id),
+            )
+
+
 def task_payload(task_id, platform, keyword, crawler_type, target_id=None):
     return {
         "id": task_id,
@@ -1147,6 +1257,315 @@ def task_payload(task_id, platform, keyword, crawler_type, target_id=None):
         "crawler_type": crawler_type,
         "target_id": target_id,
     }
+
+
+def run_mediacrawler_search(project_id, task_id, keyword, limit):
+    repo_root = Path.cwd()
+    home_value = os.environ.get("MEDIACRAWLER_HOME", "")
+    python_value = os.environ.get("MEDIACRAWLER_PYTHON", "")
+    home = resolve_repo_path(home_value)
+    python = resolve_repo_path(python_value)
+    output_dir = mediacrawler_task_output_dir(project_id, task_id, keyword)
+    output_path = repo_relative(output_dir, repo_root)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_output_unwritable",
+                "MediaCrawler output directory is not writable.",
+                type(exc).__name__,
+                "Choose a writable MEDIACRAWLER_OUTPUT_DIR and rerun the search task.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    if not home_value or not home.exists() or not home.is_dir():
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_missing",
+                "MediaCrawler home is unavailable.",
+                f"MEDIACRAWLER_HOME does not point to a directory: {home}",
+                "Set MEDIACRAWLER_HOME to your local MediaCrawler checkout.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    if not python_value or not python.exists() or not os.access(python, os.X_OK):
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_python_missing",
+                "MediaCrawler python executable is unavailable.",
+                f"MEDIACRAWLER_PYTHON does not point to an executable file: {python}",
+                "Set MEDIACRAWLER_PYTHON to the Python executable used by MediaCrawler.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    cookie_header, cookie_error = mediacrawler_cookie_header()
+    if cookie_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cookie_error,
+        }
+    cdp_port, cdp_error = mediacrawler_cdp_port()
+    if cdp_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": cdp_error,
+        }
+    timeout_seconds, timeout_error = mediacrawler_timeout_seconds()
+    if timeout_error:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": timeout_error,
+        }
+    max_notes = max(int(limit or 0), 0)
+    command = [
+        str(python),
+        "-c",
+        MEDIACRAWLER_BOOTSTRAP,
+        "--platform",
+        "wb",
+        "--lt",
+        "cookie",
+        "--type",
+        "search",
+        "--keywords",
+        keyword,
+        "--save_data_option",
+        "jsonl",
+        "--save_data_path",
+        str(output_dir),
+        "--crawler_max_notes_count",
+        str(max_notes),
+        "--get_comment",
+        "false",
+        "--max_comments_count_singlenotes",
+        "0",
+    ]
+    env = mediacrawler_subprocess_env({
+        "MEDIACRAWLER_CDP_PORT": str(cdp_port),
+        "SAVE_DATA_OPTION": "jsonl",
+        "SAVE_DATA_PATH": str(output_dir),
+        "CRAWLER_MAX_NOTES_COUNT": str(max_notes),
+    })
+    try:
+        result = subprocess.run(
+            command,
+            cwd=home,
+            env=env,
+            capture_output=True,
+            text=True,
+            input=json.dumps({"cookies": cookie_header}),
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_timeout",
+                "MediaCrawler search timed out.",
+                f"timeout_seconds={exc.timeout}",
+                "Retry after checking Weibo login state, CDP, and MediaCrawler runtime health.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    raw_files = sorted(repo_relative(path, repo_root) for path in output_dir.rglob("*.jsonl") if path.is_file())
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": raw_files,
+            "error": weibo_error(
+                "mediacrawler_search_failed",
+                "MediaCrawler Weibo search failed.",
+                f"exit_code={result.returncode}",
+                "Check MediaCrawler configuration, Weibo login state, and the generated output directory.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    if not raw_files:
+        return {
+            "ok": False,
+            "output_path": output_path,
+            "raw_files": [],
+            "error": weibo_error(
+                "mediacrawler_jsonl_missing",
+                "MediaCrawler search did not produce JSONL output.",
+                f"No .jsonl files were found under {output_path}.",
+                "Check MediaCrawler SAVE_DATA_OPTION/SAVE_DATA_PATH and rerun the search task.",
+                docs_anchor="weibo-discovery",
+            ),
+        }
+    return {
+        "ok": True,
+        "output_path": output_path,
+        "raw_files": raw_files,
+    }
+
+
+def mediacrawler_cookie_header():
+    cookie_file = resolve_repo_path(os.environ.get("WEIBO_COOKIE_FILE", "config/cookies/weibo.json"))
+    if not cookie_file.exists() or not cookie_file.is_file():
+        return None, weibo_error(
+            "auth_required",
+            "Weibo auth cookie is missing.",
+            "WEIBO_COOKIE_FILE does not point to an existing cookie file.",
+            "Log in to Weibo, export cookies to WEIBO_COOKIE_FILE, and rerun the search task.",
+            docs_anchor="weibo-discovery",
+        )
+    try:
+        data = json.loads(cookie_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            f"Cookie file could not be parsed: {type(exc).__name__}.",
+            "Refresh WEIBO_COOKIE_FILE with a valid cookie list or Playwright storageState JSON.",
+            docs_anchor="weibo-discovery",
+        )
+    if isinstance(data, str):
+        cookie_header = data.strip()
+    else:
+        cookies = data.get("cookies") if isinstance(data, dict) else data
+        if not isinstance(cookies, list):
+            return None, weibo_error(
+                "auth_invalid",
+                "Weibo auth cookie is invalid.",
+                "Cookie file must be a cookie list, a Playwright storageState JSON object, or a cookie header string.",
+                "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+                docs_anchor="weibo-discovery",
+            )
+        parts = []
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            if not is_weibo_cookie_domain(cookie.get("domain")):
+                continue
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if name and value is not None:
+                parts.append(f"{name}={value}")
+        cookie_header = "; ".join(parts)
+    if not cookie_header:
+        return None, weibo_error(
+            "auth_invalid",
+            "Weibo auth cookie is invalid.",
+            "Cookie file did not contain any usable cookie name/value pairs.",
+            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            docs_anchor="weibo-discovery",
+        )
+    return cookie_header, None
+
+
+def is_weibo_cookie_domain(domain):
+    normalized = str(domain or "").strip().lower().lstrip(".")
+    return normalized in {"weibo.com", "weibo.cn"} or normalized.endswith(".weibo.com") or normalized.endswith(".weibo.cn")
+
+
+def mediacrawler_cdp_port():
+    raw = os.environ.get("MEDIACRAWLER_CDP_PORT", "9222") or "9222"
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, weibo_error(
+            "chrome_cdp_port_invalid",
+            "Chrome CDP port configuration is invalid.",
+            "MEDIACRAWLER_CDP_PORT must be an integer.",
+            "Set MEDIACRAWLER_CDP_PORT to the port used by Chrome remote debugging.",
+            docs_anchor="weibo-discovery",
+        )
+    if value <= 0 or value > 65535:
+        return None, weibo_error(
+            "chrome_cdp_port_invalid",
+            "Chrome CDP port configuration is invalid.",
+            "MEDIACRAWLER_CDP_PORT must be between 1 and 65535.",
+            "Set MEDIACRAWLER_CDP_PORT to the port used by Chrome remote debugging.",
+            docs_anchor="weibo-discovery",
+        )
+    return value, None
+
+
+def mediacrawler_timeout_seconds():
+    raw = os.environ.get("MEDIACRAWLER_TIMEOUT_SECONDS", "180") or "180"
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, weibo_error(
+            "mediacrawler_timeout_invalid",
+            "MediaCrawler timeout configuration is invalid.",
+            "MEDIACRAWLER_TIMEOUT_SECONDS must be a positive integer.",
+            "Set MEDIACRAWLER_TIMEOUT_SECONDS to a positive integer number of seconds.",
+            docs_anchor="weibo-discovery",
+        )
+    if value <= 0:
+        return None, weibo_error(
+            "mediacrawler_timeout_invalid",
+            "MediaCrawler timeout configuration is invalid.",
+            "MEDIACRAWLER_TIMEOUT_SECONDS must be greater than zero.",
+            "Set MEDIACRAWLER_TIMEOUT_SECONDS to a positive integer number of seconds.",
+            docs_anchor="weibo-discovery",
+        )
+    return value, None
+
+
+def mediacrawler_subprocess_env(extra):
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PYTHONUNBUFFERED": "1",
+    }
+    if os.environ.get("LC_ALL"):
+        env["LC_ALL"] = os.environ["LC_ALL"]
+    if os.environ.get("MEDIACRAWLER_CDP_PORT"):
+        env["MEDIACRAWLER_CDP_PORT"] = os.environ["MEDIACRAWLER_CDP_PORT"]
+    env.update(extra)
+    return env
+
+
+def resolve_repo_path(value):
+    path = Path(value or "").expanduser()
+    if path.is_absolute():
+        return path
+    return (Path.cwd() / path).resolve()
+
+
+def mediacrawler_task_output_dir(project_id, task_id, keyword):
+    base = resolve_repo_path(os.environ.get("MEDIACRAWLER_OUTPUT_DIR", "storage/mediacrawler"))
+    return base / str(project_id) / str(task_id) / "weibo" / keyword_slug(keyword)
+
+
+def keyword_slug(keyword):
+    raw = str(keyword or "keyword").strip().lower()
+    slug = re.sub(r"-+", "-", "".join(char if char.isascii() and char.isalnum() else "-" for char in raw)).strip("-")
+    if not slug:
+        slug = "keyword-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+    return slug[:80]
+
+
+def repo_relative(path, repo_root):
+    path = Path(path).resolve()
+    try:
+        return str(path.relative_to(repo_root))
+    except ValueError:
+        return str(path)
 
 
 def persist_discovered_targets(project_id, targets):
@@ -1159,7 +1578,7 @@ def persist_discovered_targets(project_id, targets):
                     project_id,
                     target.get("author_external_id"),
                     target.get("author_url"),
-                    (target.get("raw_json") or {}).get("screen_name") or (target.get("raw_json") or {}).get("author_name"),
+                    (target.get("raw_json") or {}).get("screen_name") or (target.get("raw_json") or {}).get("author_name") or (target.get("raw_json") or {}).get("nickname"),
                 )
                 values = (
                     target["target_type"],
@@ -2018,17 +2437,40 @@ def fixture_workbench(search, events, actions, qa):
 
 
 def parse_weibo_search_fixture(fixture_path, limit=10):
+    return parse_weibo_search_files([fixture_path], limit, fixture=True)
+
+
+def parse_weibo_search_files(paths, limit=10, fixture=False):
     records = []
-    for line in Path(fixture_path).read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        records.append(json.loads(line))
+    failed_records = 0
+    adapter_errors = []
+    content_paths = list(paths) if fixture else [path for path in paths if is_weibo_search_content_file(path)]
+    if not content_paths:
+        raise MediaCrawlerParseError("No search_contents JSONL files were archived for the Weibo search task.")
+    for path in content_paths:
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise MediaCrawlerParseError(f"Unable to read archived JSONL file {path}: {type(exc).__name__}.") from exc
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                failed_records += 1
+                adapter_errors.append(f"Invalid JSON in {path} at line {line_number}.")
+                continue
+    if failed_records and not records:
+        raise MediaCrawlerParseError(adapter_errors[0])
     targets = [normalize_weibo_search_target(record) for record in records]
     targets.sort(key=lambda target: (-target["hot_score"], target["external_id"]))
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "fixture": True,
+        "fixture": fixture,
+        "failed_records": failed_records,
+        "adapter_errors": adapter_errors[:5],
         "targets": [
             {**target, "rank": index + 1}
             for index, target in enumerate(targets[: max(limit, 0)])
@@ -2036,18 +2478,25 @@ def parse_weibo_search_fixture(fixture_path, limit=10):
     }
 
 
+def is_weibo_search_content_file(path):
+    return Path(path).name.startswith("search_contents") and Path(path).suffix == ".jsonl"
+
+
 def normalize_weibo_search_target(raw):
     text = raw.get("text") or raw.get("content") or raw.get("title") or ""
-    external_id = str(raw.get("id") or raw.get("mid") or content_fingerprint(text))
+    external_id = str(raw.get("id") or raw.get("mid") or raw.get("note_id") or content_fingerprint(text))
+    url = raw.get("url") or raw.get("note_url")
+    weibo_mid = raw.get("mid") or raw.get("note_id")
     author_external_id = raw.get("author_id") or raw.get("user_id")
+    author_url = raw.get("author_url") or raw.get("user_link") or raw.get("profile_url")
     target_locator = {
         "platform": "weibo",
         "target_type": "weibo_post",
         "external_id": external_id,
-        "url": raw.get("url"),
-        "weibo_mid": raw.get("mid"),
+        "url": url,
+        "weibo_mid": weibo_mid,
         "author_external_id": author_external_id,
-        "author_url": raw.get("author_url"),
+        "author_url": author_url,
         "raw_json": raw,
     }
     recommendation = recommend_weibo_target(external_id, text, raw)
@@ -2055,13 +2504,13 @@ def normalize_weibo_search_target(raw):
         "platform": "weibo",
         "target_type": "weibo_post",
         "external_id": external_id,
-        "url": raw.get("url"),
-        "weibo_mid": raw.get("mid"),
+        "url": url,
+        "weibo_mid": weibo_mid,
         "author_external_id": author_external_id,
-        "author_url": raw.get("author_url"),
+        "author_url": author_url,
         "title": raw.get("title") or text[:80],
         "summary": text[:200],
-        "keyword": raw.get("keyword") or "",
+        "keyword": raw.get("keyword") or raw.get("source_keyword") or "",
         "hot_score": hot_score(text, raw),
         "target_locator": target_locator,
         "content_fingerprint": content_fingerprint(text),
@@ -2072,10 +2521,19 @@ def normalize_weibo_search_target(raw):
 
 
 def hot_score(text, raw):
-    likes = int(raw.get("attitudes_count") or raw.get("likes") or 0)
-    comments = int(raw.get("comments_count") or raw.get("comments") or 0)
-    reposts = int(raw.get("reposts_count") or raw.get("reposts") or 0)
+    likes = numeric_count(raw.get("attitudes_count") or raw.get("likes") or raw.get("liked_count"))
+    comments = numeric_count(raw.get("comments_count") or raw.get("comments"))
+    reposts = numeric_count(raw.get("reposts_count") or raw.get("reposts") or raw.get("shared_count"))
     return likes + comments * 2 + reposts * 3
+
+
+def numeric_count(value):
+    if value is None or value == "":
+        return 0
+    try:
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return 0
 
 
 def recommend_weibo_target(external_id, text, raw):
@@ -2088,8 +2546,8 @@ def recommend_weibo_target(external_id, text, raw):
             "expected_question_answered": "该目标暂不能回答项目相关舆情问题。",
             "confidence": 0.2,
         }
-    likes = int(raw.get("attitudes_count") or raw.get("likes") or 0)
-    comments = int(raw.get("comments_count") or 0)
+    likes = numeric_count(raw.get("attitudes_count") or raw.get("likes") or raw.get("liked_count"))
+    comments = numeric_count(raw.get("comments_count") or raw.get("comments"))
     confidence = min(0.95, 0.45 + len(terms) * 0.12 + min(likes + comments, 120) / 400)
     return {
         "state": "recommended",

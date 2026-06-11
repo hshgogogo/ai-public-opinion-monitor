@@ -23,8 +23,8 @@
 ## 3. Weibo Discovery and Target Recommendation
 
 - [x] 3.1 Add `POST /api/weibo/discovery` and a matching internal worker command to create Weibo search discovery tasks for a single project keyword.
-- [ ] 3.2 Invoke MediaCrawler in Weibo `search` mode with generated runtime config and task-specific output path.
-- [ ] 3.3 Archive raw Weibo search JSONL under `storage/mediacrawler/<project_id>/<task_id>/weibo/<keyword_slug>/`.
+- [x] 3.2 Invoke MediaCrawler in Weibo `search` mode with generated runtime config and task-specific output path.
+- [x] 3.3 Archive raw Weibo search JSONL under `storage/mediacrawler/<project_id>/<task_id>/weibo/<keyword_slug>/`.
 - [x] 3.4 Parse Weibo search JSONL into at most 10 `discovered_targets` per keyword with rank, hot score, title/summary, author, URL, engagement fields, content fingerprint, and raw JSON.
 - [x] 3.5 Extract and persist target locator fields for each Weibo target, including Weibo mid or equivalent status ID and author external ID/profile URL when available.
 - [x] 3.6 Generate Agent recommendation metadata for each Weibo target, including recommendation state, reason, expected question answered, confidence, and target ID.
