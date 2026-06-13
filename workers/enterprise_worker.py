@@ -71,6 +71,7 @@ def main():
     add_payload_parser(sub, "weibo-target-select")
     add_payload_parser(sub, "weibo-target-ignore")
     add_payload_parser(sub, "weibo-source-account-upsert")
+    add_payload_parser(sub, "weibo-comments")
     collect_target = add_payload_parser(sub, "weibo-collect-target")
     collect_target.add_argument("--target-id", required=True)
     events = add_payload_parser(sub, "weibo-events")
@@ -147,6 +148,8 @@ def main():
             emit(weibo_target_state_payload(args.payload_json, "ignored"))
         elif args.command == "weibo-source-account-upsert":
             emit(weibo_source_account_upsert_payload(args.payload_json))
+        elif args.command == "weibo-comments":
+            emit(weibo_comments_payload(args.payload_json))
         elif args.command == "weibo-collect-target":
             emit(weibo_collect_target_payload(args.payload_json, args.target_id))
         elif args.command == "weibo-events":
@@ -964,6 +967,87 @@ def workbench_citations(targets, events, actions):
     citations.extend([event.get("id") for event in events[:10]])
     citations.extend([action.get("id") for action in actions[:10]])
     return [item for item in citations if item is not None]
+
+
+def weibo_comments_payload(payload_json="{}"):
+    endpoint = "GET /api/weibo/comments"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=50, maximum=200)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM social_comments
+                WHERE project_id=%s AND platform='weibo'
+                """,
+                (project["id"],),
+            )
+            total = int(cur.fetchone()["count"] or 0)
+            cur.execute(
+                """
+                SELECT
+                  c.*,
+                  p.external_id AS post_external_id,
+                  p.url AS post_url,
+                  p.keyword,
+                  p.engagement AS post_engagement,
+                  p.source_type AS post_source_type
+                FROM social_comments c
+                JOIN social_posts p ON p.id=c.post_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                ORDER BY c.like_count DESC, c.reply_count DESC, c.id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            rows = cur.fetchall()
+    comments = [comment_row_to_payload(row) for row in rows]
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "limit": limit,
+        "total": total,
+        "comments": comments,
+        "citations": [comment["citation"] for comment in comments],
+    }
+
+
+def bounded_limit(value, default=50, maximum=200):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def comment_row_to_payload(row):
+    source_type = row.get("source_type") or row.get("post_source_type") or "unknown"
+    return {
+        "comment_id": row["id"],
+        "external_id": row.get("external_id"),
+        "post_id": row.get("post_id"),
+        "post_external_id": row.get("post_external_id"),
+        "platform": row["platform"],
+        "author_name": row.get("author_name"),
+        "content": row.get("content"),
+        "like_count": int(row.get("like_count") or 0),
+        "reply_count": int(row.get("reply_count") or 0),
+        "comment_weight": float(row.get("comment_weight") or 1),
+        "source_type": source_type,
+        "source_account_external_id": row.get("source_account_external_id"),
+        "source_account_url": row.get("source_account_url"),
+        "keyword": row.get("keyword"),
+        "post_url": row.get("post_url"),
+        "engagement": int(row.get("like_count") or row.get("post_engagement") or 0),
+        "collected_at": iso_or_none(row.get("collected_at")),
+        "citation": f"comment-{row['id']}",
+    }
 
 
 def real_weibo_endpoint_payload(endpoint, payload_json="{}", **ids):

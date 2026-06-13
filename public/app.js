@@ -96,10 +96,21 @@ async function handleWorkbenchAction(event) {
   }
   if (action === "collect-comments") {
     await withBusy(button, "采集评论", async () => {
-      await postJson("/api/weibo/targets/select", { targetId });
-      showActionResult(await postJson(`/api/weibo/targets/${encodeURIComponent(targetId)}/collect-comments`, {}), `采集评论 ${targetId || ""}`);
-      await refreshWorkbench();
-    });
+      setText(els.lastAction, "采集中");
+      try {
+        const selectResult = await postJson("/api/weibo/targets/select", { targetId });
+        if (selectResult.ok === false) {
+          showCollectResult(selectResult);
+          return;
+        }
+        const result = await postJson(`/api/weibo/targets/${encodeURIComponent(targetId)}/collect-comments`, {});
+        showCollectResult(result);
+      } catch (error) {
+        showCollectResult({ ok: false, message: error.message });
+      } finally {
+        await refreshWorkbench();
+      }
+    }, { busyText: "采集中", statusText: "采集中" });
     return;
   }
   if (["confirm-action", "reject-action", "uncertain-action", "partial-action"].includes(action)) {
@@ -438,6 +449,46 @@ function showActionResult(result, actionName = "操作") {
     : `${actionName}已提交，等待真实数据链路处理。`);
 }
 
+function showCollectResult(result) {
+  if (result?.ok === false) {
+    setText(els.lastAction, `失败，${collectFailureReason(result)}`);
+    return;
+  }
+  const count = result?.persisted_comments ?? result?.task?.collected_comments ?? result?.parsed_records ?? 0;
+  setText(els.lastAction, `成功，采到 ${count} 条评论`);
+}
+
+function collectFailureReason(result) {
+  const type = result?.error_type || "";
+  const reasonByType = {
+    mysql_unavailable: "数据库不可用",
+    selected_target_required: "请先选择采集目标",
+    target_not_found: "没有找到这个采集目标",
+    weibo_auth_missing: "微博登录态不可用",
+    weibo_auth_unavailable: "微博登录态不可用",
+    mediacrawler_missing: "采集环境未配置",
+    mediacrawler_python_missing: "采集环境未配置",
+    mediacrawler_commit_missing: "采集环境未配置",
+    mediacrawler_output_unwritable: "采集结果目录不可写",
+    mediacrawler_detail_timeout: "采集超时，请稍后重试",
+    mediacrawler_detail_failed: "采集程序执行失败",
+    mediacrawler_detail_empty: "没有生成可读取的评论数据",
+    cdp_unavailable: "采集连接不可用",
+    cdp_port_unavailable: "采集连接不可用"
+  };
+  const rawReason = result?.message || result?.fix || result?.cause || stateLabel(type || "blocked") || "请查看后台设置。";
+  return reasonByType[type] || userFacingCollectReason(rawReason);
+}
+
+function userFacingCollectReason(value) {
+  return String(value || "请查看后台设置。")
+    .replaceAll("MediaCrawler", "采集程序")
+    .replaceAll("Chrome CDP", "采集连接")
+    .replaceAll("CDP", "采集连接")
+    .replaceAll("browser", "采集环境")
+    .replaceAll("Browser", "采集环境");
+}
+
 async function postJson(url, body) {
   return fetchJson(url, {
     method: "POST",
@@ -461,12 +512,12 @@ async function fetchJson(url, options) {
   return payload;
 }
 
-async function withBusy(button, label, task) {
+async function withBusy(button, label, task, options = {}) {
   if (!button || button.disabled) return;
   const originalText = button.textContent;
   button.disabled = true;
-  button.textContent = "处理中";
-  setText(els.lastAction, `${label}处理中。`);
+  button.textContent = options.busyText || "处理中";
+  setText(els.lastAction, options.statusText || `${label}处理中。`);
   try {
     await task();
   } finally {

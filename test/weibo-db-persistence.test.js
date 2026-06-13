@@ -152,6 +152,22 @@ test(
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts")[0].count, 2);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments")[0].count, 4);
     assert.equal(queryRows("SELECT like_count, reply_count FROM social_comments WHERE external_id='c1002'")[0].like_count, 21);
+    const commentsList = runWorker([
+      "weibo-comments",
+      "--payload-json",
+      JSON.stringify({ projectId, limit: 3 })
+    ]);
+    assert.equal(commentsList.ok, true);
+    assert.equal(commentsList.mode, "weibo-agent-mvp");
+    assert.equal(commentsList.total, 4);
+    assert.equal(commentsList.comments.length, 3);
+    assert.equal(commentsList.comments[0].platform, "weibo");
+    assert.equal(commentsList.comments[0].comment_id > 0, true);
+    assert.equal(commentsList.comments[0].post_external_id, "1001");
+    assert.equal(typeof commentsList.comments[0].content, "string");
+    assert.equal(Object.hasOwn(commentsList.comments[0], "like_count"), true);
+    assert.equal(Object.hasOwn(commentsList.comments[0], "source_type"), true);
+    assert.equal(commentsList.citations.includes(`comment-${commentsList.comments[0].comment_id}`), true);
     const workbenchAfterDetail = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
     assert.equal(workbenchAfterDetail.setup.partialState, "detail-without-analysis");
     assert.equal(workbenchAfterDetail.setup.progress.analysis_count, 0);

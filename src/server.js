@@ -31,6 +31,7 @@ export const server = http.createServer(async (request, response) => {
     if (url.pathname === "/api/weibo/targets/ignore" && request.method === "POST") return weiboWorker(request, response, "weibo-target-ignore");
     const targetCollectMatch = url.pathname.match(/^\/api\/weibo\/targets\/([^/]+)\/collect-comments$/);
     if (targetCollectMatch && request.method === "POST") return weiboWorker(request, response, "weibo-collect-target", "--target-id", targetCollectMatch[1]);
+    if (url.pathname === "/api/weibo/comments" && request.method === "GET") return weiboWorker(request, response, "weibo-comments");
     if (url.pathname === "/api/weibo/events" && request.method === "GET") return weiboWorker(request, response, "weibo-events");
     const eventMatch = url.pathname.match(/^\/api\/weibo\/events\/([^/]+)$/);
     if (eventMatch && request.method === "GET") return weiboWorker(request, response, "weibo-events", "--event-id", eventMatch[1]);
@@ -67,9 +68,14 @@ async function collect(request, response) {
 }
 
 async function weiboWorker(request, response, command, ...args) {
-  const payload = ["GET", "HEAD"].includes(request.method || "") ? {} : await readJson(request);
+  const payload = ["GET", "HEAD"].includes(request.method || "") ? queryPayload(request) : await readJson(request);
   const result = await worker(command, ...args, "--payload-json", JSON.stringify(payload));
   sendJson(response, result, statusFor(result));
+}
+
+function queryPayload(request) {
+  const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
+  return Object.fromEntries(url.searchParams.entries());
 }
 
 function statusFor(payload) {

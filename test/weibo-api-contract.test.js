@@ -21,6 +21,7 @@ test("exposes explicit Weibo MVP API endpoints with safe no-database errors", as
     ["POST", "/api/weibo/targets/select", { targetId: "target-1" }],
     ["POST", "/api/weibo/targets/ignore", { targetId: "target-1" }],
     ["POST", "/api/weibo/targets/target-1/collect-comments", {}],
+    ["GET", "/api/weibo/comments"],
     ["GET", "/api/weibo/events"],
     ["GET", "/api/weibo/events/event-1"],
     ["GET", "/api/weibo/actions/pending"],

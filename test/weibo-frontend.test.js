@@ -16,6 +16,8 @@ test("front-end uses Weibo Agent workbench as the primary screen", async () => {
   assert.match(html, /id="dataGaps"/);
   assert.match(html, /微博 Agent 工作台/);
   assert.match(html, /href="\/settings"/);
+  assert.match(html, /微博搜索 \/ 选择后采评论/);
+  assert.doesNotMatch(html, /MediaCrawler/);
   assert.doesNotMatch(html, /id="runDiscovery"/);
   assert.doesNotMatch(html, /id="setupStatus"/);
   assert.doesNotMatch(html, /id="nextStep"/);
@@ -63,4 +65,19 @@ test("front-end renders Weibo target, event, and action detail fields", async ()
   assert.match(js, /submittingActionIds/);
   assert.match(js, /submit-lock/);
   assert.match(js, /confirmation_note|note/);
+});
+
+test("front-end treats comment collection as a silent backend task", async () => {
+  const js = await readFile("public/app.js", "utf8");
+
+  assert.match(js, /setText\(els\.lastAction, "采集中"\)/);
+  assert.match(js, /showCollectResult/);
+  assert.match(js, /成功，采到 \$\{count\} 条评论/);
+  assert.match(js, /persisted_comments/);
+  assert.match(js, /task\?\.collected_comments/);
+  assert.match(js, /失败，\$\{collectFailureReason\(result\)\}/);
+  assert.match(js, /collectFailureReason/);
+  assert.match(js, /userFacingCollectReason/);
+  assert.match(js, /replaceAll\("MediaCrawler", "采集程序"\)/);
+  assert.match(js, /replaceAll\("CDP", "采集连接"\)/);
 });
