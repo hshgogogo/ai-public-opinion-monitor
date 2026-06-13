@@ -1,5 +1,7 @@
 const state = {
   workbench: null,
+  comments: [],
+  commentsError: null,
   pendingActionConfirmation: null,
   submittingActionIds: new Set()
 };
@@ -19,6 +21,7 @@ const els = {
   recommendedTargets: document.querySelector("#recommendedTargets"),
   events: document.querySelector("#events"),
   pendingActions: document.querySelector("#pendingActions"),
+  comments: document.querySelector("#comments"),
   dataGaps: document.querySelector("#dataGaps"),
   citations: document.querySelector("#citations"),
   lastAction: document.querySelector("#lastAction"),
@@ -38,12 +41,20 @@ window.setInterval(refreshWorkbench, 30000);
 
 async function refreshWorkbench() {
   try {
-    state.workbench = await fetchJson("/api/weibo/workbench");
+    const [workbench, comments] = await Promise.all([
+      fetchJson("/api/weibo/workbench"),
+      fetchJson("/api/weibo/comments?limit=20")
+    ]);
+    state.workbench = workbench;
+    state.comments = comments?.ok === false ? [] : comments.comments || [];
+    state.commentsError = comments?.ok === false ? comments : null;
     const blocked = state.workbench?.ok === false || Boolean(state.workbench?.error_type);
     setConnection(!blocked, blocked ? "依赖未就绪" : "微博 Agent 就绪");
     renderWorkbench();
   } catch (error) {
     setConnection(false, "读取失败");
+    state.comments = [];
+    state.commentsError = { message: error.message };
     setText(els.lastAction, error.message);
   }
 }
@@ -176,6 +187,7 @@ function renderWorkbench() {
   renderTargets(workbench.recommendedTargets || []);
   renderEvents(workbench.events || []);
   renderActions(workbench.pendingActions || []);
+  renderComments(state.comments || [], state.commentsError);
   renderDataGaps(dataGaps);
   renderCitations(workbench.citations || []);
 }
@@ -421,6 +433,39 @@ function renderDataGaps(gaps) {
   setHtml(els.dataGaps, gaps.length
     ? gaps.map(gapCard).join("")
     : empty({ title: "后端未报告数据缺口", message: "这不代表已经覆盖全量微博数据；仍以目标、评论、事件和引用里的证据范围为准。", actionLabel: "查看证据引用", scrollTarget: "#citations" }));
+}
+
+function renderComments(comments, error) {
+  if (error) {
+    setHtml(els.comments, empty({
+      title: "评论暂不可用",
+      message: error.fix || error.message || "连接 MySQL 后才能读取真实评论。",
+      actionLabel: "查看数据缺口",
+      scrollTarget: "#dataGaps"
+    }));
+    return;
+  }
+  setHtml(els.comments, comments.length
+    ? comments.map(commentCard).join("")
+    : empty({ title: "暂无真实评论", message: "选择推荐目标并采评论后，这里会显示已入库的微博评论证据。" }));
+}
+
+function commentCard(comment) {
+  return `
+    <section class="list-item comment-card">
+      <div class="card-head">
+        <strong>${escapeHtml(comment.author_name || "微博用户")}</strong>
+        ${chip(stateLabel(comment.source_type || "unknown"), "neutral")}
+      </div>
+      <p>${escapeHtml(comment.content || "")}</p>
+      <div class="comment-meta">
+        <span>互动 ${escapeHtml(String(comment.like_count ?? 0))}</span>
+        <span>回复 ${escapeHtml(String(comment.reply_count ?? 0))}</span>
+        <span>帖子 ${escapeHtml(comment.post_external_id || "-")}</span>
+        <span>引用 ${escapeHtml(comment.citation || "-")}</span>
+      </div>
+    </section>
+  `;
 }
 
 function gapCard(gap) {

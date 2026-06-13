@@ -13,6 +13,7 @@ test("front-end uses Weibo Agent workbench as the primary screen", async () => {
   assert.match(html, /id="weiboWorkbench"/);
   assert.match(html, /id="recommendedTargets"/);
   assert.match(html, /id="pendingActions"/);
+  assert.match(html, /id="comments"/);
   assert.match(html, /id="dataGaps"/);
   assert.match(html, /微博 Agent 工作台/);
   assert.match(html, /href="\/settings"/);
@@ -39,6 +40,24 @@ test("front-end uses Weibo Agent workbench as the primary screen", async () => {
   assert.doesNotMatch(js, /new EventSource\("\/api\/stream"\)/);
   assert.doesNotMatch(js, /fetch\("\/api\/collect"/);
   assert.doesNotMatch(html, /小红书 \/ 抖音 \/ 微博/);
+});
+
+test("front-end renders a read-only Weibo comments evidence list", async () => {
+  const [html, js] = await Promise.all([
+    readFile("public/index.html", "utf8"),
+    readFile("public/app.js", "utf8")
+  ]);
+
+  assert.match(html, /真实评论/);
+  assert.match(html, /id="comments"/);
+  assert.match(js, /\/api\/weibo\/comments\?limit=20/);
+  assert.match(js, /renderComments/);
+  assert.match(js, /comment\.source_type/);
+  assert.match(js, /comment\.like_count/);
+  assert.match(js, /comment\.citation/);
+  assert.match(js, /comment\.content/);
+  assert.match(js, /暂无真实评论/);
+  assert.doesNotMatch(js, /\/api\/weibo\/comments[\s\S]*DeepSeek/);
 });
 
 test("front-end renders Weibo target, event, and action detail fields", async () => {
