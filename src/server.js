@@ -32,6 +32,7 @@ export const server = http.createServer(async (request, response) => {
     const targetCollectMatch = url.pathname.match(/^\/api\/weibo\/targets\/([^/]+)\/collect-comments$/);
     if (targetCollectMatch && request.method === "POST") return weiboWorker(request, response, "weibo-collect-target", "--target-id", targetCollectMatch[1]);
     if (url.pathname === "/api/weibo/comments" && request.method === "GET") return weiboWorker(request, response, "weibo-comments");
+    if (url.pathname === "/api/weibo/comments/analyze" && request.method === "POST") return weiboWorker(request, response, "weibo-comments-analyze");
     if (url.pathname === "/api/weibo/events" && request.method === "GET") return weiboWorker(request, response, "weibo-events");
     const eventMatch = url.pathname.match(/^\/api\/weibo\/events\/([^/]+)$/);
     if (eventMatch && request.method === "GET") return weiboWorker(request, response, "weibo-events", "--event-id", eventMatch[1]);

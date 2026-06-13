@@ -72,6 +72,7 @@ def main():
     add_payload_parser(sub, "weibo-target-ignore")
     add_payload_parser(sub, "weibo-source-account-upsert")
     add_payload_parser(sub, "weibo-comments")
+    add_payload_parser(sub, "weibo-comments-analyze")
     collect_target = add_payload_parser(sub, "weibo-collect-target")
     collect_target.add_argument("--target-id", required=True)
     events = add_payload_parser(sub, "weibo-events")
@@ -150,6 +151,8 @@ def main():
             emit(weibo_source_account_upsert_payload(args.payload_json))
         elif args.command == "weibo-comments":
             emit(weibo_comments_payload(args.payload_json))
+        elif args.command == "weibo-comments-analyze":
+            emit(weibo_comments_analyze_payload(args.payload_json))
         elif args.command == "weibo-collect-target":
             emit(weibo_collect_target_payload(args.payload_json, args.target_id))
         elif args.command == "weibo-events":
@@ -1047,6 +1050,117 @@ def comment_row_to_payload(row):
         "engagement": int(row.get("like_count") or row.get("post_engagement") or 0),
         "collected_at": iso_or_none(row.get("collected_at")),
         "citation": f"comment-{row['id']}",
+    }
+
+
+def weibo_comments_analyze_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/comments/analyze"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=100, maximum=500)
+    now = datetime.utcnow().isoformat() + "Z"
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.*
+                FROM social_comments c
+                WHERE c.project_id=%s AND c.platform='weibo'
+                ORDER BY c.collected_at DESC, c.id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            comments = cur.fetchall()
+            persisted = 0
+            analyses = []
+            for row in comments:
+                analysis = analyze_weibo_comment_record(comment_db_row_to_analysis_input(row), now)
+                analyses.append(analysis)
+                cur.execute(
+                    """
+                    INSERT INTO sentiment_results(
+                      comment_id, model, sentiment, score, confidence, topics, risks,
+                      evidence, stance, issue_summary, intensity, weight_snapshot,
+                      analysis_json, fallback_type, analyzed_at
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      sentiment=VALUES(sentiment),
+                      score=VALUES(score),
+                      confidence=VALUES(confidence),
+                      topics=VALUES(topics),
+                      risks=VALUES(risks),
+                      evidence=VALUES(evidence),
+                      stance=VALUES(stance),
+                      issue_summary=VALUES(issue_summary),
+                      intensity=VALUES(intensity),
+                      weight_snapshot=VALUES(weight_snapshot),
+                      analysis_json=VALUES(analysis_json),
+                      fallback_type=VALUES(fallback_type),
+                      analyzed_at=VALUES(analyzed_at)
+                    """,
+                    (
+                        row["id"],
+                        "local-rules",
+                        analysis["sentiment"],
+                        analysis["score"],
+                        analysis["confidence"],
+                        json.dumps(analysis["topics"], ensure_ascii=False),
+                        json.dumps(analysis["risks"], ensure_ascii=False),
+                        analysis["evidence"],
+                        analysis["stance"],
+                        analysis["issue_summary"],
+                        analysis["intensity"],
+                        analysis["weight"],
+                        json.dumps(analysis["analysis_json"], ensure_ascii=False),
+                        "local_rules",
+                        mysql_timestamp(now),
+                    ),
+                )
+                persisted += 1
+            agent_run = {
+                "agent_name": "Local Weibo Issue Analysis",
+                "status": "succeeded",
+                "model": "local-rules",
+                "fallback_type": "local_rules",
+                "comment_count": len(comments),
+            }
+            cur.execute(
+                """
+                INSERT INTO agent_runs(project_id, agent_name, status, input_json, output_json, finished_at)
+                VALUES (%s,%s,'succeeded',%s,%s,NOW())
+                """,
+                (
+                    project["id"],
+                    agent_run["agent_name"],
+                    json.dumps({"endpoint": endpoint, "limit": limit}, ensure_ascii=False),
+                    json.dumps(agent_run, ensure_ascii=False),
+                ),
+            )
+            agent_run["id"] = cur.lastrowid
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "analyzed_comments": len(comments),
+        "persisted_sentiments": persisted,
+        "analyses": analyses[:20],
+        "agent_run": agent_run,
+        "deepseek": {"status": "not_run", "reason": "local_rules_slice"},
+    }
+
+
+def comment_db_row_to_analysis_input(row):
+    return {
+        "id": row["id"],
+        "content": row.get("content") or "",
+        "like_count": int(row.get("like_count") or 0),
+        "reply_count": int(row.get("reply_count") or 0),
+        "collected_at": iso_or_none(row.get("collected_at")),
     }
 
 
