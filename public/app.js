@@ -1,5 +1,7 @@
 const state = {
   workbench: null,
+  comments: [],
+  commentsError: null,
   pendingActionConfirmation: null,
   submittingActionIds: new Set()
 };
@@ -19,6 +21,7 @@ const els = {
   recommendedTargets: document.querySelector("#recommendedTargets"),
   events: document.querySelector("#events"),
   pendingActions: document.querySelector("#pendingActions"),
+  comments: document.querySelector("#comments"),
   dataGaps: document.querySelector("#dataGaps"),
   citations: document.querySelector("#citations"),
   lastAction: document.querySelector("#lastAction"),
@@ -38,12 +41,20 @@ window.setInterval(refreshWorkbench, 30000);
 
 async function refreshWorkbench() {
   try {
-    state.workbench = await fetchJson("/api/weibo/workbench");
+    const [workbench, comments] = await Promise.all([
+      fetchJson("/api/weibo/workbench"),
+      fetchJson("/api/weibo/comments?limit=20")
+    ]);
+    state.workbench = workbench;
+    state.comments = comments?.ok === false ? [] : comments.comments || [];
+    state.commentsError = comments?.ok === false ? comments : null;
     const blocked = state.workbench?.ok === false || Boolean(state.workbench?.error_type);
     setConnection(!blocked, blocked ? "依赖未就绪" : "微博 Agent 就绪");
     renderWorkbench();
   } catch (error) {
     setConnection(false, "读取失败");
+    state.comments = [];
+    state.commentsError = { message: error.message };
     setText(els.lastAction, error.message);
   }
 }
@@ -96,10 +107,21 @@ async function handleWorkbenchAction(event) {
   }
   if (action === "collect-comments") {
     await withBusy(button, "采集评论", async () => {
-      await postJson("/api/weibo/targets/select", { targetId });
-      showActionResult(await postJson(`/api/weibo/targets/${encodeURIComponent(targetId)}/collect-comments`, {}), `采集评论 ${targetId || ""}`);
-      await refreshWorkbench();
-    });
+      setText(els.lastAction, "采集中");
+      try {
+        const selectResult = await postJson("/api/weibo/targets/select", { targetId });
+        if (selectResult.ok === false) {
+          showCollectResult(selectResult);
+          return;
+        }
+        const result = await postJson(`/api/weibo/targets/${encodeURIComponent(targetId)}/collect-comments`, {});
+        showCollectResult(result);
+      } catch (error) {
+        showCollectResult({ ok: false, message: error.message });
+      } finally {
+        await refreshWorkbench();
+      }
+    }, { busyText: "采集中", statusText: "采集中" });
     return;
   }
   if (["confirm-action", "reject-action", "uncertain-action", "partial-action"].includes(action)) {
@@ -165,6 +187,7 @@ function renderWorkbench() {
   renderTargets(workbench.recommendedTargets || []);
   renderEvents(workbench.events || []);
   renderActions(workbench.pendingActions || []);
+  renderComments(state.comments || [], state.commentsError);
   renderDataGaps(dataGaps);
   renderCitations(workbench.citations || []);
 }
@@ -412,6 +435,39 @@ function renderDataGaps(gaps) {
     : empty({ title: "后端未报告数据缺口", message: "这不代表已经覆盖全量微博数据；仍以目标、评论、事件和引用里的证据范围为准。", actionLabel: "查看证据引用", scrollTarget: "#citations" }));
 }
 
+function renderComments(comments, error) {
+  if (error) {
+    setHtml(els.comments, empty({
+      title: "评论暂不可用",
+      message: error.fix || error.message || "连接 MySQL 后才能读取真实评论。",
+      actionLabel: "查看数据缺口",
+      scrollTarget: "#dataGaps"
+    }));
+    return;
+  }
+  setHtml(els.comments, comments.length
+    ? comments.map(commentCard).join("")
+    : empty({ title: "暂无真实评论", message: "选择推荐目标并采评论后，这里会显示已入库的微博评论证据。" }));
+}
+
+function commentCard(comment) {
+  return `
+    <section class="list-item comment-card">
+      <div class="card-head">
+        <strong>${escapeHtml(comment.author_name || "微博用户")}</strong>
+        ${chip(stateLabel(comment.source_type || "unknown"), "neutral")}
+      </div>
+      <p>${escapeHtml(comment.content || "")}</p>
+      <div class="comment-meta">
+        <span>互动 ${escapeHtml(String(comment.like_count ?? 0))}</span>
+        <span>回复 ${escapeHtml(String(comment.reply_count ?? 0))}</span>
+        <span>帖子 ${escapeHtml(comment.post_external_id || "-")}</span>
+        <span>引用 ${escapeHtml(comment.citation || "-")}</span>
+      </div>
+    </section>
+  `;
+}
+
 function gapCard(gap) {
   const blocking = isBlockingGap(gap);
   return `
@@ -438,6 +494,46 @@ function showActionResult(result, actionName = "操作") {
     : `${actionName}已提交，等待真实数据链路处理。`);
 }
 
+function showCollectResult(result) {
+  if (result?.ok === false) {
+    setText(els.lastAction, `失败，${collectFailureReason(result)}`);
+    return;
+  }
+  const count = result?.persisted_comments ?? result?.task?.collected_comments ?? result?.parsed_records ?? 0;
+  setText(els.lastAction, `成功，采到 ${count} 条评论`);
+}
+
+function collectFailureReason(result) {
+  const type = result?.error_type || "";
+  const reasonByType = {
+    mysql_unavailable: "数据库不可用",
+    selected_target_required: "请先选择采集目标",
+    target_not_found: "没有找到这个采集目标",
+    weibo_auth_missing: "微博登录态不可用",
+    weibo_auth_unavailable: "微博登录态不可用",
+    mediacrawler_missing: "采集环境未配置",
+    mediacrawler_python_missing: "采集环境未配置",
+    mediacrawler_commit_missing: "采集环境未配置",
+    mediacrawler_output_unwritable: "采集结果目录不可写",
+    mediacrawler_detail_timeout: "采集超时，请稍后重试",
+    mediacrawler_detail_failed: "采集程序执行失败",
+    mediacrawler_detail_empty: "没有生成可读取的评论数据",
+    cdp_unavailable: "采集连接不可用",
+    cdp_port_unavailable: "采集连接不可用"
+  };
+  const rawReason = result?.message || result?.fix || result?.cause || stateLabel(type || "blocked") || "请查看后台设置。";
+  return reasonByType[type] || userFacingCollectReason(rawReason);
+}
+
+function userFacingCollectReason(value) {
+  return String(value || "请查看后台设置。")
+    .replaceAll("MediaCrawler", "采集程序")
+    .replaceAll("Chrome CDP", "采集连接")
+    .replaceAll("CDP", "采集连接")
+    .replaceAll("browser", "采集环境")
+    .replaceAll("Browser", "采集环境");
+}
+
 async function postJson(url, body) {
   return fetchJson(url, {
     method: "POST",
@@ -461,12 +557,12 @@ async function fetchJson(url, options) {
   return payload;
 }
 
-async function withBusy(button, label, task) {
+async function withBusy(button, label, task, options = {}) {
   if (!button || button.disabled) return;
   const originalText = button.textContent;
   button.disabled = true;
-  button.textContent = "处理中";
-  setText(els.lastAction, `${label}处理中。`);
+  button.textContent = options.busyText || "处理中";
+  setText(els.lastAction, options.statusText || `${label}处理中。`);
   try {
     await task();
   } finally {

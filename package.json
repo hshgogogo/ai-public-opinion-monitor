@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "agent:guard": "node .codex/hooks/validate_agent_loop.mjs"
   },
   "engines": {
     "node": ">=20"

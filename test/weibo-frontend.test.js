@@ -13,9 +13,12 @@ test("front-end uses Weibo Agent workbench as the primary screen", async () => {
   assert.match(html, /id="weiboWorkbench"/);
   assert.match(html, /id="recommendedTargets"/);
   assert.match(html, /id="pendingActions"/);
+  assert.match(html, /id="comments"/);
   assert.match(html, /id="dataGaps"/);
   assert.match(html, /微博 Agent 工作台/);
   assert.match(html, /href="\/settings"/);
+  assert.match(html, /微博搜索 \/ 选择后采评论/);
+  assert.doesNotMatch(html, /MediaCrawler/);
   assert.doesNotMatch(html, /id="runDiscovery"/);
   assert.doesNotMatch(html, /id="setupStatus"/);
   assert.doesNotMatch(html, /id="nextStep"/);
@@ -37,6 +40,24 @@ test("front-end uses Weibo Agent workbench as the primary screen", async () => {
   assert.doesNotMatch(js, /new EventSource\("\/api\/stream"\)/);
   assert.doesNotMatch(js, /fetch\("\/api\/collect"/);
   assert.doesNotMatch(html, /小红书 \/ 抖音 \/ 微博/);
+});
+
+test("front-end renders a read-only Weibo comments evidence list", async () => {
+  const [html, js] = await Promise.all([
+    readFile("public/index.html", "utf8"),
+    readFile("public/app.js", "utf8")
+  ]);
+
+  assert.match(html, /真实评论/);
+  assert.match(html, /id="comments"/);
+  assert.match(js, /\/api\/weibo\/comments\?limit=20/);
+  assert.match(js, /renderComments/);
+  assert.match(js, /comment\.source_type/);
+  assert.match(js, /comment\.like_count/);
+  assert.match(js, /comment\.citation/);
+  assert.match(js, /comment\.content/);
+  assert.match(js, /暂无真实评论/);
+  assert.doesNotMatch(js, /\/api\/weibo\/comments[\s\S]*DeepSeek/);
 });
 
 test("front-end renders Weibo target, event, and action detail fields", async () => {
@@ -63,4 +84,19 @@ test("front-end renders Weibo target, event, and action detail fields", async ()
   assert.match(js, /submittingActionIds/);
   assert.match(js, /submit-lock/);
   assert.match(js, /confirmation_note|note/);
+});
+
+test("front-end treats comment collection as a silent backend task", async () => {
+  const js = await readFile("public/app.js", "utf8");
+
+  assert.match(js, /setText\(els\.lastAction, "采集中"\)/);
+  assert.match(js, /showCollectResult/);
+  assert.match(js, /成功，采到 \$\{count\} 条评论/);
+  assert.match(js, /persisted_comments/);
+  assert.match(js, /task\?\.collected_comments/);
+  assert.match(js, /失败，\$\{collectFailureReason\(result\)\}/);
+  assert.match(js, /collectFailureReason/);
+  assert.match(js, /userFacingCollectReason/);
+  assert.match(js, /replaceAll\("MediaCrawler", "采集程序"\)/);
+  assert.match(js, /replaceAll\("CDP", "采集连接"\)/);
 });

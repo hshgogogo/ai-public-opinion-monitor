@@ -152,10 +152,47 @@ test(
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts")[0].count, 2);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments")[0].count, 4);
     assert.equal(queryRows("SELECT like_count, reply_count FROM social_comments WHERE external_id='c1002'")[0].like_count, 21);
+    const commentsList = runWorker([
+      "weibo-comments",
+      "--payload-json",
+      JSON.stringify({ projectId, limit: 3 })
+    ]);
+    assert.equal(commentsList.ok, true);
+    assert.equal(commentsList.mode, "weibo-agent-mvp");
+    assert.equal(commentsList.total, 4);
+    assert.equal(commentsList.comments.length, 3);
+    assert.equal(commentsList.comments[0].platform, "weibo");
+    assert.equal(commentsList.comments[0].comment_id > 0, true);
+    assert.equal(commentsList.comments[0].post_external_id, "1001");
+    assert.equal(typeof commentsList.comments[0].content, "string");
+    assert.equal(Object.hasOwn(commentsList.comments[0], "like_count"), true);
+    assert.equal(Object.hasOwn(commentsList.comments[0], "source_type"), true);
+    assert.equal(commentsList.citations.includes(`comment-${commentsList.comments[0].comment_id}`), true);
     const workbenchAfterDetail = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
     assert.equal(workbenchAfterDetail.setup.partialState, "detail-without-analysis");
     assert.equal(workbenchAfterDetail.setup.progress.analysis_count, 0);
     assert.equal(workbenchAfterDetail.dataGaps.some((gap) => gap.code === "weibo_analysis_needed"), true);
+    const localAnalysis = runWorker([
+      "weibo-comments-analyze",
+      "--payload-json",
+      JSON.stringify({ projectId, limit: 10 })
+    ]);
+    assert.equal(localAnalysis.ok, true);
+    assert.equal(localAnalysis.deepseek.status, "not_run");
+    assert.equal(localAnalysis.persisted_sentiments, 4);
+    assert.equal(localAnalysis.agent_run.status, "succeeded");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM sentiment_results WHERE model='local-rules'")[0].count, 4);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM agent_runs WHERE project_id=%s AND agent_name='Local Weibo Issue Analysis'", [projectId])[0].count, 1);
+    const localAnalysisAgain = runWorker([
+      "weibo-comments-analyze",
+      "--payload-json",
+      JSON.stringify({ projectId, limit: 10 })
+    ]);
+    assert.equal(localAnalysisAgain.persisted_sentiments, 4);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM sentiment_results WHERE model='local-rules'")[0].count, 4);
+    const workbenchAfterLocalAnalysis = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
+    assert.equal(workbenchAfterLocalAnalysis.setup.progress.analysis_count, 4);
+    assert.equal(workbenchAfterLocalAnalysis.setup.partialState, "analysis-without-event");
     const analysisOnly = runWorker([
       "weibo-deepseek-fixture",
       "--comments",

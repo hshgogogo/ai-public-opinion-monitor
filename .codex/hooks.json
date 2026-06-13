@@ -1,0 +1,12 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "exec_command",
+      "command": "node .codex/hooks/pre_tool_use_guard.mjs"
+    },
+    {
+      "matcher": "shell_command",
+      "command": "node .codex/hooks/pre_tool_use_guard.mjs"
+    }
+  ]
+}
