@@ -4111,6 +4111,18 @@ def weibo_agent_loop_handoff_payload(payload_json="{}"):
     payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
     if parse_error:
         return parse_error
+    source_type = payload.get("sourceType") or payload.get("source_type")
+    source_id = numeric_nullable(payload.get("sourceId") or payload.get("source_id"))
+    if source_type not in {"loop", "step", "judge_review"} or source_id is None:
+        error = weibo_error(
+            "invalid_agent_loop_payload",
+            "Manual handoff requires a status-visible Agent Loop source.",
+            "The handoff payload must identify a loop, step, or judge_review source with sourceId.",
+            "Pass sourceType as loop, step, or judge_review and include the matching sourceId.",
+            docs_anchor="agent-loop-ledger",
+        )
+        error.update({"endpoint": endpoint})
+        return error
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database)
@@ -4119,8 +4131,8 @@ def weibo_agent_loop_handoff_payload(payload_json="{}"):
         return error
     feedback = record_manual_handoff(
         project_id=project["id"],
-        source_type=payload.get("sourceType") or payload.get("source_type") or "other",
-        source_id=numeric_nullable(payload.get("sourceId") or payload.get("source_id")),
+        source_type=source_type,
+        source_id=source_id,
         feedback_type=payload.get("feedbackType") or payload.get("feedback_type") or "manual_handoff",
         note=payload.get("note"),
         status=payload.get("status") or "open",

@@ -30,15 +30,15 @@
 
 ## 5. Manual Handoff Skeleton
 
-- [ ] 5.1 Store manual handoff skeletons in `feedback_items` without implementing full user feedback semantics.
-- [ ] 5.2 Add tests proving manual handoff records preserve source type, source ID, status, note, and creator.
-- [ ] 5.3 Document that full user confirmation/rejection/preference writeback belongs to `haidao-feedback-memory-loop`.
+- [x] 5.1 Store manual handoff skeletons in `feedback_items` without implementing full user feedback semantics.
+- [x] 5.2 Add tests proving manual handoff records preserve source type, source ID, status, note, and creator.
+- [x] 5.3 Document that full user confirmation/rejection/preference writeback belongs to `haidao-feedback-memory-loop`.
 
 ## 6. Verification and Documentation
 
-- [ ] 6.1 Update README or implementation notes with Agent Harness worker commands and limitations.
-- [ ] 6.2 Run `npm test`.
-- [ ] 6.3 Run real MySQL persistence tests when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
-- [ ] 6.4 Run `openspec validate haidao-agent-harness-loop-foundation --strict`.
-- [ ] 6.5 Run `git diff --check`.
-- [ ] 6.6 Run `npm run agent:guard`.
+- [x] 6.1 Update README or implementation notes with Agent Harness worker commands and limitations.
+- [x] 6.2 Run `npm test`.
+- [x] 6.3 Run real MySQL persistence tests when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
+- [x] 6.4 Run `openspec validate haidao-agent-harness-loop-foundation --strict`.
+- [x] 6.5 Run `git diff --check`.
+- [x] 6.6 Run `npm run agent:guard`.

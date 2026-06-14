@@ -261,7 +261,10 @@ test("Agent Harness worker ledger commands return mysql_unavailable without MySQ
   ];
 
   for (const command of commands) {
-    const result = spawnSync(python, ["workers/enterprise_worker.py", command, "--payload-json", "{}"], {
+    const payloadJson = command === "weibo-agent-loop-handoff"
+      ? JSON.stringify({ sourceType: "loop", sourceId: 1 })
+      : "{}";
+    const result = spawnSync(python, ["workers/enterprise_worker.py", command, "--payload-json", payloadJson], {
       cwd: process.cwd(),
       encoding: "utf8",
       env: {
@@ -329,6 +332,28 @@ test("Agent Harness foundation docs preserve compatibility boundaries", () => {
   for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
     assert.doesNotMatch(worker, new RegExp(`${command}[\\s\\S]{0,200}agentLoopRunId`));
   }
+});
+
+test("Agent Harness handoff command requires a status-visible source association", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-agent-loop-handoff",
+    "--payload-json",
+    JSON.stringify({ sourceType: "other", feedbackType: "manual_handoff" })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_agent_loop_payload");
+  assert.match(payload.fix, /sourceType/);
 });
 
 test("OpenSpec tasks include real environment and design pass evidence", () => {
