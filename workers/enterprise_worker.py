@@ -3368,25 +3368,26 @@ def load_weibo_bot_records(project_id):
             ]
             cur.execute(
                 """
-                SELECT source_kind, source_id, title, summary, evidence_ids, memory_json
+                SELECT id, source_kind, source_id, memory_identity, title, summary, evidence_ids, memory_json
                 FROM bot_memory_items
                 WHERE project_id=%s
-                ORDER BY importance DESC, updated_at DESC, id DESC
+                ORDER BY source_kind='preference' DESC, importance DESC, updated_at DESC, id DESC
                 LIMIT 20
                 """,
                 (project_id,),
             )
             memory = [
                 {
-                    "id": f"memory-{idx + 1}",
+                    "id": f"memory-{row['id']}",
                     "source_kind": row.get("source_kind"),
                     "source_id": row.get("source_id"),
+                    "memory_identity": row.get("memory_identity"),
                     "title": row.get("title"),
                     "summary": row.get("summary"),
                     "evidence_ids": db.jloads(row.get("evidence_ids"), []),
                     "memory_json": db.jloads(row.get("memory_json"), {}),
                 }
-                for idx, row in enumerate(cur.fetchall())
+                for row in cur.fetchall()
             ]
     return {"targets": [], "comments": comments, "events": events, "actions": actions, "backtests": [], "memory": memory}
 
@@ -6745,22 +6746,26 @@ def answer_weibo_question(records, question):
             "citations": [],
             "error": standard_answer_error("insufficient_evidence", "No stored Weibo evidence is available.", "Run Weibo discovery and analysis first."),
         }
+    preference_context = bot_preference_context(records.get("memory", []))
     if any(term in question for term in ["行动", "有效", "效果", "backtest"]):
         if not records.get("backtests"):
             citations = [action["id"] for action in records.get("actions", []) if action.get("id")]
+            citations.extend([item["id"] for item in preference_context if item.get("id")])
             facts = [f"当前记录了 {len(records.get('actions', []))} 条行动，但还没有可用回测。"] if records.get("actions") else []
             return {
-                "text": "There is no confirmed action/backtest yet, so action effect evidence is insufficient.",
+                "text": "There is no confirmed action/backtest yet, so action effect evidence is insufficient." + preference_answer_suffix(preference_context),
                 "facts": facts,
                 "inferences": ["不能把待确认建议或未回测动作当作已验证效果。"],
                 "recommendations": ["先确认或补充现实动作时间，再采集动作后的评论窗口。"],
                 "citations": citations,
+                "preference_context": preference_context,
                 "error": standard_answer_error("insufficient_backtest_data", "No confirmed action backtest exists.", "Confirm/log an action and collect post-action windows."),
             }
     events = records.get("events", [])
     comments = records.get("comments", [])
     actions = records.get("actions", [])
     citations = [item["id"] for item in [*events, *comments[:5], *actions[:5]] if item.get("id")]
+    citations.extend([item["id"] for item in preference_context if item.get("id")])
     facts = []
     if events:
         event = events[0]
@@ -6781,13 +6786,36 @@ def answer_weibo_question(records, question):
     else:
         recommendations.append("先生成或确认一条可执行行动，再收集动作后的微博评论窗口。")
     return {
-        "text": "微博负面升高主要来自官宣可信度、非官宣消息和溜粉担忧，相关评论与事件仍在升级观察中。",
+        "text": "微博负面升高主要来自官宣可信度、非官宣消息和溜粉担忧，相关评论与事件仍在升级观察中。" + preference_answer_suffix(preference_context),
         "facts": facts,
         "inferences": inferences,
         "recommendations": recommendations,
+        "preference_context": preference_context,
         "citations": citations,
         "error": None,
     }
+
+
+def bot_preference_context(memory_items):
+    preferences = []
+    for item in memory_items or []:
+        if item.get("source_kind") != "preference":
+            continue
+        memory_json = item.get("memory_json") or {}
+        source_of_truth = memory_json.get("source_of_truth") or "user_feedback"
+        preferences.append({
+            "id": item.get("id"),
+            "memory_identity": item.get("memory_identity"),
+            "source_of_truth": source_of_truth,
+            "summary": item.get("summary") or "",
+        })
+    return preferences[:3]
+
+
+def preference_answer_suffix(preference_context):
+    if not preference_context:
+        return ""
+    return f" 团队偏好/人工反馈提示：{preference_context[0]['summary']}；这不是外部事实。"
 
 
 def daily_report(records, now):

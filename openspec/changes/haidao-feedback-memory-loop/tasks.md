@@ -30,7 +30,7 @@
 - [x] 4.1 `weibo-actions-build` 读取 preference memory。
 - [x] 4.2 用户拒绝公开澄清偏好会降低或替换公开澄清建议。
 - [x] 4.3 action reason/raw_json 引用 preference memory ID。
-- [ ] 4.4 `weibo-bot-message` 可引用 preference memory，且不把偏好写成外部事实。
+- [x] 4.4 `weibo-bot-message` 可引用 preference memory，且不把偏好写成外部事实。
 
 ## 5. 验证
 

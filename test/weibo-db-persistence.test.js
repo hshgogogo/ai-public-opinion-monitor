@@ -1576,6 +1576,125 @@ test(
 );
 
 test(
+  "answers Weibo Q&A with preference memory as team feedback, not external fact",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = createProject("海岛舒服日志 Q&A 偏好记忆");
+
+    queryRows(
+      `
+      INSERT INTO social_posts(project_id, platform, external_id, url, author_name, title, content, keyword, engagement, raw_json)
+      VALUES (%s,'weibo','qa-preference-post','https://weibo.test/qa-preference-post','测试营销号','官宣可信度讨论','围绕海岛舒服日志官宣可信度的讨论','海岛舒服日志',420,JSON_OBJECT())
+      `,
+      [projectId]
+    );
+    const postId = queryRows("SELECT id FROM social_posts WHERE project_id=%s AND external_id='qa-preference-post'", [projectId])[0].id;
+    queryRows(
+      `
+      INSERT INTO social_comments(post_id, project_id, platform, external_id, author_name, content, like_count, reply_count, raw_json)
+      VALUES (%s,%s,'weibo','qa-preference-comment','观众A','非官宣消息太多，担心又是在溜粉。',35,4,JSON_OBJECT())
+      `,
+      [postId, projectId]
+    );
+    const commentId = queryRows("SELECT id FROM social_comments WHERE project_id=%s AND external_id='qa-preference-comment'", [projectId])[0].id;
+    queryRows(
+      `
+      INSERT INTO artist_public_opinion_events(
+        project_id, platform, event_type, title, trigger_summary, related_artists, status,
+        risk_level, event_score, evidence_ids, event_identity, first_seen_at, last_seen_at
+      )
+      VALUES (
+        %s, 'weibo', 'formal_event', '官宣可信度被质疑',
+        '高互动评论集中质疑非官宣消息和溜粉风险。',
+        JSON_ARRAY('刘昊然','李兰迪'), 'observing',
+        'high', 0.82, JSON_ARRAY(%s), 'qa-preference-event',
+        '2026-06-10 10:00:00', '2026-06-10 11:00:00'
+      )
+      `,
+      [projectId, commentId]
+    );
+    const eventId = queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity='qa-preference-event'", [projectId])[0].id;
+    queryRows(
+      `
+      INSERT INTO publicity_actions(
+        project_id, platform, related_event_id, source, action_identity, confirmation_status,
+        action_type, content_summary, reason, evidence_ids, priority, confidence, raw_json
+      )
+      VALUES (
+        %s, 'weibo', %s, 'agent_recommended', 'qa-preference-action', 'pending',
+        'clarify_official_announcement', '准备公开澄清素材',
+        '事件已有评论证据，需要人工确认是否公开澄清。',
+        JSON_ARRAY(%s), 'high', 0.74, JSON_OBJECT()
+      )
+      `,
+      [projectId, eventId, commentId]
+    );
+
+    const preference = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceId: "bot-answer-policy",
+        preferenceType: "avoid_public_clarification",
+        summary: "团队偏好是低调观察，避免默认公开澄清。",
+        note: "来自宣发人工反馈"
+      })
+    ]);
+    assert.equal(preference.ok, true);
+    for (let index = 0; index < 25; index += 1) {
+      queryRows(
+        `
+        INSERT INTO bot_memory_items(project_id, source_kind, source_id, memory_identity, title, summary, evidence_ids, memory_json, importance)
+        VALUES (%s,'conversation',%s,%s,%s,'高权重历史对话记忆',JSON_ARRAY(),JSON_OBJECT(),0.99)
+        `,
+        [projectId, index + 1, `conversation:qa-noise-${index}`, `噪声记忆 ${index}`]
+      );
+    }
+
+    const botAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, question: "现在该怎么回应？团队偏好是什么？" })
+    ]);
+
+    assert.equal(botAnswer.ok, true);
+    assert.equal(botAnswer.answer.error, null);
+    assert.equal(botAnswer.answer.preference_context.length, 1);
+    assert.deepEqual(botAnswer.answer.preference_context[0], {
+      id: `memory-${preference.memory.id}`,
+      memory_identity: "preference:id:bot-answer-policy",
+      source_of_truth: "user_feedback",
+      summary: "团队偏好是低调观察，避免默认公开澄清。"
+    });
+    assert.equal(botAnswer.answer.citations.includes(`memory-${preference.memory.id}`), true);
+    assert.equal(botAnswer.answer.citations.some((citation) => /^comment-\d+$/.test(citation)), true);
+    assert.equal(botAnswer.answer.citations.some((citation) => /^event-\d+$/.test(citation)), true);
+    assert.equal(botAnswer.answer.citations.some((citation) => /^action-\d+$/.test(citation)), true);
+    assert.match(botAnswer.answer.text, /团队偏好|人工反馈/);
+    assert.match(botAnswer.answer.text, /不是外部事实|不作为外部事实/);
+    assert.doesNotMatch(botAnswer.answer.facts.join("\n"), /低调观察|避免默认公开澄清/);
+
+    const actionEffectAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, question: "行动效果怎么看？团队偏好是什么？" })
+    ]);
+    assert.equal(actionEffectAnswer.ok, true);
+    assert.equal(actionEffectAnswer.answer.error.error_type, "insufficient_backtest_data");
+    assert.equal(actionEffectAnswer.answer.preference_context.length, 1);
+    assert.equal(actionEffectAnswer.answer.citations.includes(`memory-${preference.memory.id}`), true);
+    assert.match(actionEffectAnswer.answer.text, /团队偏好|人工反馈/);
+    assert.match(actionEffectAnswer.answer.text, /不是外部事实|不作为外部事实/);
+    assert.doesNotMatch(actionEffectAnswer.answer.facts.join("\n"), /低调观察|避免默认公开澄清/);
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
