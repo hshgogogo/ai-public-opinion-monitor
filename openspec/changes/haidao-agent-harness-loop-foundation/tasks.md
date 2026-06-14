@@ -16,10 +16,10 @@
 
 ## 3. Worker Commands
 
-- [ ] 3.1 Add `weibo-agent-loop-run` worker command for creating a loop run.
-- [ ] 3.2 Add `weibo-agent-loop-status` worker command for reading run, step, Judge, and feedback state.
-- [ ] 3.3 Add worker-only commands or payload paths for recording a step, Judge review, and manual handoff skeleton.
-- [ ] 3.4 Add tests for MySQL unavailable, invalid project IDs, and stable worker payload shapes.
+- [x] 3.1 Add `weibo-agent-loop-run` worker command for creating a loop run.
+- [x] 3.2 Add `weibo-agent-loop-status` worker command for reading run, step, Judge, and feedback state.
+- [x] 3.3 Add worker-only commands or payload paths for recording a step, Judge review, and manual handoff skeleton.
+- [x] 3.4 Add tests for MySQL unavailable, invalid project IDs, and stable worker payload shapes.
 
 ## 4. Compatibility Boundaries
 

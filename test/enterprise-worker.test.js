@@ -220,7 +220,7 @@ test("Agent Harness loop migration declares ledger tables and migration order", 
   assert.equal(harnessMigrationIndex > sentimentMigrationIndex, true);
 });
 
-test("Agent Harness worker ledger helpers stay worker-only in foundation slice", () => {
+test("Agent Harness worker ledger commands stay out of public HTTP in foundation slice", () => {
   const worker = readText("workers/enterprise_worker.py");
   const server = readText("src/server.js");
 
@@ -238,8 +238,73 @@ test("Agent Harness worker ledger helpers stay worker-only in foundation slice",
     assert.match(worker, new RegExp(`def ${helper}\\(`));
   }
 
+  for (const command of [
+    "weibo-agent-loop-run",
+    "weibo-agent-loop-status",
+    "weibo-agent-loop-step",
+    "weibo-agent-loop-judge-review",
+    "weibo-agent-loop-handoff"
+  ]) {
+    assert.match(worker, new RegExp(command));
+  }
+
   assert.doesNotMatch(server, /agent-loop\/run|agent-runs/i);
-  assert.doesNotMatch(worker, /add_payload_parser\(sub,\s*["']weibo-agent-loop/);
+});
+
+test("Agent Harness worker ledger commands return mysql_unavailable without MySQL", () => {
+  const commands = [
+    "weibo-agent-loop-run",
+    "weibo-agent-loop-status",
+    "weibo-agent-loop-step",
+    "weibo-agent-loop-judge-review",
+    "weibo-agent-loop-handoff"
+  ];
+
+  for (const command of commands) {
+    const result = spawnSync(python, ["workers/enterprise_worker.py", command, "--payload-json", "{}"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        MYSQL_URL: "",
+        WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+      }
+    });
+    assert.equal(result.status, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error_type, "mysql_unavailable");
+    assert.match(payload.endpoint, new RegExp(command));
+  }
+});
+
+test("Agent Harness worker ledger commands return standard errors for malformed JSON", () => {
+  const commands = [
+    "weibo-agent-loop-run",
+    "weibo-agent-loop-status",
+    "weibo-agent-loop-step",
+    "weibo-agent-loop-judge-review",
+    "weibo-agent-loop-handoff"
+  ];
+
+  for (const command of commands) {
+    const result = spawnSync(python, ["workers/enterprise_worker.py", command, "--payload-json", "{"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        MYSQL_URL: "",
+        WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+      }
+    });
+    assert.equal(result.status, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error_type, "invalid_agent_loop_payload");
+    assert.match(payload.endpoint, new RegExp(command));
+    assert.equal(typeof payload.cause, "string");
+    assert.equal(typeof payload.fix, "string");
+  }
 });
 
 test("OpenSpec tasks include real environment and design pass evidence", () => {

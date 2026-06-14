@@ -261,6 +261,121 @@ print(json.dumps({
 );
 
 test(
+  "persists and reads Agent Harness worker-only command payloads",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const created = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        triggerMode: "manual",
+        targetId: 88,
+        currentStep: "comment_analysis",
+        input: { requested_by: "worker-command-test" }
+      })
+    ]);
+    assert.equal(created.ok, true);
+    assert.equal(created.run.project_id, projectId);
+    assert.equal(created.run.platform, "weibo");
+    assert.equal(created.run.trigger_mode, "manual");
+    assert.equal(created.run.status, "running");
+    assert.equal(created.request.projectId, projectId);
+
+    const started = runWorker([
+      "weibo-agent-loop-step",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        loopRunId: created.run.id,
+        agentName: "Issue Analysis Agent",
+        stepName: "comment_analysis",
+        status: "running",
+        input: { comment_ids: [1, 2] }
+      })
+    ]);
+    assert.equal(started.ok, true);
+    assert.equal(started.step.status, "running");
+
+    const succeeded = runWorker([
+      "weibo-agent-loop-step",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        loopRunId: created.run.id,
+        stepRunId: started.step.id,
+        agentName: "Issue Analysis Agent",
+        stepName: "comment_analysis",
+        status: "succeeded",
+        output: { summary: "done" },
+        evidenceIds: ["comment-1"]
+      })
+    ]);
+    assert.equal(succeeded.ok, true);
+    assert.equal(succeeded.step.status, "succeeded");
+
+    const review = runWorker([
+      "weibo-agent-loop-judge-review",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        loopRunId: created.run.id,
+        stepRunId: succeeded.step.id,
+        judgeAgentName: "Judge Agent",
+        status: "passed",
+        passed: true,
+        score: 0.95,
+        feedback: { verdict: "ok" },
+        requiredChanges: [],
+        evidenceErrors: []
+      })
+    ]);
+    assert.equal(review.ok, true);
+    assert.equal(review.review.status, "passed");
+
+    const handoff = runWorker([
+      "weibo-agent-loop-handoff",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "step",
+        sourceId: succeeded.step.id,
+        feedbackType: "manual_handoff",
+        note: "producer should confirm",
+        status: "open",
+        createdBy: "agent_harness"
+      })
+    ]);
+    assert.equal(handoff.ok, true);
+    assert.equal(handoff.feedback.status, "open");
+
+    const status = runWorker([
+      "weibo-agent-loop-status",
+      "--payload-json",
+      JSON.stringify({ projectId, loopRunId: created.run.id })
+    ]);
+    assert.equal(status.ok, true);
+    assert.equal(status.run.id, created.run.id);
+    assert.equal(status.steps.length, 1);
+    assert.equal(status.steps[0].status, "succeeded");
+    assert.equal(status.judgeReviews.length, 1);
+    assert.equal(status.feedbackItems.length, 1);
+
+    const invalidProject = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId: 999999, triggerMode: "manual", input: {} })
+    ]);
+    assert.equal(invalidProject.ok, false);
+    assert.equal(invalidProject.error_type, "project_not_found");
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

@@ -89,6 +89,11 @@ def main():
     action_backtest = add_payload_parser(sub, "weibo-action-backtest")
     action_backtest.add_argument("--action-id", required=True)
     add_payload_parser(sub, "weibo-bot-message")
+    add_payload_parser(sub, "weibo-agent-loop-run")
+    add_payload_parser(sub, "weibo-agent-loop-status")
+    add_payload_parser(sub, "weibo-agent-loop-step")
+    add_payload_parser(sub, "weibo-agent-loop-judge-review")
+    add_payload_parser(sub, "weibo-agent-loop-handoff")
     e2e_fixture = sub.add_parser("weibo-fixture-e2e")
     e2e_fixture.add_argument("--now", required=True)
     search_fixture = sub.add_parser("weibo-parse-search-fixture")
@@ -177,6 +182,16 @@ def main():
             emit(real_weibo_endpoint_payload("POST /api/weibo/actions/:id/backtest", args.payload_json, action_id=args.action_id))
         elif args.command == "weibo-bot-message":
             emit(weibo_bot_message_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-run":
+            emit(weibo_agent_loop_run_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-status":
+            emit(weibo_agent_loop_status_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-step":
+            emit(weibo_agent_loop_step_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-judge-review":
+            emit(weibo_agent_loop_judge_review_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-handoff":
+            emit(weibo_agent_loop_handoff_payload(args.payload_json))
         elif args.command == "weibo-fixture-e2e":
             emit(weibo_fixture_e2e(args.now))
         elif args.command == "weibo-parse-search-fixture":
@@ -3950,6 +3965,176 @@ def record_manual_handoff(project_id, source_type, feedback_type="manual_handoff
             return fetch_feedback_item(cur, cur.lastrowid)
 
 
+def weibo_agent_loop_run_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-run"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    run = create_agent_loop_run(
+        project_id=project["id"],
+        platform="weibo",
+        trigger_mode=payload.get("triggerMode") or payload.get("trigger_mode") or "manual",
+        target_id=numeric_nullable(payload.get("targetId") or payload.get("target_id")),
+        status=payload.get("status") or "running",
+        current_step=payload.get("currentStep") or payload.get("current_step"),
+        input_json=payload.get("input") if "input" in payload else payload.get("inputJson"),
+        summary_json=payload.get("summary") if "summary" in payload else payload.get("summaryJson"),
+        error_type=payload.get("errorType") or payload.get("error_type"),
+        error_message=payload.get("errorMessage") or payload.get("error_message"),
+    )
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-run",
+        "database": database,
+        "request": {"projectId": project["id"]},
+        "run": agent_loop_run_to_payload(run),
+    }
+
+
+def weibo_agent_loop_status_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-status"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    loop_run_id = numeric_nullable(payload.get("loopRunId") or payload.get("loop_run_id") or payload.get("runId"))
+    if loop_run_id is None:
+        return weibo_error("invalid_agent_loop_payload", "Agent Loop status requires loopRunId.", "The worker payload did not include a numeric loopRunId.", "Pass loopRunId from weibo-agent-loop-run.", docs_anchor="agent-loop-ledger")
+    status = load_agent_loop_status(project["id"], loop_run_id)
+    if not status:
+        return weibo_error("agent_loop_not_found", "Agent Loop run was not found for this project.", "The loopRunId does not exist or belongs to another project.", "Check projectId and loopRunId, then retry.", docs_anchor="agent-loop-ledger")
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-status",
+        "database": database,
+        **status,
+    }
+
+
+def weibo_agent_loop_step_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-step"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    loop_run_id = numeric_nullable(payload.get("loopRunId") or payload.get("loop_run_id") or payload.get("runId"))
+    if loop_run_id is None:
+        return weibo_error("invalid_agent_loop_payload", "Agent Loop step requires loopRunId.", "The worker payload did not include a numeric loopRunId.", "Create or pass a valid loop run first.", docs_anchor="agent-loop-ledger")
+    if not load_agent_loop_run(project["id"], loop_run_id):
+        return weibo_error("agent_loop_not_found", "Agent Loop run was not found for this project.", "The loopRunId does not exist or belongs to another project.", "Check projectId and loopRunId, then retry.", docs_anchor="agent-loop-ledger")
+    try:
+        step = record_agent_step_run(
+            loop_run_id=loop_run_id,
+            project_id=project["id"],
+            agent_name=payload.get("agentName") or payload.get("agent_name") or "Agent",
+            step_name=payload.get("stepName") or payload.get("step_name") or "unknown_step",
+            status=payload.get("status") or "running",
+            input_json=payload.get("input") if "input" in payload else payload.get("inputJson"),
+            output_json=payload.get("output") if "output" in payload else payload.get("outputJson"),
+            evidence_ids=payload.get("evidenceIds") if "evidenceIds" in payload else payload.get("evidence_ids"),
+            error_type=payload.get("errorType") or payload.get("error_type"),
+            error_message=payload.get("errorMessage") or payload.get("error_message"),
+            step_run_id=numeric_nullable(payload.get("stepRunId") or payload.get("step_run_id")),
+        )
+    except ValueError as exc:
+        return weibo_error("invalid_agent_loop_payload", "Agent Loop step payload is invalid.", str(exc), "Use an existing stepRunId for updates or omit it to create a step.", docs_anchor="agent-loop-ledger")
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-step",
+        "database": database,
+        "step": agent_step_run_to_payload(step),
+    }
+
+
+def weibo_agent_loop_judge_review_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-judge-review"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    loop_run_id = numeric_nullable(payload.get("loopRunId") or payload.get("loop_run_id") or payload.get("runId"))
+    if loop_run_id is None:
+        return weibo_error("invalid_agent_loop_payload", "Judge review requires loopRunId.", "The worker payload did not include a numeric loopRunId.", "Create or pass a valid loop run first.", docs_anchor="agent-loop-ledger")
+    if not load_agent_loop_run(project["id"], loop_run_id):
+        return weibo_error("agent_loop_not_found", "Agent Loop run was not found for this project.", "The loopRunId does not exist or belongs to another project.", "Check projectId and loopRunId, then retry.", docs_anchor="agent-loop-ledger")
+    try:
+        review = record_judge_review(
+            loop_run_id=loop_run_id,
+            step_run_id=numeric_nullable(payload.get("stepRunId") or payload.get("step_run_id")),
+            project_id=project["id"],
+            judge_agent_name=payload.get("judgeAgentName") or payload.get("judge_agent_name") or "Judge Agent",
+            status=payload.get("status") or "pending",
+            passed=payload.get("passed"),
+            score=payload.get("score"),
+            feedback_json=payload.get("feedback") if "feedback" in payload else payload.get("feedbackJson"),
+            required_changes=payload.get("requiredChanges") if "requiredChanges" in payload else payload.get("required_changes"),
+            evidence_errors=payload.get("evidenceErrors") if "evidenceErrors" in payload else payload.get("evidence_errors"),
+            retry_count=int(payload.get("retryCount") or payload.get("retry_count") or 0),
+        )
+    except ValueError as exc:
+        return weibo_error("invalid_agent_loop_payload", "Judge review payload is invalid.", str(exc), "Use failed or needs_human when evidence errors exist.", docs_anchor="agent-loop-ledger")
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-judge-review",
+        "database": database,
+        "review": judge_review_to_payload(review),
+    }
+
+
+def weibo_agent_loop_handoff_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-handoff"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    feedback = record_manual_handoff(
+        project_id=project["id"],
+        source_type=payload.get("sourceType") or payload.get("source_type") or "other",
+        source_id=numeric_nullable(payload.get("sourceId") or payload.get("source_id")),
+        feedback_type=payload.get("feedbackType") or payload.get("feedback_type") or "manual_handoff",
+        note=payload.get("note"),
+        status=payload.get("status") or "open",
+        created_by=payload.get("createdBy") or payload.get("created_by") or "agent_harness",
+    )
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-handoff",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+    }
+
+
 def update_loop_from_step(cur, loop_run_id, project_id, step_name, status, error_type=None, error_message=None):
     loop_status = status if status in {"partial", "failed", "needs_human"} else "running"
     finished_expr = "NOW()" if loop_status in {"partial", "failed", "needs_human"} else "finished_at"
@@ -3989,6 +4174,159 @@ def fetch_judge_review(cur, row_id):
 def fetch_feedback_item(cur, row_id):
     cur.execute("SELECT * FROM feedback_items WHERE id=%s", (row_id,))
     return cur.fetchone()
+
+
+def require_project_from_payload(payload):
+    project = strict_project_from_payload(payload)
+    if project:
+        return project, None
+    return None, weibo_error(
+        "project_not_found",
+        "Monitor project was not found.",
+        "The provided projectId does not exist.",
+        "Create the monitor project or retry with a valid projectId.",
+        docs_anchor="agent-loop-ledger",
+    )
+
+
+def parse_agent_loop_payload(payload_json, endpoint):
+    try:
+        parsed = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_agent_loop_payload",
+            "Agent Loop worker payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object through --payload-json.",
+            docs_anchor="agent-loop-ledger",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    if not isinstance(parsed, dict):
+        error = weibo_error(
+            "invalid_agent_loop_payload",
+            "Agent Loop worker payload must be a JSON object.",
+            f"Received {type(parsed).__name__}.",
+            "Pass a JSON object through --payload-json.",
+            docs_anchor="agent-loop-ledger",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    return parsed, None
+
+
+def load_agent_loop_run(project_id, loop_run_id):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM agent_loop_runs WHERE id=%s AND project_id=%s", (loop_run_id, project_id))
+            return cur.fetchone()
+
+
+def load_agent_loop_status(project_id, loop_run_id):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM agent_loop_runs WHERE id=%s AND project_id=%s", (loop_run_id, project_id))
+            run = cur.fetchone()
+            if not run:
+                return None
+            cur.execute("SELECT * FROM agent_step_runs WHERE loop_run_id=%s AND project_id=%s ORDER BY id", (loop_run_id, project_id))
+            steps = cur.fetchall()
+            cur.execute("SELECT * FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s ORDER BY id", (loop_run_id, project_id))
+            reviews = cur.fetchall()
+            cur.execute(
+                """
+                SELECT *
+                FROM feedback_items
+                WHERE project_id=%s
+                  AND (
+                    (source_type='loop' AND source_id=%s)
+                    OR (source_type='step' AND source_id IN (SELECT id FROM agent_step_runs WHERE loop_run_id=%s AND project_id=%s))
+                    OR (source_type='judge_review' AND source_id IN (SELECT id FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s))
+                  )
+                ORDER BY id
+                """,
+                (project_id, loop_run_id, loop_run_id, project_id, loop_run_id, project_id),
+            )
+            feedback = cur.fetchall()
+    return {
+        "run": agent_loop_run_to_payload(run),
+        "steps": [agent_step_run_to_payload(row) for row in steps],
+        "judgeReviews": [judge_review_to_payload(row) for row in reviews],
+        "feedbackItems": [feedback_item_to_payload(row) for row in feedback],
+    }
+
+
+def agent_loop_run_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "platform": row.get("platform"),
+        "trigger_mode": row.get("trigger_mode"),
+        "target_id": row.get("target_id"),
+        "status": row.get("status"),
+        "current_step": row.get("current_step"),
+        "input_json": db.jloads(row.get("input_json"), {}),
+        "summary_json": db.jloads(row.get("summary_json"), None),
+        "error_type": row.get("error_type"),
+        "error_message": row.get("error_message"),
+        "started_at": iso_or_none(row.get("started_at")),
+        "finished_at": iso_or_none(row.get("finished_at")),
+        "created_at": iso_or_none(row.get("created_at")),
+        "updated_at": iso_or_none(row.get("updated_at")),
+    }
+
+
+def agent_step_run_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "loop_run_id": row.get("loop_run_id"),
+        "project_id": row.get("project_id"),
+        "agent_name": row.get("agent_name"),
+        "step_name": row.get("step_name"),
+        "status": row.get("status"),
+        "input_json": db.jloads(row.get("input_json"), None),
+        "output_json": db.jloads(row.get("output_json"), None),
+        "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+        "error_type": row.get("error_type"),
+        "error_message": row.get("error_message"),
+        "started_at": iso_or_none(row.get("started_at")),
+        "finished_at": iso_or_none(row.get("finished_at")),
+        "created_at": iso_or_none(row.get("created_at")),
+        "updated_at": iso_or_none(row.get("updated_at")),
+    }
+
+
+def judge_review_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "loop_run_id": row.get("loop_run_id"),
+        "step_run_id": row.get("step_run_id"),
+        "project_id": row.get("project_id"),
+        "judge_agent_name": row.get("judge_agent_name"),
+        "status": row.get("status"),
+        "score": float(row["score"]) if row.get("score") is not None else None,
+        "passed": bool(row["passed"]) if row.get("passed") is not None else None,
+        "feedback_json": db.jloads(row.get("feedback_json"), None),
+        "required_changes": db.jloads(row.get("required_changes"), []),
+        "evidence_errors": db.jloads(row.get("evidence_errors"), []),
+        "retry_count": row.get("retry_count"),
+        "created_at": iso_or_none(row.get("created_at")),
+    }
+
+
+def feedback_item_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "source_type": row.get("source_type"),
+        "source_id": row.get("source_id"),
+        "feedback_type": row.get("feedback_type"),
+        "note": row.get("note"),
+        "status": row.get("status"),
+        "created_by": row.get("created_by"),
+        "created_at": iso_or_none(row.get("created_at")),
+        "handled_at": iso_or_none(row.get("handled_at")),
+    }
 
 
 def json_for_db(value, default=None):
