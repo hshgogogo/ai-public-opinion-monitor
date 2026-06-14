@@ -645,6 +645,55 @@ test(
 );
 
 test(
+  "runs knowledge card RAG schema migration twice and creates source/card tables",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const tables = queryRows(
+      "SELECT TABLE_NAME AS table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('knowledge_sources','knowledge_cards') ORDER BY TABLE_NAME"
+    ).map((row) => row.table_name);
+    assert.deepEqual(tables, ["knowledge_cards", "knowledge_sources"]);
+
+    const sourceColumns = queryRows(
+      "SELECT COLUMN_NAME AS column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='knowledge_sources'"
+    ).map((row) => row.column_name);
+    for (const column of ["source_identity", "title", "source_type", "reliability_level", "citation_url", "publisher", "published_at", "notes", "raw_json"]) {
+      assert.equal(sourceColumns.includes(column), true, `knowledge_sources.${column} should exist`);
+    }
+
+    const cardColumns = queryRows(
+      "SELECT COLUMN_NAME AS column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='knowledge_cards'"
+    ).map((row) => row.column_name);
+    for (const column of [
+      "card_identity",
+      "source_id",
+      "framework_or_case",
+      "applicable_scenario",
+      "do_not_apply_when",
+      "recommended_actions",
+      "risk_warnings",
+      "evidence_required",
+      "judge_questions",
+      "tags",
+      "status",
+      "raw_json"
+    ]) {
+      assert.equal(cardColumns.includes(column), true, `knowledge_cards.${column} should exist`);
+    }
+
+    const sourceUnique = queryRows("SHOW INDEX FROM knowledge_sources WHERE Key_name='uniq_knowledge_source_identity'");
+    const cardUnique = queryRows("SHOW INDEX FROM knowledge_cards WHERE Key_name='uniq_knowledge_card_identity'");
+    assert.equal(sourceUnique.length, 1);
+    assert.equal(cardUnique.length, 1);
+    assert.equal(sourceUnique[0].Non_unique, 0);
+    assert.equal(cardUnique[0].Non_unique, 0);
+  }
+);
+
+test(
   "persists event feedback into feedback ledger, event status history, and memory in one MySQL transaction",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

@@ -8,12 +8,12 @@
 
 ## 2. Schema 与 Migration
 
-- [ ] 2.1 先写 migration/schema static tests，断言 `knowledge_sources`、`knowledge_cards`、identity 唯一键、citation URL 和核心字段存在。
-- [ ] 2.2 新增 MySQL-safe migration 创建 `knowledge_sources`。
-- [ ] 2.3 新增 MySQL-safe migration 创建 `knowledge_cards`。
-- [ ] 2.4 为 knowledge source/card 添加 project-independent 稳定 identity 与唯一键。
-- [ ] 2.5 知识卡字段覆盖 source、framework_or_case、applicable_scenario、do_not_apply_when、recommended_actions、risk_warnings、evidence_required、judge_questions、tags、status、raw_json。
-- [ ] 2.6 先写真实 MySQL migration 幂等测试，再确认 migration 连续运行两遍不报重复表、重复列或重复索引。
+- [x] 2.1 先写 migration/schema static tests，断言 `knowledge_sources`、`knowledge_cards`、identity 唯一键、citation URL 和核心字段存在。
+- [x] 2.2 新增 MySQL-safe migration 创建 `knowledge_sources`。
+- [x] 2.3 新增 MySQL-safe migration 创建 `knowledge_cards`。
+- [x] 2.4 为 knowledge source/card 添加 project-independent 稳定 identity 与唯一键。
+- [x] 2.5 知识卡字段覆盖 source、framework_or_case、applicable_scenario、do_not_apply_when、recommended_actions、risk_warnings、evidence_required、judge_questions、tags、status、raw_json。
+- [x] 2.6 先写真实 MySQL migration 幂等测试，再确认 migration 连续运行两遍不报重复表、重复列或重复索引。
 
 ## 3. 知识卡 Seed 与校验
 

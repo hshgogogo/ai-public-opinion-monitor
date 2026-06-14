@@ -220,6 +220,44 @@ test("Agent Harness loop migration declares ledger tables and migration order", 
   assert.equal(harnessMigrationIndex > sentimentMigrationIndex, true);
 });
 
+test("Knowledge card RAG migration declares source and card schema", () => {
+  const sql = readText("migrations/007_knowledge_card_rag.sql");
+  const dbPy = readText("workers/db.py");
+
+  assert.doesNotMatch(sql, /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i);
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+
+  for (const table of ["knowledge_sources", "knowledge_cards"]) {
+    assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`, "i"));
+  }
+
+  for (const token of [
+    "source_identity",
+    "card_identity",
+    "citation_url",
+    "reliability_level",
+    "framework_or_case",
+    "applicable_scenario",
+    "do_not_apply_when",
+    "recommended_actions",
+    "risk_warnings",
+    "evidence_required",
+    "judge_questions",
+    "tags",
+    "status",
+    "raw_json",
+    "uniq_knowledge_source_identity",
+    "uniq_knowledge_card_identity"
+  ]) {
+    assert.match(sql, new RegExp(token, "i"));
+  }
+
+  const harnessMigrationIndex = dbPy.indexOf("006_agent_harness_loop.sql");
+  const knowledgeMigrationIndex = dbPy.indexOf("007_knowledge_card_rag.sql");
+  assert.equal(harnessMigrationIndex >= 0, true);
+  assert.equal(knowledgeMigrationIndex > harnessMigrationIndex, true);
+});
+
 test("Feedback memory loop migration declares OpenSpec-compatible enums", () => {
   const harnessSql = readText("migrations/006_agent_harness_loop.sql");
   const eventActionSql = readText("migrations/003_weibo_mvp_event_action.sql");
