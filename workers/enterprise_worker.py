@@ -174,7 +174,7 @@ def main():
         elif args.command == "weibo-action-backtest":
             emit(real_weibo_endpoint_payload("POST /api/weibo/actions/:id/backtest", args.payload_json, action_id=args.action_id))
         elif args.command == "weibo-bot-message":
-            emit(real_weibo_endpoint_payload("POST /api/weibo/bot/messages", args.payload_json))
+            emit(weibo_bot_message_payload(args.payload_json))
         elif args.command == "weibo-fixture-e2e":
             emit(weibo_fixture_e2e(args.now))
         elif args.command == "weibo-parse-search-fixture":
@@ -3078,6 +3078,176 @@ def weibo_actions_pending_payload(payload_json="{}"):
     }
 
 
+def weibo_bot_message_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/bot/messages"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    question = str(payload.get("question") or payload.get("message") or "").strip()
+    if not question:
+        return weibo_error(
+            "question_required",
+            "Weibo bot question is required.",
+            "The request did not include question or message text.",
+            "Ask a concrete question about current Weibo evidence.",
+            docs_anchor="weibo-bot",
+        )
+    records = load_weibo_bot_records(project["id"])
+    answer = answer_weibo_question(records, question)
+    conversation_id = persist_bot_exchange(project["id"], question, answer)
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "conversationId": conversation_id,
+        "question": question,
+        "answer": answer,
+    }
+
+
+def load_weibo_bot_records(project_id):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id, c.content, c.like_count, c.reply_count, c.collected_at, p.external_id AS post_external_id
+                FROM social_comments c
+                JOIN social_posts p ON p.id=c.post_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                ORDER BY c.like_count DESC, c.reply_count DESC, c.id DESC
+                LIMIT 20
+                """,
+                (project_id,),
+            )
+            comments = [
+                {
+                    "id": f"comment-{row['id']}",
+                    "content": row.get("content") or "",
+                    "like_count": int(row.get("like_count") or 0),
+                    "reply_count": int(row.get("reply_count") or 0),
+                    "post_external_id": row.get("post_external_id"),
+                    "created_at": iso_or_none(row.get("collected_at")),
+                }
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT *
+                FROM artist_public_opinion_events
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                LIMIT 10
+                """,
+                (project_id,),
+            )
+            events = [
+                {
+                    "id": f"event-{row['id']}",
+                    "title": row.get("title"),
+                    "risk_level": row.get("risk_level"),
+                    "status": row.get("status"),
+                    "trigger_summary": row.get("trigger_summary"),
+                    "evidence_ids": [f"comment-{item}" for item in db.jloads(row.get("evidence_ids"), [])],
+                    "recommended_actions": db.jloads(row.get("recommended_actions"), []),
+                }
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT *
+                FROM publicity_actions
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY confirmation_status='pending' DESC, priority DESC, updated_at DESC, id DESC
+                LIMIT 10
+                """,
+                (project_id,),
+            )
+            actions = [
+                {
+                    "id": f"action-{row['id']}",
+                    "source": row.get("source"),
+                    "confirmation_status": row.get("confirmation_status"),
+                    "action_type": row.get("action_type"),
+                    "content_summary": row.get("content_summary"),
+                    "reason": row.get("reason"),
+                    "evidence_ids": [f"comment-{item}" for item in db.jloads(row.get("evidence_ids"), [])],
+                    "priority": row.get("priority"),
+                }
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT source_kind, source_id, title, summary, evidence_ids, memory_json
+                FROM bot_memory_items
+                WHERE project_id=%s
+                ORDER BY importance DESC, updated_at DESC, id DESC
+                LIMIT 20
+                """,
+                (project_id,),
+            )
+            memory = [
+                {
+                    "id": f"memory-{idx + 1}",
+                    "source_kind": row.get("source_kind"),
+                    "source_id": row.get("source_id"),
+                    "title": row.get("title"),
+                    "summary": row.get("summary"),
+                    "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+                    "memory_json": db.jloads(row.get("memory_json"), {}),
+                }
+                for idx, row in enumerate(cur.fetchall())
+            ]
+    return {"targets": [], "comments": comments, "events": events, "actions": actions, "backtests": [], "memory": memory}
+
+
+def persist_bot_exchange(project_id, question, answer):
+    citations = answer.get("citations") or []
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bot_conversations(project_id, title)
+                VALUES (%s,%s)
+                """,
+                (project_id, question[:240]),
+            )
+            conversation_id = cur.lastrowid
+            cur.execute(
+                """
+                INSERT INTO bot_messages(conversation_id, project_id, role, content, cited_source_ids, error_type)
+                VALUES (%s,%s,'user',%s,JSON_ARRAY(),NULL)
+                """,
+                (conversation_id, project_id, question),
+            )
+            cur.execute(
+                """
+                INSERT INTO bot_messages(conversation_id, project_id, role, content, cited_source_ids, error_type)
+                VALUES (%s,%s,'assistant',%s,%s,%s)
+                """,
+                (
+                    conversation_id,
+                    project_id,
+                    answer.get("text") or "",
+                    json.dumps(citations, ensure_ascii=False),
+                    (answer.get("error") or {}).get("error_type") if answer.get("error") else None,
+                ),
+            )
+    write_memory_item(
+        project_id,
+        "conversation",
+        conversation_id,
+        f"Weibo Q&A: {question[:80]}",
+        answer.get("text") or "",
+        citations,
+        {"question": question, "answer": answer},
+        0.45,
+        memory_identity=f"conversation:{conversation_id}",
+    )
+    return conversation_id
+
+
 def weibo_action_confirm_payload(payload_json, action_id):
     endpoint = "PATCH /api/weibo/actions/:id/confirmation"
     payload = json.loads(payload_json or "{}")
@@ -4857,26 +5027,56 @@ def load_memory_fixture(path):
 
 def answer_weibo_question(records, question):
     citations = []
-    if not any(records.values()):
+    has_current_evidence = any(records.get(kind) for kind in ["comments", "events", "actions", "backtests"])
+    if not has_current_evidence:
         return {
             "text": "Current real Weibo evidence is insufficient to answer this question.",
+            "facts": [],
+            "inferences": [],
+            "recommendations": [],
             "citations": [],
             "error": standard_answer_error("insufficient_evidence", "No stored Weibo evidence is available.", "Run Weibo discovery and analysis first."),
         }
     if any(term in question for term in ["行动", "有效", "效果", "backtest"]):
         if not records.get("backtests"):
             citations = [action["id"] for action in records.get("actions", []) if action.get("id")]
+            facts = [f"当前记录了 {len(records.get('actions', []))} 条行动，但还没有可用回测。"] if records.get("actions") else []
             return {
                 "text": "There is no confirmed action/backtest yet, so action effect evidence is insufficient.",
+                "facts": facts,
+                "inferences": ["不能把待确认建议或未回测动作当作已验证效果。"],
+                "recommendations": ["先确认或补充现实动作时间，再采集动作后的评论窗口。"],
                 "citations": citations,
                 "error": standard_answer_error("insufficient_backtest_data", "No confirmed action backtest exists.", "Confirm/log an action and collect post-action windows."),
             }
     events = records.get("events", [])
     comments = records.get("comments", [])
-    memory = records.get("memory", [])
-    citations = [item["id"] for item in [*events, *comments, *memory] if item.get("id")]
+    actions = records.get("actions", [])
+    citations = [item["id"] for item in [*events, *comments[:5], *actions[:5]] if item.get("id")]
+    facts = []
+    if events:
+        event = events[0]
+        facts.append(f"{event.get('id')}：{event.get('title')}，风险等级 {event.get('risk_level')}，状态 {event.get('status')}。")
+    if comments:
+        top_comment = comments[0]
+        facts.append(f"{top_comment.get('id')}：高互动评论提到「{str(top_comment.get('content') or '')[:80]}」。")
+    if actions:
+        action = actions[0]
+        facts.append(f"{action.get('id')}：已有 {action.get('source')} 行动项，状态 {action.get('confirmation_status')}。")
+    inferences = [
+        "负面或疑虑主要围绕官宣可信度、非官宣信息和溜粉担忧；这属于基于评论与事件证据的推断，不是外部事实认定。"
+    ]
+    recommendations = []
+    pending_actions = [action for action in actions if action.get("confirmation_status") == "pending"]
+    if pending_actions:
+        recommendations.append(f"优先处理 {pending_actions[0].get('id')}：{pending_actions[0].get('content_summary') or pending_actions[0].get('reason')}")
+    else:
+        recommendations.append("先生成或确认一条可执行行动，再收集动作后的微博评论窗口。")
     return {
         "text": "微博负面升高主要来自官宣可信度、非官宣消息和溜粉担忧，相关评论与事件仍在升级观察中。",
+        "facts": facts,
+        "inferences": inferences,
+        "recommendations": recommendations,
         "citations": citations,
         "error": None,
     }

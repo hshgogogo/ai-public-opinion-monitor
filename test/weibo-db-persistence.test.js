@@ -341,6 +341,22 @@ test(
       confirmation_status: "rejected",
       content_summary: "人工保留的建议摘要"
     });
+    const botAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, question: "为什么微博负面升高，现在该做什么？" })
+    ]);
+    assert.equal(botAnswer.ok, true);
+    assert.equal(botAnswer.answer.error, null);
+    assert.equal(botAnswer.answer.facts.length > 0, true);
+    assert.equal(botAnswer.answer.inferences.length > 0, true);
+    assert.equal(botAnswer.answer.recommendations.length > 0, true);
+    assert.equal(botAnswer.answer.citations.some((citation) => /^comment-\d+$/.test(citation)), true);
+    assert.equal(botAnswer.answer.citations.some((citation) => /^event-\d+$/.test(citation)), true);
+    assert.equal(botAnswer.answer.citations.some((citation) => /^action-\d+$/.test(citation)), true);
+    assert.equal(botAnswer.answer.citations.every((citation) => /^(comment|event|action)-\d+$/.test(citation)), true);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_conversations WHERE project_id=%s", [projectId])[0].count, 1);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_messages WHERE project_id=%s", [projectId])[0].count, 2);
 
     queryRows(
       "INSERT INTO monitor_projects(project_name, category, audience, keywords, actors, active_platforms) VALUES (%s,%s,%s,%s,%s,%s)",
@@ -375,6 +391,33 @@ test(
     assert.equal(secondDetail.ok, true);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts WHERE project_id=%s", [secondProjectId])[0].count, 2);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments WHERE project_id=%s", [secondProjectId])[0].count, 4);
+
+    queryRows(
+      "INSERT INTO monitor_projects(project_name, category, audience, keywords, actors, active_platforms) VALUES (%s,%s,%s,%s,%s,%s)",
+      [
+        "海岛舒服日志 Memory Only",
+        "微博 MVP",
+        "测试隔离",
+        JSON.stringify(["海岛舒服日志"]),
+        JSON.stringify(["刘昊然", "李兰迪"]),
+        JSON.stringify(["weibo"])
+      ]
+    );
+    const memoryOnlyProjectId = queryRows("SELECT id FROM monitor_projects WHERE project_name=%s", ["海岛舒服日志 Memory Only"])[0].id;
+    queryRows(
+      "INSERT INTO bot_memory_items(project_id, source_kind, source_id, memory_identity, title, summary, evidence_ids, memory_json, importance) VALUES (%s,'preference',NULL,'preference:memory-only','仅有记忆','只有历史偏好，没有当前微博证据',JSON_ARRAY(),JSON_OBJECT(),0.5)",
+      [memoryOnlyProjectId]
+    );
+    const memoryOnlyAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId: memoryOnlyProjectId, question: "现在微博发生了什么？" })
+    ]);
+    assert.equal(memoryOnlyAnswer.ok, true);
+    assert.equal(memoryOnlyAnswer.answer.error.error_type, "insufficient_evidence");
+    assert.deepEqual(memoryOnlyAnswer.answer.citations, []);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_conversations WHERE project_id=%s", [memoryOnlyProjectId])[0].count, 1);
+    assert.equal(queryRows("SELECT error_type FROM bot_messages WHERE project_id=%s AND role='assistant'", [memoryOnlyProjectId])[0].error_type, "insufficient_evidence");
   }
 );
 
