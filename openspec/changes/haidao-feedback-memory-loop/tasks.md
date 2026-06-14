@@ -10,8 +10,8 @@
 ## 2. Worker Feedback Command
 
 - [x] 2.1 新增 `weibo-feedback` worker command。
-- [ ] 2.2 校验 project、sourceType、sourceId、feedbackType 和 source ownership。
-- [ ] 2.3 使用单事务写 `feedback_items`、业务状态更新和 `bot_memory_items`。
+- [x] 2.2 校验 project、sourceType、sourceId、feedbackType 和 source ownership。
+- [x] 2.3 使用单事务写 `feedback_items`、业务状态更新和 `bot_memory_items`。
 - [x] 2.4 支持 event feedback 更新事件状态和 `event_status_history`。
 - [x] 2.5 支持 action feedback 更新 `publicity_actions.confirmation_status`、`confirmed_at`、`effective_at`。
 - [x] 2.6 支持 source account feedback 修正 `source_type` 并设置 `confirmed_by_user`。

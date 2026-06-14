@@ -7,6 +7,17 @@ const python = process.env.PYTHON_BIN || "/Users/mini-002/.cache/codex-runtimes/
 const testMysqlUrl = process.env.WEIBO_DB_PERSISTENCE_TEST_URL;
 const fakeWeiboCookieFile = "test/fixtures/weibo-cookie.json";
 
+test("Weibo DB persistence subprocess helpers skip dotenv loading", () => {
+  const source = readFileSync("test/weibo-db-persistence.test.js", "utf8");
+  for (const helperName of ["runWorker", "queryRows", "runPythonSnippet"]) {
+    assert.match(
+      source,
+      new RegExp(`function ${helperName}[\\s\\S]*?YUQING_SKIP_ENV_FILE:\\s*"1"`),
+      `${helperName} must set YUQING_SKIP_ENV_FILE=1 before importing worker/db modules`
+    );
+  }
+});
+
 test(
   "runs Agent Harness loop migration twice and creates ledger tables",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
@@ -372,6 +383,178 @@ test(
     ]);
     assert.equal(invalidProject.ok, false);
     assert.equal(invalidProject.error_type, "project_not_found");
+  }
+);
+
+test(
+  "persists loop step and judge review feedback as ledger-only records",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("cross-project-agent-loop-feedback");
+
+    const run = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId, triggerMode: "manual", currentStep: "comment_analysis", input: { source: "feedback-test" } })
+    ]);
+    assert.equal(run.ok, true);
+    const step = runWorker([
+      "weibo-agent-loop-step",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        loopRunId: run.run.id,
+        agentName: "Issue Analysis Agent",
+        stepName: "comment_analysis",
+        status: "succeeded",
+        output: { summary: "ready for feedback" },
+        evidenceIds: ["comment-1"]
+      })
+    ]);
+    assert.equal(step.ok, true);
+    const review = runWorker([
+      "weibo-agent-loop-judge-review",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        loopRunId: run.run.id,
+        stepRunId: step.step.id,
+        judgeAgentName: "Judge Agent",
+        status: "passed",
+        passed: true,
+        score: 0.93,
+        feedback: { verdict: "ok" },
+        requiredChanges: [],
+        evidenceErrors: []
+      })
+    ]);
+    assert.equal(review.ok, true);
+    const loopStateBeforeFeedback = queryRows("SELECT status, current_step FROM agent_loop_runs WHERE id=%s", [run.run.id])[0];
+    const stepStatusBeforeFeedback = queryRows("SELECT status FROM agent_step_runs WHERE id=%s", [step.step.id])[0].status;
+    const reviewStatusBeforeFeedback = queryRows("SELECT status FROM judge_reviews WHERE id=%s", [review.review.id])[0].status;
+
+    const loopFeedback = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "loop",
+        sourceId: run.run.id,
+        feedbackType: "manual_handoff_note",
+        note: "人工备注 loop。",
+        status: "in_review",
+        createdBy: "operator-test"
+      })
+    ]);
+    const stepFeedback = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "step",
+        sourceId: step.step.id,
+        feedbackType: "manual_handoff_resolved",
+        note: "人工确认 step 已处理。",
+        status: "resolved",
+        createdBy: "operator-test"
+      })
+    ]);
+    const judgeFeedback = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "judge_review",
+        sourceId: review.review.id,
+        feedbackType: "manual_handoff_note",
+        note: "人工补充 Judge 复核备注。",
+        createdBy: "operator-test"
+      })
+    ]);
+
+    assert.equal(loopFeedback.ok, true);
+    assert.equal(stepFeedback.ok, true);
+    assert.equal(judgeFeedback.ok, true);
+    assert.equal(loopFeedback.memory, null);
+    assert.equal(stepFeedback.memory, null);
+    assert.equal(judgeFeedback.memory, null);
+    assert.deepEqual(
+      queryRows("SELECT source_type, source_id, feedback_type, note, status, created_by FROM feedback_items WHERE project_id=%s ORDER BY id", [projectId]),
+      [
+        {
+          source_type: "loop",
+          source_id: run.run.id,
+          feedback_type: "manual_handoff_note",
+          note: "人工备注 loop。",
+          status: "in_review",
+          created_by: "operator-test"
+        },
+        {
+          source_type: "step",
+          source_id: step.step.id,
+          feedback_type: "manual_handoff_resolved",
+          note: "人工确认 step 已处理。",
+          status: "resolved",
+          created_by: "operator-test"
+        },
+        {
+          source_type: "judge_review",
+          source_id: review.review.id,
+          feedback_type: "manual_handoff_note",
+          note: "人工补充 Judge 复核备注。",
+          status: "open",
+          created_by: "operator-test"
+        }
+      ]
+    );
+    assert.deepEqual(queryRows("SELECT status, current_step FROM agent_loop_runs WHERE id=%s", [run.run.id])[0], loopStateBeforeFeedback);
+    assert.equal(queryRows("SELECT status FROM agent_step_runs WHERE id=%s", [step.step.id])[0].status, stepStatusBeforeFeedback);
+    assert.equal(queryRows("SELECT status FROM judge_reviews WHERE id=%s", [review.review.id])[0].status, reviewStatusBeforeFeedback);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s", [projectId])[0].count, 0);
+
+    const otherRun = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId: otherProjectId, triggerMode: "manual", input: {} })
+    ]);
+    const otherStep = runWorker([
+      "weibo-agent-loop-step",
+      "--payload-json",
+      JSON.stringify({ projectId: otherProjectId, loopRunId: otherRun.run.id, agentName: "Other", stepName: "other_step", status: "running" })
+    ]);
+    const otherReview = runWorker([
+      "weibo-agent-loop-judge-review",
+      "--payload-json",
+      JSON.stringify({
+        projectId: otherProjectId,
+        loopRunId: otherRun.run.id,
+        stepRunId: otherStep.step.id,
+        judgeAgentName: "Other Judge",
+        status: "needs_human",
+        passed: false,
+        requiredChanges: ["人工处理"],
+        evidenceErrors: []
+      })
+    ]);
+
+    for (const item of [
+      { sourceType: "loop", sourceId: otherRun.run.id, feedbackType: "manual_handoff_note", errorType: "loop_not_found" },
+      { sourceType: "step", sourceId: otherStep.step.id, feedbackType: "manual_handoff_note", errorType: "step_not_found" },
+      { sourceType: "judge_review", sourceId: otherReview.review.id, feedbackType: "manual_handoff_note", errorType: "judge_review_not_found" }
+    ]) {
+      const crossProject = runWorker([
+        "weibo-feedback",
+        "--payload-json",
+        JSON.stringify({ projectId, ...item, note: "不应跨项目写入。" })
+      ]);
+      assert.equal(crossProject.ok, false);
+      assert.equal(crossProject.error_type, item.errorType);
+    }
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE project_id=%s", [projectId])[0].count, 3);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE project_id=%s", [otherProjectId])[0].count, 0);
   }
 );
 
@@ -3320,7 +3503,8 @@ function runWorker(args, envOverrides = {}) {
       MEDIACRAWLER_OUTPUT_DIR: "/tmp/weibo-mvp-test-output",
       MEDIACRAWLER_CDP_PORT: "65534",
       WEIBO_FIXTURE_MODE: "1",
-      ...envOverrides
+      ...envOverrides,
+      YUQING_SKIP_ENV_FILE: "1"
     }
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -3473,7 +3657,8 @@ print(json.dumps(rows, ensure_ascii=False, default=str))
         ...process.env,
         MYSQL_URL: testMysqlUrl,
         SQL: sql,
-        PARAMS: JSON.stringify(params)
+        PARAMS: JSON.stringify(params),
+        YUQING_SKIP_ENV_FILE: "1"
       }
     }
   );
@@ -3516,7 +3701,8 @@ function runPythonSnippet(code, envOverrides = {}) {
       MEDIACRAWLER_OUTPUT_DIR: "/tmp/weibo-mvp-test-output",
       MEDIACRAWLER_CDP_PORT: "65534",
       WEIBO_FIXTURE_MODE: "1",
-      ...envOverrides
+      ...envOverrides,
+      YUQING_SKIP_ENV_FILE: "1"
     }
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);

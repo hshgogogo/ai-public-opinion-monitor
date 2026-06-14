@@ -4663,6 +4663,8 @@ def weibo_feedback_payload(payload_json="{}"):
         return persist_source_account_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, source_type_value)
     if source_type == "preference":
         return persist_preference_feedback_payload(endpoint, payload, project_id, feedback_type, feedback_status, database, preference)
+    if source_type in {"loop", "step", "judge_review"}:
+        return persist_agent_loop_feedback_payload(endpoint, payload, project_id, source_type, source_id, feedback_type, feedback_status, database)
     return real_weibo_endpoint_payload(endpoint, payload_json, source_type=source_type, source_id=source_id)
 
 
@@ -5153,6 +5155,89 @@ def persist_preference_feedback_payload(endpoint, payload, project_id, feedback_
             "memory_identity": memory_identity,
         },
         "memory": memory_item_to_payload(memory),
+    }
+
+
+def persist_agent_loop_feedback_payload(endpoint, payload, project_id, source_type, source_id, feedback_type, feedback_status, database):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    config = {
+        "loop": {
+            "table": "agent_loop_runs",
+            "error_type": "loop_not_found",
+            "message": "Feedback loop run was not found.",
+            "fix": "Retry with an Agent Loop run id that belongs to the selected project.",
+        },
+        "step": {
+            "table": "agent_step_runs",
+            "error_type": "step_not_found",
+            "message": "Feedback step run was not found.",
+            "fix": "Retry with an Agent Loop step id that belongs to the selected project.",
+        },
+        "judge_review": {
+            "table": "judge_reviews",
+            "error_type": "judge_review_not_found",
+            "message": "Feedback Judge review was not found.",
+            "fix": "Retry with a Judge review id that belongs to the selected project.",
+        },
+    }[source_type]
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM {config['table']} WHERE id=%s AND project_id=%s FOR UPDATE",
+                    (source_id, project["id"]),
+                )
+                source = cur.fetchone()
+                if not source:
+                    conn.rollback()
+                    error = weibo_error(
+                        config["error_type"],
+                        config["message"],
+                        "The feedback sourceId does not exist for this project.",
+                        config["fix"],
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": source_type, "source_id": source_id})
+                    return error
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], source_type, source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": source_type,
+            "id": source_id,
+            "status": source.get("status"),
+        },
+        "memory": None,
     }
 
 
