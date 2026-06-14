@@ -587,6 +587,216 @@ test(
 );
 
 test(
+  "persists action feedback into feedback ledger, action state, and memory in one MySQL transaction",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("cross-project-feedback-action");
+    const actionId = createAction(projectId, "action-feedback-confirmed");
+    const noteActionId = createAction(projectId, "action-feedback-note");
+    const rejectedActionId = createAction(projectId, "action-feedback-rejected");
+    const partialActionId = createAction(projectId, "action-feedback-partial");
+    const notExecutedActionId = createAction(projectId, "action-feedback-not-executed");
+    const otherActionId = createAction(otherProjectId, "action-feedback-other-project");
+
+    const confirmed = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: actionId,
+        feedbackType: "action_confirmed",
+        note: "用户确认官号动作已执行，纳入后续回测窗口。",
+        status: "resolved",
+        effectiveAt: "2026-06-10T09:30:00Z",
+        createdBy: "operator-test"
+      })
+    ]);
+
+    assert.equal(confirmed.ok, true);
+    assert.equal(confirmed.feedback.feedback_type, "action_confirmed");
+    assert.equal(confirmed.updatedSource.type, "action");
+    assert.equal(confirmed.updatedSource.confirmation_status, "confirmed");
+    assert.equal(confirmed.memory.source_kind, "action");
+
+    assert.deepEqual(queryRows(
+      "SELECT source_type, source_id, feedback_type, note, status, created_by FROM feedback_items WHERE id=%s",
+      [confirmed.feedback.id]
+    )[0], {
+      source_type: "action",
+      source_id: actionId,
+      feedback_type: "action_confirmed",
+      note: "用户确认官号动作已执行，纳入后续回测窗口。",
+      status: "resolved",
+      created_by: "operator-test"
+    });
+    const actionRow = queryRows(
+      "SELECT confirmation_status, confirmed_at, effective_at FROM publicity_actions WHERE id=%s AND project_id=%s",
+      [actionId, projectId]
+    )[0];
+    assert.equal(actionRow.confirmation_status, "confirmed");
+    assert.notEqual(actionRow.confirmed_at, null);
+    assert.match(actionRow.effective_at, /^2026-06-10 09:30:00/);
+    queryRows("UPDATE publicity_actions SET confirmed_at='2026-06-10 09:31:00' WHERE id=%s", [actionId]);
+    assert.deepEqual(queryRows(
+      "SELECT source_kind, source_id, memory_identity, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.feedback_type')) AS feedback_type FROM bot_memory_items WHERE id=%s",
+      [confirmed.memory.id]
+    )[0], {
+      source_kind: "action",
+      source_id: actionId,
+      memory_identity: `feedback:action:${actionId}:action_confirmed`,
+      feedback_type: "action_confirmed"
+    });
+
+    const repeatedConfirmed = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: actionId,
+        feedbackType: "action_confirmed",
+        effectiveAt: "2026-06-11T10:00:00Z",
+        note: "重复确认不应刷新首次确认时间。"
+      })
+    ]);
+    assert.equal(repeatedConfirmed.ok, true);
+    assert.deepEqual(queryRows(
+      "SELECT confirmation_status, confirmed_at, effective_at FROM publicity_actions WHERE id=%s",
+      [actionId]
+    )[0], {
+      confirmation_status: "confirmed",
+      confirmed_at: "2026-06-10 09:31:00",
+      effective_at: "2026-06-10 09:30:00"
+    });
+
+    const rejectedAfterConfirmed = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: actionId,
+        feedbackType: "action_rejected",
+        note: "已经确认的行动不应被后续普通反馈覆盖为 rejected。"
+      })
+    ]);
+    assert.equal(rejectedAfterConfirmed.ok, true);
+    assert.equal(rejectedAfterConfirmed.updatedSource.confirmation_status, "confirmed");
+    assert.equal(queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [actionId])[0].confirmation_status, "confirmed");
+
+    const noteOnly = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: noteActionId,
+        feedbackType: "action_note",
+        note: "只补充执行备注，不改变行动确认状态。"
+      })
+    ]);
+    assert.equal(noteOnly.ok, true);
+    assert.equal(noteOnly.updatedSource.confirmation_status, "pending");
+    assert.equal(queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [noteActionId])[0].confirmation_status, "pending");
+
+    const rejected = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: rejectedActionId,
+        feedbackType: "action_rejected",
+        note: "用户驳回这条行动建议。"
+      })
+    ]);
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.updatedSource.confirmation_status, "rejected");
+    assert.equal(queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [rejectedActionId])[0].confirmation_status, "rejected");
+
+    const partial = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: partialActionId,
+        feedbackType: "action_partially_executed",
+        note: "用户反馈只部分执行。"
+      })
+    ]);
+    assert.equal(partial.ok, true);
+    assert.equal(partial.updatedSource.confirmation_status, "partial");
+    assert.equal(queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [partialActionId])[0].confirmation_status, "partial");
+
+    const notExecuted = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: notExecutedActionId,
+        feedbackType: "action_not_executed",
+        note: "用户确认没有执行。"
+      })
+    ]);
+    assert.equal(notExecuted.ok, true);
+    assert.equal(notExecuted.updatedSource.confirmation_status, "rejected");
+    assert.equal(queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [notExecutedActionId])[0].confirmation_status, "rejected");
+
+    const invalidEffectiveAt = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: noteActionId,
+        feedbackType: "action_confirmed",
+        effectiveAt: "not-a-date"
+      })
+    ]);
+    assert.equal(invalidEffectiveAt.ok, false);
+    assert.equal(invalidEffectiveAt.error_type, "invalid_feedback_effective_at");
+    assert.equal(queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [noteActionId])[0].confirmation_status, "pending");
+
+    const crossProject = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: otherActionId,
+        feedbackType: "action_rejected",
+        note: "不应跨项目更新行动。"
+      })
+    ]);
+    assert.equal(crossProject.ok, false);
+    assert.equal(crossProject.error_type, "action_not_found");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE source_type='action' AND source_id=%s", [otherActionId])[0].count, 0);
+    assert.equal(queryRows("SELECT confirmation_status FROM publicity_actions WHERE id=%s", [otherActionId])[0].confirmation_status, "pending");
+
+    const missingAction = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "action",
+        sourceId: 999999999,
+        feedbackType: "action_rejected",
+        note: "不存在的行动不应写入反馈。"
+      })
+    ]);
+    assert.equal(missingAction.ok, false);
+    assert.equal(missingAction.error_type, "action_not_found");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE source_type='action' AND source_id=999999999")[0].count, 0);
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -2263,6 +2473,20 @@ function createEvent(projectId, identity) {
     [projectId, identity, `测试事件 ${identity}`]
   );
   return queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity=%s", [projectId, identity])[0].id;
+}
+
+function createAction(projectId, identity) {
+  queryRows(
+    `
+    INSERT INTO publicity_actions(
+      project_id, platform, source, action_identity, confirmation_status,
+      action_type, content_summary, reason, evidence_ids, priority, confidence, raw_json
+    )
+    VALUES (%s,'weibo','agent_recommended',%s,'pending','monitor_and_prepare_material','测试行动建议','测试行动反馈原因',JSON_ARRAY(101),'medium',0.66,JSON_OBJECT('identity', %s))
+    `,
+    [projectId, identity, identity]
+  );
+  return queryRows("SELECT id FROM publicity_actions WHERE project_id=%s AND action_identity=%s", [projectId, identity])[0].id;
 }
 
 function resetTestDatabase() {

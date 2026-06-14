@@ -81,6 +81,19 @@ if (process.env.FAKE_WORKER_MODE === "invalid_feedback_status") {
   process.exit(0);
 }
 
+if (process.env.FAKE_WORKER_MODE === "invalid_feedback_effective_at") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_feedback_effective_at",
+    message: "Feedback effectiveAt is invalid.",
+    cause: "effectiveAt must be an ISO-8601 or MySQL timestamp.",
+    fix: "Use an ISO-8601 timestamp."
+  });
+  process.exit(0);
+}
+
 if (process.env.FAKE_WORKER_MODE === "source_not_found") {
   emit({
     ok: false,

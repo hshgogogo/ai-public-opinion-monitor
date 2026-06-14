@@ -3893,6 +3893,45 @@ def mysql_timestamp(value):
     return str(value).replace("T", " ").replace("Z", "")
 
 
+def validated_feedback_effective_at(payload, endpoint):
+    if "effectiveAt" not in payload and "effective_at" not in payload:
+        return None, None
+    value = payload.get("effectiveAt") if "effectiveAt" in payload else payload.get("effective_at")
+    if value is None:
+        return None, None
+    text = str(value).strip()
+    if not text:
+        return None, invalid_feedback_effective_at_error(endpoint, "effectiveAt/effective_at must not be empty.")
+    iso_text = text
+    if iso_text.endswith("Z"):
+        iso_text = f"{iso_text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(iso_text)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None, invalid_feedback_effective_at_error(
+                endpoint,
+                "effectiveAt/effective_at must be an ISO-8601 or MySQL timestamp.",
+            )
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S"), None
+
+
+def invalid_feedback_effective_at_error(endpoint, cause):
+    error = weibo_error(
+        "invalid_feedback_effective_at",
+        "Feedback effectiveAt is invalid.",
+        cause,
+        "Retry with an ISO-8601 timestamp such as 2026-06-10T09:30:00Z or a MySQL timestamp.",
+        docs_anchor="feedback-memory-loop",
+    )
+    error.update({"endpoint": endpoint})
+    return error
+
+
 def iso_or_none(value):
     if value is None:
         return None
@@ -4404,11 +4443,18 @@ def weibo_feedback_payload(payload_json="{}"):
     validation_error = validate_feedback_payload(source_type, feedback_type, source_id, endpoint, feedback_status)
     if validation_error:
         return validation_error
+    effective_at = None
+    if source_type == "action" and feedback_type == "action_confirmed":
+        effective_at, effective_at_error = validated_feedback_effective_at(payload, endpoint)
+        if effective_at_error:
+            return effective_at_error
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database, source_type=source_type, source_id=source_id)
     if source_type == "event":
         return persist_event_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database)
+    if source_type == "action":
+        return persist_action_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, effective_at)
     return real_weibo_endpoint_payload(endpoint, payload_json, source_type=source_type, source_id=source_id)
 
 
@@ -4531,6 +4577,174 @@ def persist_event_feedback_payload(endpoint, payload, project_id, source_id, fee
         "updatedSource": {"type": "event", "id": source_id, "status": to_status},
         "memory": memory_item_to_payload(memory),
     }
+
+
+def persist_action_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, effective_at):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM publicity_actions
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    FOR UPDATE
+                    """,
+                    (source_id, project["id"]),
+                )
+                action = cur.fetchone()
+                if not action:
+                    conn.rollback()
+                    error = weibo_error(
+                        "action_not_found",
+                        "Feedback action was not found.",
+                        "The action sourceId does not exist for this project and platform.",
+                        "Retry with a Weibo action id that belongs to the selected project.",
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": "action", "source_id": source_id})
+                    return error
+
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "action", source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+
+                from_status = action.get("confirmation_status")
+                to_status = action_feedback_status(feedback_type, from_status)
+                status_update_applied = False
+                if feedback_type == "action_confirmed" and from_status == "pending":
+                    cur.execute(
+                        """
+                        UPDATE publicity_actions
+                        SET confirmation_status=%s,
+                            confirmed_at=COALESCE(confirmed_at, NOW()),
+                            effective_at=COALESCE(effective_at, %s)
+                        WHERE id=%s AND project_id=%s AND platform='weibo'
+                        """,
+                        (to_status, effective_at, source_id, project["id"]),
+                    )
+                    status_update_applied = cur.rowcount > 0
+                elif feedback_type != "action_note" and from_status == "pending":
+                    cur.execute(
+                        """
+                        UPDATE publicity_actions
+                        SET confirmation_status=%s
+                        WHERE id=%s AND project_id=%s AND platform='weibo'
+                        """,
+                        (to_status, source_id, project["id"]),
+                    )
+                    status_update_applied = cur.rowcount > 0
+                cur.execute(
+                    "SELECT * FROM publicity_actions WHERE id=%s AND project_id=%s AND platform='weibo'",
+                    (source_id, project["id"]),
+                )
+                updated_action = cur.fetchone()
+
+                memory_identity = f"feedback:action:{source_id}:{feedback_type}"
+                memory_json = {
+                    "feedback_id": feedback_id,
+                    "feedback_type": feedback_type,
+                    "feedback_status": feedback_status,
+                    "note": note,
+                    "created_by": created_by,
+                    "from_confirmation_status": action.get("confirmation_status"),
+                    "confirmation_status": updated_action.get("confirmation_status"),
+                    "status_update_applied": status_update_applied,
+                    "action_type": action.get("action_type"),
+                }
+                if feedback_type == "action_confirmed":
+                    memory_json["effective_at"] = iso_or_none(updated_action.get("effective_at"))
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "action",
+                        source_id,
+                        memory_identity,
+                        action_feedback_memory_title(feedback_type, action),
+                        note or f"用户反馈：{feedback_type}",
+                        action.get("evidence_ids") or json_for_db([]),
+                        json_for_db(memory_json),
+                        0.8,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": "action",
+            "id": source_id,
+            "confirmation_status": updated_action.get("confirmation_status"),
+        },
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def action_feedback_status(feedback_type, current_status):
+    return {
+        "action_confirmed": "confirmed",
+        "action_rejected": "rejected",
+        "action_not_executed": "rejected",
+        "action_partially_executed": "partial",
+        "action_note": current_status,
+    }[feedback_type]
+
+
+def action_feedback_memory_title(feedback_type, action):
+    action_label = {
+        "action_confirmed": "确认",
+        "action_rejected": "驳回",
+        "action_not_executed": "标记未执行",
+        "action_partially_executed": "标记部分执行",
+        "action_note": "备注",
+    }[feedback_type]
+    action_name = action.get("content_summary") or action.get("reason") or action.get("action_identity") or action.get("id")
+    return f"用户{action_label}行动：{action_name}"
 
 
 def event_feedback_status(feedback_type, current_status):
