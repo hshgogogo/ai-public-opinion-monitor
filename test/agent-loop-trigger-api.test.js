@@ -418,6 +418,24 @@ test("POST /api/weibo/feedback rejects invalid JSON before worker calls", async 
   assert.deepEqual(await calls(logPath), []);
 });
 
+test("POST /api/weibo/feedback rejects non-object JSON before worker calls", async (t) => {
+  const logPath = await withFakeWorker(t);
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "[]"
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.error_type, "invalid_feedback_payload");
+  assert.match(payload.cause, /array/);
+  assert.equal(typeof payload.fix, "string");
+  assert.deepEqual(await calls(logPath), []);
+});
+
 test("POST /api/weibo/feedback maps project and source errors to public statuses", async (t) => {
   const logPath = await withFakeWorker(t, "worker_error");
   const base = await listen(t);
@@ -445,6 +463,88 @@ test("POST /api/weibo/feedback maps project and source errors to public statuses
 
   const recorded = await calls(logPath);
   assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback", "weibo-feedback"]);
+});
+
+test("POST /api/weibo/feedback maps payload validation errors to HTTP 400 with public fields", async (t) => {
+  const logPath = await withFakeWorker(t, "invalid_feedback_project_id");
+  const base = await listen(t);
+  const cases = [
+    {
+      mode: "invalid_feedback_project_id",
+      body: { projectId: "bad", sourceType: "event", sourceId: 42, feedbackType: "event_confirmed" },
+      errorType: "invalid_feedback_project_id"
+    },
+    {
+      mode: "invalid_feedback_source_type",
+      body: { projectId: 1, sourceType: "post", sourceId: 42, feedbackType: "event_confirmed" },
+      errorType: "invalid_feedback_source_type"
+    },
+    {
+      mode: "invalid_feedback_source_id",
+      body: { projectId: 1, sourceType: "event", sourceId: "bad", feedbackType: "event_confirmed" },
+      errorType: "invalid_feedback_source_id"
+    }
+  ];
+
+  for (const item of cases) {
+    process.env.FAKE_WORKER_MODE = item.mode;
+    const response = await fetch(`${base}/api/weibo/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item.body)
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(payload.error_type, item.errorType);
+    assert.equal(typeof payload.message, "string");
+    assert.equal(typeof payload.cause, "string");
+    assert.equal(typeof payload.fix, "string");
+  }
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback", "weibo-feedback", "weibo-feedback"]);
+});
+
+test("POST /api/weibo/feedback maps source ownership errors to HTTP 404", async (t) => {
+  const logPath = await withFakeWorker(t, "source_not_found");
+  const base = await listen(t);
+  const cases = [
+    {
+      mode: "source_not_found",
+      body: { projectId: 1, sourceType: "event", sourceId: 999, feedbackType: "event_confirmed" },
+      errorType: "event_not_found"
+    },
+    {
+      mode: "action_not_found",
+      body: { projectId: 1, sourceType: "action", sourceId: 999, feedbackType: "action_rejected" },
+      errorType: "action_not_found"
+    },
+    {
+      mode: "source_account_not_found",
+      body: { projectId: 1, sourceType: "source_account", sourceId: 999, feedbackType: "source_type_corrected", sourceTypeValue: "official" },
+      errorType: "source_account_not_found"
+    }
+  ];
+
+  for (const item of cases) {
+    process.env.FAKE_WORKER_MODE = item.mode;
+    const response = await fetch(`${base}/api/weibo/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item.body)
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 404);
+    assert.equal(payload.error_type, item.errorType);
+    assert.equal(typeof payload.message, "string");
+    assert.equal(typeof payload.cause, "string");
+    assert.equal(typeof payload.fix, "string");
+  }
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback", "weibo-feedback", "weibo-feedback"]);
 });
 
 test("POST /api/weibo/feedback does not expose worker stderr when worker returns invalid JSON", async (t) => {

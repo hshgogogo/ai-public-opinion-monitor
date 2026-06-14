@@ -68,6 +68,45 @@ if (process.env.FAKE_WORKER_MODE === "invalid_feedback_type") {
   process.exit(0);
 }
 
+if (process.env.FAKE_WORKER_MODE === "invalid_feedback_project_id") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_feedback_project_id",
+    message: "Feedback projectId is invalid.",
+    cause: "projectId must be a positive integer when provided.",
+    fix: "Pass a positive numeric projectId or omit it to use the default project."
+  });
+  process.exit(0);
+}
+
+if (process.env.FAKE_WORKER_MODE === "invalid_feedback_source_type") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_feedback_source_type",
+    message: "Feedback sourceType is invalid.",
+    cause: "The feedback payload must use a supported sourceType.",
+    fix: "Retry with event, action, source_account, preference, loop, step, or judge_review."
+  });
+  process.exit(0);
+}
+
+if (process.env.FAKE_WORKER_MODE === "invalid_feedback_source_id") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_feedback_source_id",
+    message: "Feedback sourceId is required for this sourceType.",
+    cause: "The source id is missing or invalid.",
+    fix: "Pass a positive numeric sourceId or use sourceType preference for standalone preference feedback."
+  });
+  process.exit(0);
+}
+
 if (process.env.FAKE_WORKER_MODE === "invalid_feedback_status") {
   emit({
     ok: false,
@@ -129,6 +168,32 @@ if (process.env.FAKE_WORKER_MODE === "source_not_found") {
     message: "Feedback source event was not found.",
     cause: "The event id does not match this project.",
     fix: "Refresh events and retry with a valid event id."
+  });
+  process.exit(0);
+}
+
+if (process.env.FAKE_WORKER_MODE === "action_not_found") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "action_not_found",
+    message: "Feedback action was not found.",
+    cause: "The action id does not match this project.",
+    fix: "Refresh actions and retry with a valid action id."
+  });
+  process.exit(0);
+}
+
+if (process.env.FAKE_WORKER_MODE === "source_account_not_found") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "source_account_not_found",
+    message: "Feedback source account was not found.",
+    cause: "The source account id does not match this project.",
+    fix: "Refresh source accounts and retry with a valid source account id."
   });
   process.exit(0);
 }

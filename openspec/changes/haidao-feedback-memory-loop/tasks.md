@@ -22,7 +22,7 @@
 - [x] 3.1 新增 `POST /api/weibo/feedback`。
 - [x] 3.2 API 保留 worker 的标准错误字段 `error_type/message/cause/fix`。
 - [x] 3.3 MySQL unavailable 返回 HTTP 503。
-- [ ] 3.4 project/source/feedback payload 错误返回 HTTP 400 或 404。
+- [x] 3.4 project/source/feedback payload 错误返回 HTTP 400 或 404。
 - [x] 3.5 不新增 step/judge/handoff public endpoint。
 
 ## 4. 偏好影响后续建议与问答
