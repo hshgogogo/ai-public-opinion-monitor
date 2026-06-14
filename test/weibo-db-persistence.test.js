@@ -919,6 +919,295 @@ test(
 );
 
 test(
+  "persists preference feedback into deterministic memory without duplicate preference rows",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const added = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preference: {
+          preferenceId: "public-clarification-policy",
+          preferenceType: "avoid_public_clarification",
+          summary: "团队倾向先观察，不优先公开澄清。",
+          reason: "避免把小范围争议放大。"
+        },
+        note: "来自宣发负责人确认。",
+        status: "resolved",
+        createdBy: "operator-test"
+      })
+    ]);
+
+    assert.equal(added.ok, true);
+    assert.equal(added.feedback.feedback_type, "preference_added");
+    assert.equal(added.memory.source_kind, "preference");
+    assert.equal(added.memory.memory_identity, "preference:id:public-clarification-policy");
+    assert.deepEqual(queryRows(
+      "SELECT source_type, source_id, feedback_type, note, status, created_by FROM feedback_items WHERE id=%s",
+      [added.feedback.id]
+    )[0], {
+      source_type: "preference",
+      source_id: null,
+      feedback_type: "preference_added",
+      note: "来自宣发负责人确认。",
+      status: "resolved",
+      created_by: "operator-test"
+    });
+    assert.deepEqual(queryRows(
+      "SELECT source_kind, source_id, memory_identity, title, summary, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.preference_type')) AS preference_type, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.source_of_truth')) AS source_of_truth FROM bot_memory_items WHERE id=%s",
+      [added.memory.id]
+    )[0], {
+      source_kind: "preference",
+      source_id: null,
+      memory_identity: "preference:id:public-clarification-policy",
+      title: "用户偏好：avoid_public_clarification",
+      summary: "团队倾向先观察，不优先公开澄清。",
+      preference_type: "avoid_public_clarification",
+      source_of_truth: "user_feedback"
+    });
+
+    const updated = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_updated",
+        preferenceId: "public-clarification-policy",
+        preferenceType: "avoid_public_clarification",
+        summary: "团队倾向先观察，只有证据扩大时才公开澄清。"
+      })
+    ]);
+    assert.equal(updated.ok, true);
+    assert.equal(updated.memory.id, added.memory.id);
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='preference' AND memory_identity='preference:id:public-clarification-policy'",
+      [projectId]
+    )[0].count, 1);
+    assert.equal(queryRows(
+      "SELECT summary FROM bot_memory_items WHERE id=%s",
+      [added.memory.id]
+    )[0].summary, "团队倾向先观察，只有证据扩大时才公开澄清。");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE project_id=%s AND source_type='preference'", [projectId])[0].count, 2);
+
+    const updatedType = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_updated",
+        preferenceId: "public-clarification-policy",
+        preferenceType: "evidence_first_response",
+        summary: "团队改为证据优先，但仍沿用同一偏好记录。"
+      })
+    ]);
+    assert.equal(updatedType.ok, true);
+    assert.equal(updatedType.memory.id, added.memory.id);
+    assert.equal(updatedType.memory.memory_identity, "preference:id:public-clarification-policy");
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='preference' AND memory_identity='preference:id:public-clarification-policy'",
+      [projectId]
+    )[0].count, 1);
+    assert.equal(queryRows(
+      "SELECT JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.preference_type')) AS preference_type FROM bot_memory_items WHERE id=%s",
+      [added.memory.id]
+    )[0].preference_type, "evidence_first_response");
+
+    const hashedIdentity = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "evidence_first_response",
+        summary: "所有对外回应必须先绑定可追溯证据。"
+      })
+    ]);
+    assert.equal(hashedIdentity.ok, true);
+    assert.match(hashedIdentity.memory.memory_identity, /^preference:evidence_first_response:[a-f0-9]{16}$/);
+
+    const cjkPreferenceA = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "matrix_account_policy",
+        preferenceId: "矩阵偏好甲",
+        summary: "矩阵账号内容先做弱提醒。"
+      })
+    ]);
+    const cjkPreferenceB = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "matrix_account_policy",
+        preferenceId: "矩阵偏好乙",
+        summary: "矩阵账号内容先做证据复核。"
+      })
+    ]);
+    assert.equal(cjkPreferenceA.ok, true);
+    assert.equal(cjkPreferenceB.ok, true);
+    assert.notEqual(cjkPreferenceA.memory.memory_identity, cjkPreferenceB.memory.memory_identity);
+    assert.notEqual(cjkPreferenceA.memory.id, cjkPreferenceB.memory.id);
+    assert.match(cjkPreferenceA.memory.memory_identity, /^preference:id:id-[a-f0-9]{16}$/);
+    assert.match(cjkPreferenceB.memory.memory_identity, /^preference:id:id-[a-f0-9]{16}$/);
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='preference' AND memory_identity IN (%s,%s)",
+      [projectId, cjkPreferenceA.memory.memory_identity, cjkPreferenceB.memory.memory_identity]
+    )[0].count, 2);
+
+    const mixedCjkPreferenceA = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "mixed_policy",
+        preferenceId: "甲abc",
+        summary: "混合字符偏好甲。"
+      })
+    ]);
+    const mixedCjkPreferenceB = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "mixed_policy",
+        preferenceId: "乙abc",
+        summary: "混合字符偏好乙。"
+      })
+    ]);
+    const symbolPreferenceA = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "symbol_policy",
+        preferenceId: "a/b",
+        summary: "斜杠偏好。"
+      })
+    ]);
+    const symbolPreferenceB = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "symbol_policy",
+        preferenceId: "a b",
+        summary: "空格偏好。"
+      })
+    ]);
+    assert.equal(mixedCjkPreferenceA.ok, true);
+    assert.equal(mixedCjkPreferenceB.ok, true);
+    assert.equal(symbolPreferenceA.ok, true);
+    assert.equal(symbolPreferenceB.ok, true);
+    assert.notEqual(mixedCjkPreferenceA.memory.memory_identity, mixedCjkPreferenceB.memory.memory_identity);
+    assert.notEqual(symbolPreferenceA.memory.memory_identity, symbolPreferenceB.memory.memory_identity);
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='preference' AND memory_identity IN (%s,%s,%s,%s)",
+      [
+        projectId,
+        mixedCjkPreferenceA.memory.memory_identity,
+        mixedCjkPreferenceB.memory.memory_identity,
+        symbolPreferenceA.memory.memory_identity,
+        symbolPreferenceB.memory.memory_identity
+      ]
+    )[0].count, 4);
+
+    const longPreferenceType = `long_${"a".repeat(420)}`;
+    const longPreferenceA = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: longPreferenceType,
+        preferenceId: "long-type-a",
+        summary: "超长偏好类型的第一条偏好。"
+      })
+    ]);
+    const longPreferenceB = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: longPreferenceType,
+        preferenceId: "long-type-b",
+        summary: "超长偏好类型的第二条偏好。"
+      })
+    ]);
+    assert.equal(longPreferenceA.ok, true);
+    assert.equal(longPreferenceB.ok, true);
+    assert.notEqual(longPreferenceA.memory.memory_identity, longPreferenceB.memory.memory_identity);
+    assert.notEqual(longPreferenceA.memory.id, longPreferenceB.memory.id);
+    assert.equal(longPreferenceA.memory.memory_identity, "preference:id:long-type-a");
+    assert.equal(longPreferenceB.memory.memory_identity, "preference:id:long-type-b");
+    assert.equal(longPreferenceA.memory.title.length <= 240, true);
+
+    const preferenceAddedCountBeforeInvalid = queryRows(
+      "SELECT COUNT(*) AS count FROM feedback_items WHERE project_id=%s AND feedback_type='preference_added'",
+      [projectId]
+    )[0].count;
+
+    const missingProject = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId: 999999,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "avoid_public_clarification",
+        summary: "不存在项目的偏好不应写入。"
+      })
+    ]);
+    assert.equal(missingProject.ok, false);
+    assert.equal(missingProject.error_type, "project_not_found");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE project_id=999999 AND source_type='preference'")[0].count, 0);
+
+    const invalidPreference = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "avoid_public_clarification"
+      })
+    ]);
+    assert.equal(invalidPreference.ok, false);
+    assert.equal(invalidPreference.error_type, "invalid_preference_payload");
+    assert.equal(
+      queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE project_id=%s AND feedback_type='preference_added'", [projectId])[0].count,
+      preferenceAddedCountBeforeInvalid
+    );
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

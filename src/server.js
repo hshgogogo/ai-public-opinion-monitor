@@ -201,7 +201,8 @@ function feedbackStatusFor(payload) {
     "invalid_feedback_source_id",
     "invalid_feedback_status",
     "invalid_feedback_effective_at",
-    "invalid_source_type_value"
+    "invalid_source_type_value",
+    "invalid_preference_payload"
   ].includes(payload.error_type)) return 400;
   return 500;
 }

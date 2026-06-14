@@ -3949,6 +3949,92 @@ def validated_source_type_value(payload, endpoint):
     return text, None
 
 
+def validated_preference_feedback(payload, endpoint):
+    preference = payload.get("preference") if isinstance(payload.get("preference"), dict) else {}
+    preference_type = str(
+        payload.get("preferenceType")
+        or payload.get("preference_type")
+        or preference.get("preferenceType")
+        or preference.get("preference_type")
+        or ""
+    ).strip()
+    summary = str(payload.get("summary") or preference.get("summary") or "").strip()
+    if not preference_type or not summary:
+        error = weibo_error(
+            "invalid_preference_payload",
+            "Preference feedback payload is invalid.",
+            "preferenceType/preference_type and summary are required for preference feedback.",
+            "Pass sourceType preference with preferenceType and summary from a user-confirmed preference.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    preference_id = str(
+        payload.get("preferenceId")
+        or payload.get("preference_id")
+        or preference.get("preferenceId")
+        or preference.get("preference_id")
+        or ""
+    ).strip()
+    reason = payload.get("reason") or preference.get("reason")
+    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else preference.get("tags") if isinstance(preference.get("tags"), list) else []
+    return {
+        "preference_id": preference_id,
+        "preference_type": preference_type,
+        "summary": summary,
+        "reason": reason,
+        "tags": tags,
+        "raw": preference,
+    }, None
+
+
+def preference_identity_slug(value):
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(value or "")).strip("-").lower()
+
+
+def stable_preference_slug(value, empty_prefix):
+    raw = str(value or "")
+    slug = preference_identity_slug(raw)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    if not slug:
+        return f"{empty_prefix}-{digest}"
+    if slug != raw.lower():
+        return f"{slug}-{digest}"
+    return slug
+
+
+def shortened_preference_slug(slug, raw_value, max_length):
+    if len(slug) <= max_length:
+        return slug
+    digest = hashlib.sha1(str(raw_value).encode("utf-8")).hexdigest()[:16]
+    keep = max_length - len(digest) - 1
+    if keep <= 0:
+        return digest[:max_length]
+    return f"{slug[:keep].rstrip('-')}-{digest}".strip("-")[:max_length]
+
+
+def preference_memory_identity(preference):
+    raw_type = preference["preference_type"]
+    raw_stable_id = preference.get("preference_id")
+    if raw_stable_id:
+        stable_slug = stable_preference_slug(raw_stable_id, "id")
+        stable_slug = shortened_preference_slug(stable_slug, raw_stable_id, 320 - len("preference:id:"))
+        return f"preference:id:{stable_slug}"
+    type_slug = stable_preference_slug(raw_type, "type")
+    stable_slug = hashlib.sha1(preference["summary"].encode("utf-8")).hexdigest()[:16]
+    max_type_length = 320 - len("preference:") - len(":") - len(stable_slug)
+    type_slug = shortened_preference_slug(type_slug, raw_type, max_type_length)
+    return f"preference:{type_slug}:{stable_slug}"
+
+
+def preference_memory_title(preference_type):
+    title = f"用户偏好：{preference_type}"
+    if len(title) <= 240:
+        return title
+    digest = hashlib.sha1(str(preference_type).encode("utf-8")).hexdigest()[:16]
+    return f"{title[:220]}-{digest}"[:240]
+
+
 def iso_or_none(value):
     if value is None:
         return None
@@ -4470,6 +4556,11 @@ def weibo_feedback_payload(payload_json="{}"):
         source_type_value, source_type_value_error = validated_source_type_value(payload, endpoint)
         if source_type_value_error:
             return source_type_value_error
+    preference = None
+    if source_type == "preference":
+        preference, preference_error = validated_preference_feedback(payload, endpoint)
+        if preference_error:
+            return preference_error
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database, source_type=source_type, source_id=source_id)
@@ -4479,6 +4570,8 @@ def weibo_feedback_payload(payload_json="{}"):
         return persist_action_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, effective_at)
     if source_type == "source_account":
         return persist_source_account_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, source_type_value)
+    if source_type == "preference":
+        return persist_preference_feedback_payload(endpoint, payload, project_id, feedback_type, feedback_status, database, preference)
     return real_weibo_endpoint_payload(endpoint, payload_json, source_type=source_type, source_id=source_id)
 
 
@@ -4874,6 +4967,99 @@ def persist_source_account_feedback_payload(endpoint, payload, project_id, sourc
             "id": source_id,
             "source_type": updated_account.get("source_type"),
             "confirmed_by_user": bool(updated_account.get("confirmed_by_user")),
+        },
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def persist_preference_feedback_payload(endpoint, payload, project_id, feedback_type, feedback_status, database, preference):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    memory_identity = preference_memory_identity(preference)
+    memory_json = {
+        "feedback_type": feedback_type,
+        "feedback_status": feedback_status,
+        "note": note,
+        "created_by": created_by,
+        "preference_id": preference.get("preference_id"),
+        "preference_type": preference["preference_type"],
+        "summary": preference["summary"],
+        "reason": preference.get("reason"),
+        "tags": preference.get("tags") or [],
+        "source_of_truth": "user_feedback",
+        "not_external_fact": True,
+    }
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "preference", None, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+                memory_json["feedback_id"] = feedback_id
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "preference",
+                        None,
+                        memory_identity,
+                        preference_memory_title(preference["preference_type"]),
+                        preference["summary"],
+                        json_for_db([]),
+                        json_for_db(memory_json),
+                        0.82,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": "preference",
+            "preference_type": preference["preference_type"],
+            "memory_identity": memory_identity,
         },
         "memory": memory_item_to_payload(memory),
     }

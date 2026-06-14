@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm, mkdtemp } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +10,9 @@ process.env.YUQING_SKIP_ENV_FILE = "1";
 const { server } = await import("../src/server.js");
 
 const fakeWorker = "scripts/fake_agent_loop_worker.mjs";
+const runtimePython = join(homedir(), ".cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3");
+const realPython = process.env.PYTHON_BIN || (existsSync(runtimePython) ? runtimePython : "python3");
+const realWorker = "workers/enterprise_worker.py";
 
 async function withFakeWorker(t, mode = "ok") {
   const originalPython = process.env.PYTHON_BIN;
@@ -48,6 +53,31 @@ async function calls(logPath) {
   } catch {
     return [];
   }
+}
+
+function withRealWorkerNoEnv(t) {
+  const originalPython = process.env.PYTHON_BIN;
+  const originalWorkerScript = process.env.ENTERPRISE_WORKER_SCRIPT;
+  const originalMysqlUrl = process.env.MYSQL_URL;
+  const originalCookieFile = process.env.WEIBO_COOKIE_FILE;
+  const originalSkipEnv = process.env.YUQING_SKIP_ENV_FILE;
+  process.env.PYTHON_BIN = realPython;
+  process.env.ENTERPRISE_WORKER_SCRIPT = realWorker;
+  process.env.MYSQL_URL = "mysql://root:bad@127.0.0.1:1/missing";
+  process.env.WEIBO_COOKIE_FILE = "/tmp/weibo-cookie-does-not-exist.json";
+  process.env.YUQING_SKIP_ENV_FILE = "1";
+  t.after(() => {
+    if (originalPython === undefined) delete process.env.PYTHON_BIN;
+    else process.env.PYTHON_BIN = originalPython;
+    if (originalWorkerScript === undefined) delete process.env.ENTERPRISE_WORKER_SCRIPT;
+    else process.env.ENTERPRISE_WORKER_SCRIPT = originalWorkerScript;
+    if (originalMysqlUrl === undefined) delete process.env.MYSQL_URL;
+    else process.env.MYSQL_URL = originalMysqlUrl;
+    if (originalCookieFile === undefined) delete process.env.WEIBO_COOKIE_FILE;
+    else process.env.WEIBO_COOKIE_FILE = originalCookieFile;
+    if (originalSkipEnv === undefined) delete process.env.YUQING_SKIP_ENV_FILE;
+    else process.env.YUQING_SKIP_ENV_FILE = originalSkipEnv;
+  });
 }
 
 test("POST /api/weibo/agent-loop/run maps public mode to the ledger worker only", async (t) => {
@@ -321,6 +351,53 @@ test("POST /api/weibo/feedback maps invalid source account type value to HTTP 40
 
   const recorded = await calls(logPath);
   assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback"]);
+});
+
+test("POST /api/weibo/feedback maps invalid preference payload to HTTP 400", async (t) => {
+  const logPath = await withFakeWorker(t, "invalid_preference_payload");
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: 1,
+      sourceType: "preference",
+      feedbackType: "preference_added",
+      preferenceType: "avoid_public_clarification"
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.error_type, "invalid_preference_payload");
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback"]);
+});
+
+test("POST /api/weibo/feedback propagates real worker invalid preference payload before DB health", async (t) => {
+  withRealWorkerNoEnv(t);
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: 1,
+      sourceType: "preference",
+      feedbackType: "preference_added",
+      preferenceType: "avoid_public_clarification"
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.error_type, "invalid_preference_payload");
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
 });
 
 test("POST /api/weibo/feedback rejects invalid JSON before worker calls", async (t) => {

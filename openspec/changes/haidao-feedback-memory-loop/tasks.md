@@ -15,7 +15,7 @@
 - [x] 2.4 支持 event feedback 更新事件状态和 `event_status_history`。
 - [x] 2.5 支持 action feedback 更新 `publicity_actions.confirmation_status`、`confirmed_at`、`effective_at`。
 - [x] 2.6 支持 source account feedback 修正 `source_type` 并设置 `confirmed_by_user`。
-- [ ] 2.7 支持 preference feedback 写入 deterministic preference memory。
+- [x] 2.7 支持 preference feedback 写入 deterministic preference memory。
 
 ## 3. API Wrapper
 

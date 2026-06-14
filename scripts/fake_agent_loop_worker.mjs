@@ -107,6 +107,19 @@ if (process.env.FAKE_WORKER_MODE === "invalid_source_type_value") {
   process.exit(0);
 }
 
+if (process.env.FAKE_WORKER_MODE === "invalid_preference_payload") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_preference_payload",
+    message: "Preference feedback payload is invalid.",
+    cause: "preferenceType and summary are required.",
+    fix: "Pass a user-confirmed preferenceType and summary."
+  });
+  process.exit(0);
+}
+
 if (process.env.FAKE_WORKER_MODE === "source_not_found") {
   emit({
     ok: false,
