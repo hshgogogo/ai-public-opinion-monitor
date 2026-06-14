@@ -312,6 +312,111 @@ test("Agent Harness worker ledger commands return standard errors for malformed 
   }
 });
 
+test("Feedback memory loop exposes worker/API command and no-DB safety contract", () => {
+  const worker = readText("workers/enterprise_worker.py");
+  const server = readText("src/server.js");
+  const dbPy = readText("workers/db.py");
+
+  assert.match(worker, /weibo-feedback/);
+  assert.match(worker, /def weibo_feedback_payload\(/);
+  assert.match(worker, /event_confirmed/);
+  assert.match(worker, /action_rejected/);
+  assert.match(worker, /source_type_corrected/);
+  assert.match(worker, /preference_added/);
+  assert.match(server, /\/api\/weibo\/feedback/);
+  assert.match(server, /YUQING_SKIP_ENV_FILE/);
+  assert.match(dbPy, /YUQING_SKIP_ENV_FILE/);
+  assert.doesNotMatch(server, /agent-loop\/step|agent-loop\/judge|agent-loop\/handoff/i);
+
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "event",
+      sourceId: 42,
+      feedbackType: "event_confirmed"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "mysql_unavailable");
+  assert.match(payload.endpoint, /weibo-feedback/);
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+});
+
+test("Feedback memory loop rejects source and feedback type mismatch before persistence", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "action",
+      sourceId: 7,
+      feedbackType: "event_confirmed"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_feedback_type");
+  assert.match(payload.message, /feedback/i);
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+});
+
+test("Feedback memory loop validates positive project and source ids before persistence", () => {
+  for (const body of [
+    { projectId: 0, sourceType: "event", sourceId: 42, feedbackType: "event_confirmed" },
+    { projectId: 1, sourceType: "event", sourceId: 0, feedbackType: "event_confirmed" },
+    { projectId: 1, sourceType: "event", sourceId: "-7", feedbackType: "event_confirmed" }
+  ]) {
+    const result = spawnSync(python, [
+      "workers/enterprise_worker.py",
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify(body)
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        YUQING_SKIP_ENV_FILE: "1",
+        MYSQL_URL: "",
+        WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+      }
+    });
+    assert.equal(result.status, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.match(payload.error_type, /^invalid_feedback_/);
+    assert.equal(typeof payload.cause, "string");
+    assert.equal(typeof payload.fix, "string");
+  }
+});
+
 test("Agent Harness foundation docs preserve compatibility boundaries", () => {
   const readme = readText("README.md");
   const server = readText("src/server.js");

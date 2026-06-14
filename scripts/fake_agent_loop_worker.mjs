@@ -54,6 +54,39 @@ if (process.env.FAKE_WORKER_MODE === "worker_error") {
   process.exit(0);
 }
 
+if (process.env.FAKE_WORKER_MODE === "invalid_feedback_type") {
+  process.stderr.write("fake worker diagnostic that must stay private\n");
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_feedback_type",
+    message: "Feedback type does not match sourceType.",
+    cause: "event_confirmed is not allowed for sourceType action.",
+    fix: "Use a feedbackType supported by the selected sourceType."
+  });
+  process.exit(0);
+}
+
+if (process.env.FAKE_WORKER_MODE === "source_not_found") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "event_not_found",
+    message: "Feedback source event was not found.",
+    cause: "The event id does not match this project.",
+    fix: "Refresh events and retry with a valid event id."
+  });
+  process.exit(0);
+}
+
+if (process.env.FAKE_WORKER_MODE === "invalid_json_with_secret_stderr") {
+  process.stderr.write("FAKE_SECRET_TOKEN_SHOULD_NOT_LEAK\n");
+  process.stdout.write("{not-json");
+  process.exit(0);
+}
+
 if (command === "weibo-agent-loop-run") {
   emit({
     ok: true,

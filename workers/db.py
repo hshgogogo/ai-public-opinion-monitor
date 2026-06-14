@@ -32,7 +32,8 @@ def load_env_file(path=".env"):
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
-load_env_file()
+if os.environ.get("YUQING_SKIP_ENV_FILE") != "1":
+    load_env_file()
 
 
 def mysql_url():

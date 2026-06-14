@@ -45,6 +45,16 @@ AGENT_STEP_ATTACHMENT_CONFIG = {
     "weibo-bot-message": ("QA Agent", "evidence_qa"),
 }
 
+FEEDBACK_TYPES_BY_SOURCE = {
+    "event": {"event_confirmed", "event_rejected", "event_observation_only", "event_note"},
+    "action": {"action_confirmed", "action_rejected", "action_partially_executed", "action_not_executed", "action_note"},
+    "source_account": {"source_type_corrected"},
+    "preference": {"preference_added", "preference_updated"},
+    "loop": {"manual_handoff_resolved", "manual_handoff_note"},
+    "step": {"manual_handoff_resolved", "manual_handoff_note"},
+    "judge_review": {"manual_handoff_resolved", "manual_handoff_note"},
+}
+
 
 class MediaCrawlerParseError(Exception):
     pass
@@ -95,6 +105,7 @@ def main():
     action_confirm.add_argument("--action-id", required=True)
     action_backtest = add_payload_parser(sub, "weibo-action-backtest")
     action_backtest.add_argument("--action-id", required=True)
+    add_payload_parser(sub, "weibo-feedback")
     add_payload_parser(sub, "weibo-bot-message")
     add_payload_parser(sub, "weibo-agent-loop-run")
     add_payload_parser(sub, "weibo-agent-loop-status")
@@ -187,6 +198,8 @@ def main():
             emit(weibo_action_confirm_payload(args.payload_json, args.action_id))
         elif args.command == "weibo-action-backtest":
             emit(real_weibo_endpoint_payload("POST /api/weibo/actions/:id/backtest", args.payload_json, action_id=args.action_id))
+        elif args.command == "weibo-feedback":
+            emit(weibo_feedback_payload(args.payload_json))
         elif args.command == "weibo-bot-message":
             emit(weibo_bot_message_payload(args.payload_json))
         elif args.command == "weibo-agent-loop-run":
@@ -4373,6 +4386,85 @@ def weibo_agent_loop_handoff_payload(payload_json="{}"):
         "database": database,
         "feedback": feedback_item_to_payload(feedback),
     }
+
+
+def weibo_feedback_payload(payload_json="{}"):
+    endpoint = "worker weibo-feedback"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    source_type = payload.get("sourceType") or payload.get("source_type")
+    feedback_type = payload.get("feedbackType") or payload.get("feedback_type")
+    project_id, project_id_error = feedback_project_id(payload, endpoint)
+    if project_id_error:
+        return project_id_error
+    source_id = positive_integer_value(payload.get("sourceId") or payload.get("source_id"))
+    validation_error = validate_feedback_payload(source_type, feedback_type, source_id, endpoint)
+    if validation_error:
+        return validation_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database, source_type=source_type, source_id=source_id)
+    return real_weibo_endpoint_payload(endpoint, payload_json, source_type=source_type, source_id=source_id)
+
+
+def feedback_project_id(payload, endpoint):
+    if payload.get("projectId") is None and payload.get("project_id") is None:
+        return None, None
+    project_id = positive_integer_value(payload.get("projectId") or payload.get("project_id"))
+    if project_id is not None:
+        return project_id, None
+    error = weibo_error(
+        "invalid_feedback_project_id",
+        "Feedback projectId is invalid.",
+        "projectId must be a positive integer when provided.",
+        "Pass a positive numeric projectId or omit it to use the default project.",
+        docs_anchor="feedback-memory-loop",
+    )
+    error.update({"endpoint": endpoint})
+    return None, error
+
+
+def validate_feedback_payload(source_type, feedback_type, source_id, endpoint):
+    if source_type not in FEEDBACK_TYPES_BY_SOURCE:
+        error = weibo_error(
+            "invalid_feedback_source_type",
+            "Feedback sourceType is invalid.",
+            "The feedback payload must use event, action, source_account, preference, loop, step, or judge_review.",
+            "Retry with a supported sourceType.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if feedback_type not in FEEDBACK_TYPES_BY_SOURCE[source_type]:
+        error = weibo_error(
+            "invalid_feedback_type",
+            "Feedback type does not match sourceType.",
+            f"{feedback_type or 'missing feedbackType'} is not allowed for sourceType {source_type}.",
+            "Use a feedbackType supported by the selected sourceType.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if source_type != "preference" and source_id is None:
+        error = weibo_error(
+            "invalid_feedback_source_id",
+            "Feedback sourceId is required for this sourceType.",
+            f"sourceType {source_type} must identify a persisted source row.",
+            "Pass a positive numeric sourceId or use sourceType preference for standalone preference feedback.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    return None
+
+
+def positive_integer_value(value):
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and re.match(r"^[1-9]\d*$", value):
+        return int(value)
+    return None
 
 
 def update_loop_from_step(cur, loop_run_id, project_id, step_name, status, error_type=None, error_message=None):

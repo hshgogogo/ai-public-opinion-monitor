@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 const rootDir = fileURLToPath(new URL("..", import.meta.url));
-loadEnvFile(join(rootDir, ".env"));
+if (process.env.YUQING_SKIP_ENV_FILE !== "1") {
+  loadEnvFile(join(rootDir, ".env"));
+}
 const publicDir = join(rootDir, "public");
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "0.0.0.0";
@@ -44,6 +46,7 @@ export const server = http.createServer(async (request, response) => {
     if (actionConfirmationMatch && request.method === "PATCH") return weiboWorker(request, response, "weibo-action-confirm", "--action-id", actionConfirmationMatch[1]);
     const actionBacktestMatch = url.pathname.match(/^\/api\/weibo\/actions\/([^/]+)\/backtest$/);
     if (actionBacktestMatch && request.method === "POST") return weiboWorker(request, response, "weibo-action-backtest", "--action-id", actionBacktestMatch[1]);
+    if (url.pathname === "/api/weibo/feedback" && request.method === "POST") return feedbackWorker(request, response);
     if (url.pathname === "/api/weibo/bot/messages" && request.method === "POST") return weiboWorker(request, response, "weibo-bot-message");
     if (url.pathname === "/api/weibo/agent-loop/run" && request.method === "POST") return runAgentLoop(request, response);
     const agentRunMatch = url.pathname.match(/^\/api\/weibo\/agent-runs\/([^/]+)$/);
@@ -77,7 +80,14 @@ async function collect(request, response) {
 async function weiboWorker(request, response, command, ...args) {
   const payload = ["GET", "HEAD"].includes(request.method || "") ? queryPayload(request) : await readJson(request);
   const result = await worker(command, ...args, "--payload-json", JSON.stringify(payload));
-  sendJson(response, result, statusFor(result));
+  sendJson(response, withoutWorkerStderr(result), statusFor(result));
+}
+
+async function feedbackWorker(request, response) {
+  const { payload, error } = await readFeedbackPayload(request);
+  if (error) return sendJson(response, error, 400);
+  const result = withoutWorkerStderr(await worker("weibo-feedback", "--payload-json", JSON.stringify(payload)));
+  sendJson(response, result, feedbackStatusFor(result));
 }
 
 async function runAgentLoop(request, response) {
@@ -168,8 +178,29 @@ function queryPayload(request) {
 
 function statusFor(payload) {
   if (payload?.error_type === "mysql_unavailable") return 503;
+  if ([
+    "invalid_feedback_source_type",
+    "invalid_feedback_type",
+    "invalid_feedback_source_id"
+  ].includes(payload?.error_type)) return 400;
   if (payload?.error_type === "weibo_endpoint_pending_real_data_implementation") return 501;
   return 200;
+}
+
+function feedbackStatusFor(payload) {
+  if (payload?.ok !== false) return 200;
+  if (payload.error_type === "mysql_unavailable") return 503;
+  if (payload.error_type === "weibo_endpoint_pending_real_data_implementation") return 501;
+  if (payload.error_type === "project_not_found") return 400;
+  if (String(payload.error_type || "").endsWith("_not_found")) return 404;
+  if ([
+    "invalid_feedback_payload",
+    "invalid_feedback_project_id",
+    "invalid_feedback_source_type",
+    "invalid_feedback_type",
+    "invalid_feedback_source_id"
+  ].includes(payload.error_type)) return 400;
+  return 500;
 }
 
 function agentLoopStatusFor(payload) {
@@ -239,16 +270,53 @@ async function worker(...args) {
         if (stderr && !payload.stderr) payload.stderr = stderr;
         resolve(payload);
       } catch {
-        resolve(enterpriseError(new Error(stderr || stdout || "Worker returned no JSON")));
+        resolve(workerInvalidJsonError());
       }
     });
   });
+}
+
+function workerInvalidJsonError() {
+  return {
+    ok: false,
+    mode: "weibo-agent-mvp",
+    error_type: "worker_invalid_json",
+    message: "Worker returned invalid JSON.",
+    cause: "The worker process did not return a parseable JSON payload.",
+    fix: "Inspect local worker logs and retry after fixing the worker command."
+  };
 }
 
 async function readJson(request) {
   let body = "";
   for await (const chunk of request) body += chunk;
   return body ? JSON.parse(body) : {};
+}
+
+async function readFeedbackPayload(request) {
+  try {
+    const payload = await readJson(request);
+    if (!isPlainObject(payload)) {
+      return {
+        error: agentLoopError(
+          "invalid_feedback_payload",
+          "Feedback payload must be a JSON object.",
+          `Received ${Array.isArray(payload) ? "array" : typeof payload}.`,
+          "Pass a JSON object request body."
+        )
+      };
+    }
+    return { payload };
+  } catch (error) {
+    return {
+      error: agentLoopError(
+        "invalid_feedback_payload",
+        "Feedback payload must be valid JSON.",
+        error.message,
+        "Send a valid JSON object request body."
+      )
+    };
+  }
 }
 
 async function readAgentLoopPayload(request) {

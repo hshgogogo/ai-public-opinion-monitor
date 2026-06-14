@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { readFile, rm, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { server } from "../src/server.js";
+
+process.env.YUQING_SKIP_ENV_FILE = "1";
+const { server } = await import("../src/server.js");
 
 const fakeWorker = "scripts/fake_agent_loop_worker.mjs";
 
@@ -186,6 +188,131 @@ test("Agent Loop trigger API maps worker project errors to public validation err
 
   const recorded = await calls(logPath);
   assert.deepEqual(recorded.map((item) => item.command), ["weibo-agent-loop-run", "weibo-agent-loop-status"]);
+});
+
+test("POST /api/weibo/feedback forwards payload and preserves worker errors", async (t) => {
+  const logPath = await withFakeWorker(t, "mysql_unavailable");
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: 1,
+      sourceType: "event",
+      sourceId: 42,
+      feedbackType: "event_confirmed",
+      note: "人工确认事件方向正确。"
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 503);
+  assert.equal(payload.error_type, "mysql_unavailable");
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+  assert.equal("stderr" in payload, false);
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback"]);
+  assert.equal(recorded[0].payload.sourceType, "event");
+  assert.equal(recorded[0].payload.feedbackType, "event_confirmed");
+});
+
+test("POST /api/weibo/feedback maps worker validation errors to HTTP 400", async (t) => {
+  const logPath = await withFakeWorker(t, "invalid_feedback_type");
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: 1,
+      sourceType: "action",
+      sourceId: 7,
+      feedbackType: "event_confirmed"
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.error_type, "invalid_feedback_type");
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+  assert.equal("stderr" in payload, false);
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback"]);
+});
+
+test("POST /api/weibo/feedback rejects invalid JSON before worker calls", async (t) => {
+  const logPath = await withFakeWorker(t);
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{"
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.error_type, "invalid_feedback_payload");
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+  assert.deepEqual(await calls(logPath), []);
+});
+
+test("POST /api/weibo/feedback maps project and source errors to public statuses", async (t) => {
+  const logPath = await withFakeWorker(t, "worker_error");
+  const base = await listen(t);
+
+  const projectResponse = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId: 999, sourceType: "event", sourceId: 42, feedbackType: "event_confirmed" })
+  });
+  const projectPayload = await projectResponse.json();
+
+  assert.equal(projectResponse.status, 400);
+  assert.equal(projectPayload.error_type, "project_not_found");
+
+  process.env.FAKE_WORKER_MODE = "source_not_found";
+  const sourceResponse = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId: 1, sourceType: "event", sourceId: 999, feedbackType: "event_confirmed" })
+  });
+  const sourcePayload = await sourceResponse.json();
+
+  assert.equal(sourceResponse.status, 404);
+  assert.equal(sourcePayload.error_type, "event_not_found");
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback", "weibo-feedback"]);
+});
+
+test("POST /api/weibo/feedback does not expose worker stderr when worker returns invalid JSON", async (t) => {
+  const logPath = await withFakeWorker(t, "invalid_json_with_secret_stderr");
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId: 1, sourceType: "event", sourceId: 42, feedbackType: "event_confirmed" })
+  });
+  const text = await response.text();
+  const payload = JSON.parse(text);
+
+  assert.equal(response.status, 500);
+  assert.equal(payload.error_type, "worker_invalid_json");
+  assert.doesNotMatch(text, /FAKE_SECRET_TOKEN_SHOULD_NOT_LEAK/);
+  assert.doesNotMatch(text, /not-json/);
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback"]);
 });
 
 test("front-end does not expose Agent Loop trigger controls in this slice", async () => {
