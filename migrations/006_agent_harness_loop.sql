@@ -66,9 +66,9 @@ CREATE TABLE IF NOT EXISTS judge_reviews (
 CREATE TABLE IF NOT EXISTS feedback_items (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   project_id BIGINT NOT NULL,
-  source_type ENUM('loop','step','judge_review','event','action','account','preference','knowledge','rule','other') NOT NULL,
+  source_type ENUM('loop','step','judge_review','event','action','account','preference','knowledge','rule','other','source_account') NOT NULL,
   source_id BIGINT NULL,
-  feedback_type ENUM('manual_handoff','needs_human','confirmed','rejected','modified','comment','preference','other') NOT NULL,
+  feedback_type ENUM('manual_handoff','needs_human','confirmed','rejected','modified','comment','preference','other','event_confirmed','event_rejected','event_observation_only','event_note','action_confirmed','action_rejected','action_partially_executed','action_not_executed','action_note','source_type_corrected','preference_added','preference_updated','manual_handoff_resolved','manual_handoff_note') NOT NULL,
   note TEXT NULL,
   status ENUM('open','in_review','resolved','rejected','archived') NOT NULL DEFAULT 'open',
   created_by VARCHAR(120) NOT NULL DEFAULT 'agent_harness',
@@ -78,3 +78,9 @@ CREATE TABLE IF NOT EXISTS feedback_items (
   KEY idx_feedback_source (source_type, source_id),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE feedback_items
+  MODIFY COLUMN source_type ENUM('loop','step','judge_review','event','action','account','preference','knowledge','rule','other','source_account') NOT NULL;
+
+ALTER TABLE feedback_items
+  MODIFY COLUMN feedback_type ENUM('manual_handoff','needs_human','confirmed','rejected','modified','comment','preference','other','event_confirmed','event_rejected','event_observation_only','event_note','action_confirmed','action_rejected','action_partially_executed','action_not_executed','action_note','source_type_corrected','preference_added','preference_updated','manual_handoff_resolved','manual_handoff_note') NOT NULL;

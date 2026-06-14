@@ -376,6 +376,92 @@ test(
 );
 
 test(
+  "runs feedback memory loop schema migration twice with OpenSpec-compatible enums",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const feedbackSourceType = columnType("feedback_items", "source_type");
+    const feedbackType = columnType("feedback_items", "feedback_type");
+    const eventStatus = columnType("artist_public_opinion_events", "status");
+    const accountSourceType = columnType("source_accounts", "source_type");
+    const memorySourceKind = columnType("bot_memory_items", "source_kind");
+
+    assert.deepEqual(enumValues(feedbackSourceType), [
+      "loop",
+      "step",
+      "judge_review",
+      "event",
+      "action",
+      "account",
+      "preference",
+      "knowledge",
+      "rule",
+      "other",
+      "source_account"
+    ]);
+    assert.deepEqual(enumValues(feedbackType), [
+      "manual_handoff",
+      "needs_human",
+      "confirmed",
+      "rejected",
+      "modified",
+      "comment",
+      "preference",
+      "other",
+      "event_confirmed",
+      "event_rejected",
+      "event_observation_only",
+      "event_note",
+      "action_confirmed",
+      "action_rejected",
+      "action_partially_executed",
+      "action_not_executed",
+      "action_note",
+      "source_type_corrected",
+      "preference_added",
+      "preference_updated",
+      "manual_handoff_resolved",
+      "manual_handoff_note"
+    ]);
+    assert.deepEqual(enumValues(eventStatus), [
+      "observing",
+      "escalating",
+      "stable",
+      "resolved",
+      "archived",
+      "confirmed",
+      "rejected"
+    ]);
+    assert.deepEqual(enumValues(accountSourceType), [
+      "official",
+      "artist",
+      "producer",
+      "marketing",
+      "suspected_matrix",
+      "media",
+      "fan",
+      "organic",
+      "unknown"
+    ]);
+    assert.deepEqual(enumValues(memorySourceKind), [
+      "target",
+      "comment",
+      "analysis",
+      "event",
+      "action",
+      "backtest",
+      "report",
+      "preference",
+      "conversation",
+      "source_account"
+    ]);
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -2102,6 +2188,25 @@ print(json.dumps(rows, ensure_ascii=False, default=str))
   );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
+}
+
+function columnType(table, column) {
+  const rows = queryRows(
+    "SELECT COLUMN_TYPE AS column_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+    [table, column]
+  );
+  assert.equal(rows.length, 1, `${table}.${column} should exist`);
+  return rows[0].column_type;
+}
+
+function enumValues(columnTypeText) {
+  const values = [];
+  const regex = /'((?:''|[^'])*)'/g;
+  let match;
+  while ((match = regex.exec(columnTypeText)) !== null) {
+    values.push(match[1].replaceAll("''", "'"));
+  }
+  return values;
 }
 
 function runPythonSnippet(code, envOverrides = {}) {

@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS bot_memory_items (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   project_id BIGINT NOT NULL,
-  source_kind ENUM('target','comment','analysis','event','action','backtest','report','preference','conversation') NOT NULL,
+  source_kind ENUM('target','comment','analysis','event','action','backtest','report','preference','conversation','source_account') NOT NULL,
   source_id BIGINT NULL,
   memory_identity VARCHAR(320) NULL,
   title VARCHAR(240) NOT NULL,
@@ -62,3 +62,6 @@ SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE bot_memory_items ADD UNIQUE KEY
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
+
+ALTER TABLE bot_memory_items
+  MODIFY COLUMN source_kind ENUM('target','comment','analysis','event','action','backtest','report','preference','conversation','source_account') NOT NULL;

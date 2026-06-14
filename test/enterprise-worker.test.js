@@ -220,6 +220,82 @@ test("Agent Harness loop migration declares ledger tables and migration order", 
   assert.equal(harnessMigrationIndex > sentimentMigrationIndex, true);
 });
 
+test("Feedback memory loop migration declares OpenSpec-compatible enums", () => {
+  const harnessSql = readText("migrations/006_agent_harness_loop.sql");
+  const eventActionSql = readText("migrations/003_weibo_mvp_event_action.sql");
+  const memorySql = readText("migrations/004_weibo_mvp_memory_report.sql");
+
+  assert.deepEqual(enumValuesFromModify(harnessSql, "source_type"), [
+    "loop",
+    "step",
+    "judge_review",
+    "event",
+    "action",
+    "account",
+    "preference",
+    "knowledge",
+    "rule",
+    "other",
+    "source_account"
+  ]);
+  assert.deepEqual(enumValuesFromModify(harnessSql, "feedback_type"), [
+    "manual_handoff",
+    "needs_human",
+    "confirmed",
+    "rejected",
+    "modified",
+    "comment",
+    "preference",
+    "other",
+    "event_confirmed",
+    "event_rejected",
+    "event_observation_only",
+    "event_note",
+    "action_confirmed",
+    "action_rejected",
+    "action_partially_executed",
+    "action_not_executed",
+    "action_note",
+    "source_type_corrected",
+    "preference_added",
+    "preference_updated",
+    "manual_handoff_resolved",
+    "manual_handoff_note"
+  ]);
+  assert.deepEqual(enumValuesFromModify(eventActionSql, "status"), [
+    "observing",
+    "escalating",
+    "stable",
+    "resolved",
+    "archived",
+    "confirmed",
+    "rejected"
+  ]);
+  assert.deepEqual(enumValuesFromModify(eventActionSql, "source_type"), [
+    "official",
+    "artist",
+    "producer",
+    "marketing",
+    "suspected_matrix",
+    "media",
+    "fan",
+    "organic",
+    "unknown"
+  ]);
+  assert.deepEqual(enumValuesFromModify(memorySql, "source_kind"), [
+    "target",
+    "comment",
+    "analysis",
+    "event",
+    "action",
+    "backtest",
+    "report",
+    "preference",
+    "conversation",
+    "source_account"
+  ]);
+});
+
 test("Agent Harness worker ledger commands expose only run/status public HTTP in trigger API slice", () => {
   const worker = readText("workers/enterprise_worker.py");
   const server = readText("src/server.js");
@@ -572,4 +648,21 @@ function readText(path) {
     cwd: process.cwd(),
     encoding: "utf8"
   }).stdout;
+}
+
+function enumValuesFromModify(sql, columnName) {
+  const pattern = new RegExp(`MODIFY\\s+COLUMN\\s+\`?${columnName}\`?\\s+ENUM\\(([^)]*)\\)`, "i");
+  const match = sql.match(pattern);
+  assert.ok(match, `expected MODIFY COLUMN enum for ${columnName}`);
+  return mysqlEnumValues(match[1]);
+}
+
+function mysqlEnumValues(enumBody) {
+  const values = [];
+  const regex = /'((?:''|[^'])*)'/g;
+  let match;
+  while ((match = regex.exec(enumBody)) !== null) {
+    values.push(match[1].replaceAll("''", "'"));
+  }
+  return values;
 }

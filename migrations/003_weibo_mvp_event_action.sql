@@ -151,6 +151,12 @@ PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
+ALTER TABLE artist_public_opinion_events
+  MODIFY COLUMN status ENUM('observing','escalating','stable','resolved','archived','confirmed','rejected') NOT NULL DEFAULT 'observing';
+
+ALTER TABLE source_accounts
+  MODIFY COLUMN source_type ENUM('official','artist','producer','marketing','suspected_matrix','media','fan','organic','unknown') NOT NULL DEFAULT 'unknown';
+
 SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE publicity_actions ADD COLUMN action_identity VARCHAR(320) NOT NULL DEFAULT ''''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'publicity_actions' AND COLUMN_NAME = 'action_identity');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;

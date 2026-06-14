@@ -5,6 +5,7 @@
 - [x] 1.3 明确支持的 sourceType、feedbackType、状态映射和错误契约。
 - [x] 1.4 明确偏好 memory 来自用户反馈，不是 Agent 自行推断。
 - [x] 1.5 运行 `openspec validate haidao-feedback-memory-loop --strict`。
+- [x] 1.6 迁移 schema 支持 OpenSpec feedback/source/event/memory enum。
 
 ## 2. Worker Feedback Command
 
@@ -39,7 +40,7 @@
 - [ ] 5.4 增加 cross-project source 拒绝测试。
 - [ ] 5.5 增加 preference 影响 action build 测试。
 - [x] 5.6 运行定向测试。
-- [ ] 5.7 运行真实 MySQL persistence 测试。
+- [x] 5.7 运行真实 MySQL schema/migration 测试。
 - [x] 5.8 运行 `npm test`。
 - [x] 5.9 运行 `openspec validate haidao-feedback-memory-loop --strict`。
 - [x] 5.10 运行 `git diff --check`。
