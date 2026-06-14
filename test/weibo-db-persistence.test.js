@@ -28,6 +28,239 @@ test(
 );
 
 test(
+  "persists Agent Harness loop, step, Judge review, and manual handoff records via worker helpers",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const result = runPythonSnippet(`
+import json
+from workers import enterprise_worker as worker
+
+project_id = int(__import__("os").environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    target_id=42,
+    current_step="comment_analysis",
+    input_json={"target_id": 42, "requested_by": "test"},
+)
+step = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Issue Analysis Agent",
+    step_name="comment_analysis",
+    status="succeeded",
+    input_json={"comment_ids": [1, 2]},
+    output_json={"summary": "evidence-backed"},
+    evidence_ids=["comment-1", "comment-2"],
+)
+review = worker.record_judge_review(
+    loop_run_id=loop["id"],
+    step_run_id=step["id"],
+    project_id=project_id,
+    judge_agent_name="Judge Agent",
+    status="passed",
+    passed=True,
+    score=0.91,
+    feedback_json={"verdict": "ok"},
+    required_changes=[],
+    evidence_errors=[],
+)
+handoff = worker.record_manual_handoff(
+    project_id=project_id,
+    source_type="step",
+    source_id=step["id"],
+    feedback_type="manual_handoff",
+    note="needs producer confirmation",
+    status="open",
+    created_by="agent_harness",
+)
+print(json.dumps({"loop": loop, "step": step, "review": review, "handoff": handoff}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId) });
+
+    assert.equal(result.loop.status, "running");
+    assert.equal(result.step.status, "succeeded");
+    assert.equal(result.review.status, "passed");
+    assert.equal(result.handoff.feedback_type, "manual_handoff");
+
+    assert.deepEqual(queryRows(
+      "SELECT platform, trigger_mode, target_id, status, current_step, JSON_UNQUOTE(JSON_EXTRACT(input_json, '$.requested_by')) AS requested_by FROM agent_loop_runs WHERE id=%s",
+      [result.loop.id]
+    )[0], {
+      platform: "weibo",
+      trigger_mode: "manual",
+      target_id: 42,
+      status: "running",
+      current_step: "comment_analysis",
+      requested_by: "test"
+    });
+    assert.deepEqual(queryRows(
+      "SELECT agent_name, step_name, status, JSON_LENGTH(evidence_ids) AS evidence_count, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.summary')) AS summary FROM agent_step_runs WHERE id=%s",
+      [result.step.id]
+    )[0], {
+      agent_name: "Issue Analysis Agent",
+      step_name: "comment_analysis",
+      status: "succeeded",
+      evidence_count: 2,
+      summary: "evidence-backed"
+    });
+    assert.deepEqual(queryRows(
+      "SELECT judge_agent_name, status, passed, CAST(score AS CHAR) AS score, JSON_LENGTH(required_changes) AS required_change_count, JSON_LENGTH(evidence_errors) AS evidence_error_count FROM judge_reviews WHERE id=%s",
+      [result.review.id]
+    )[0], {
+      judge_agent_name: "Judge Agent",
+      status: "passed",
+      passed: 1,
+      score: "0.9100",
+      required_change_count: 0,
+      evidence_error_count: 0
+    });
+    assert.deepEqual(queryRows(
+      "SELECT source_type, source_id, feedback_type, note, status, created_by FROM feedback_items WHERE id=%s",
+      [result.handoff.id]
+    )[0], {
+      source_type: "step",
+      source_id: result.step.id,
+      feedback_type: "manual_handoff",
+      note: "needs producer confirmation",
+      status: "open",
+      created_by: "agent_harness"
+    });
+  }
+);
+
+test(
+  "protects Agent Harness terminal loop state and rejects passed Judge reviews with evidence errors",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const result = runPythonSnippet(`
+import json
+import os
+from workers import enterprise_worker as worker
+
+project_id = int(os.environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="judge_review",
+    input_json={"slice": "terminal-protection"},
+)
+failed_step = worker.fail_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="strategy_review",
+    output_json={"draft": "too vague"},
+    evidence_ids=[],
+    error_type="judge_failed",
+    error_message="missing evidence",
+)
+late_success = worker.succeed_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="strategy_review",
+    output_json={"draft": "late success"},
+    evidence_ids=["comment-1"],
+    step_run_id=failed_step["id"],
+)
+try:
+    worker.record_judge_review(
+        loop_run_id=loop["id"],
+        step_run_id=failed_step["id"],
+        project_id=project_id,
+        judge_agent_name="Judge Agent",
+        status="passed",
+        passed=True,
+        evidence_errors=["missing-comment-99"],
+    )
+    invalid_review_error = None
+except ValueError as exc:
+    invalid_review_error = str(exc)
+try:
+    worker.fail_agent_step_run(
+        loop_run_id=loop["id"],
+        project_id=project_id,
+        agent_name="Strategy Agent",
+        step_name="missing_step",
+        step_run_id=999999,
+        error_type="missing_step",
+        error_message="should not mutate loop",
+    )
+    missing_step_error = None
+except ValueError as exc:
+    missing_step_error = str(exc)
+try:
+    worker.record_judge_review(
+        loop_run_id=loop["id"],
+        step_run_id=failed_step["id"],
+        project_id=project_id,
+        judge_agent_name="Judge Agent",
+        status="passed",
+        passed=False,
+    )
+    contradictory_review_error = None
+except ValueError as exc:
+    contradictory_review_error = str(exc)
+needs_human_review = worker.record_judge_review(
+    loop_run_id=loop["id"],
+    step_run_id=failed_step["id"],
+    project_id=project_id,
+    judge_agent_name="Judge Agent",
+    status="needs_human",
+    passed=False,
+    evidence_errors=["missing-comment-99"],
+)
+print(json.dumps({
+    "loop_id": loop["id"],
+    "step_id": failed_step["id"],
+    "late_success_status": late_success["status"],
+    "invalid_review_error": invalid_review_error,
+    "missing_step_error": missing_step_error,
+    "contradictory_review_error": contradictory_review_error,
+    "needs_human_review": needs_human_review,
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId) });
+
+    assert.match(result.invalid_review_error, /evidence_errors/);
+    assert.match(result.missing_step_error, /step_run_id/);
+    assert.match(result.contradictory_review_error, /passed/);
+    assert.equal(result.late_success_status, "failed");
+    assert.equal(result.needs_human_review.status, "needs_human");
+
+    assert.deepEqual(queryRows(
+      "SELECT status, current_step, error_type, error_message, finished_at IS NOT NULL AS has_finished_at FROM agent_loop_runs WHERE id=%s",
+      [result.loop_id]
+    )[0], {
+      status: "failed",
+      current_step: "strategy_review",
+      error_type: "judge_failed",
+      error_message: "missing evidence",
+      has_finished_at: 1
+    });
+    assert.deepEqual(queryRows(
+      "SELECT status, error_type, error_message FROM agent_step_runs WHERE id=%s",
+      [result.step_id]
+    )[0], {
+      status: "failed",
+      error_type: "judge_failed",
+      error_message: "missing evidence"
+    });
+    assert.equal(
+      queryRows("SELECT COUNT(*) AS count FROM judge_reviews WHERE loop_run_id=%s", [result.loop_id])[0].count,
+      1
+    );
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -1354,6 +1587,29 @@ print(json.dumps(rows, ensure_ascii=False, default=str))
       }
     }
   );
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
+}
+
+function runPythonSnippet(code, envOverrides = {}) {
+  const result = spawnSync(python, ["-c", code], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      MYSQL_URL: testMysqlUrl,
+      DEEPSEEK_API_KEY: "",
+      DEEPSEEK_API_URL: "",
+      DEEPSEEK_MODEL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json",
+      MEDIACRAWLER_HOME: "/tmp/mediacrawler-does-not-exist",
+      MEDIACRAWLER_PYTHON: "/tmp/python-does-not-exist",
+      MEDIACRAWLER_OUTPUT_DIR: "/tmp/weibo-mvp-test-output",
+      MEDIACRAWLER_CDP_PORT: "65534",
+      WEIBO_FIXTURE_MODE: "1",
+      ...envOverrides
+    }
+  });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }

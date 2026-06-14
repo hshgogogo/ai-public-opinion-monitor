@@ -36,6 +36,8 @@ SOURCE_MATCH_UNKNOWN = {
     "source_match_confidence": 0.2,
 }
 
+AGENT_LOOP_TERMINAL_STATUSES = {"succeeded", "partial", "failed", "needs_human"}
+
 
 class MediaCrawlerParseError(Exception):
     pass
@@ -3784,6 +3786,215 @@ def mysql_unavailable_payload(endpoint, database, **ids):
         "request": {key: value for key, value in ids.items() if value is not None},
     })
     return error
+
+
+def create_agent_loop_run(project_id, platform="weibo", trigger_mode="manual", target_id=None, status="running", current_step=None, input_json=None, summary_json=None, error_type=None, error_message=None):
+    started_expr = "NOW()" if status != "pending" else "NULL"
+    finished_expr = "NOW()" if status in {"succeeded", "partial", "failed", "needs_human"} else "NULL"
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO agent_loop_runs(
+                    project_id, platform, trigger_mode, target_id, status, current_step,
+                    input_json, summary_json, error_type, error_message, started_at, finished_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,{started_expr},{finished_expr})
+                """,
+                (
+                    project_id,
+                    platform,
+                    trigger_mode,
+                    target_id,
+                    status,
+                    current_step,
+                    json_for_db(input_json, {}),
+                    json_for_db(summary_json) if summary_json is not None else None,
+                    error_type,
+                    error_message,
+                ),
+            )
+            return fetch_agent_loop_run(cur, cur.lastrowid)
+
+
+def record_agent_step_run(loop_run_id, project_id, agent_name, step_name, status="running", input_json=None, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    started_expr = "NOW()" if status != "pending" else "NULL"
+    finished_expr = "NOW()" if status in {"succeeded", "partial", "failed", "needs_human"} else "NULL"
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            if step_run_id:
+                cur.execute(
+                    "SELECT status FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+                    (step_run_id, loop_run_id, project_id),
+                )
+                existing = cur.fetchone()
+                if not existing:
+                    raise ValueError(f"step_run_id {step_run_id} does not exist for loop_run_id {loop_run_id}")
+                if existing and existing.get("status") in AGENT_LOOP_TERMINAL_STATUSES and existing.get("status") != status:
+                    return fetch_agent_step_run(cur, step_run_id)
+                cur.execute(
+                    f"""
+                    UPDATE agent_step_runs
+                    SET status=%s,
+                        output_json=%s,
+                        evidence_ids=%s,
+                        error_type=%s,
+                        error_message=%s,
+                        finished_at={finished_expr}
+                    WHERE id=%s AND loop_run_id=%s AND project_id=%s
+                    """,
+                    (
+                        status,
+                        json_for_db(output_json) if output_json is not None else None,
+                        json_for_db(evidence_ids, []),
+                        error_type,
+                        error_message,
+                        step_run_id,
+                        loop_run_id,
+                        project_id,
+                    ),
+                )
+                row_id = step_run_id
+            else:
+                cur.execute(
+                    f"""
+                    INSERT INTO agent_step_runs(
+                        loop_run_id, project_id, agent_name, step_name, status,
+                        input_json, output_json, evidence_ids, error_type, error_message,
+                        started_at, finished_at
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,{started_expr},{finished_expr})
+                    """,
+                    (
+                        loop_run_id,
+                        project_id,
+                        agent_name,
+                        step_name,
+                        status,
+                        json_for_db(input_json) if input_json is not None else None,
+                        json_for_db(output_json) if output_json is not None else None,
+                        json_for_db(evidence_ids, []),
+                        error_type,
+                        error_message,
+                    ),
+                )
+                row_id = cur.lastrowid
+            update_loop_from_step(cur, loop_run_id, project_id, step_name, status, error_type, error_message)
+            return fetch_agent_step_run(cur, row_id)
+
+
+def start_agent_step_run(loop_run_id, project_id, agent_name, step_name, input_json=None, evidence_ids=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "running", input_json=input_json, evidence_ids=evidence_ids)
+
+
+def succeed_agent_step_run(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "succeeded", output_json=output_json, evidence_ids=evidence_ids, step_run_id=step_run_id)
+
+
+def partially_complete_agent_step_run(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "partial", output_json=output_json, evidence_ids=evidence_ids, error_type=error_type, error_message=error_message, step_run_id=step_run_id)
+
+
+def fail_agent_step_run(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "failed", output_json=output_json, evidence_ids=evidence_ids, error_type=error_type, error_message=error_message, step_run_id=step_run_id)
+
+
+def mark_agent_step_needs_human(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "needs_human", output_json=output_json, evidence_ids=evidence_ids, error_type=error_type, error_message=error_message, step_run_id=step_run_id)
+
+
+def record_judge_review(loop_run_id, project_id, judge_agent_name, status="pending", step_run_id=None, passed=None, score=None, feedback_json=None, required_changes=None, evidence_errors=None, retry_count=0):
+    if status == "passed" and passed is False:
+        raise ValueError("passed must not be false when Judge review status is passed")
+    if status in {"failed", "needs_human"} and passed is True:
+        raise ValueError("passed must not be true when Judge review status is failed or needs_human")
+    if evidence_errors and (status not in {"failed", "needs_human"} or passed is True):
+        raise ValueError("judge review with evidence_errors must be failed or needs_human")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO judge_reviews(
+                    loop_run_id, step_run_id, project_id, judge_agent_name, status,
+                    score, passed, feedback_json, required_changes, evidence_errors, retry_count
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    loop_run_id,
+                    step_run_id,
+                    project_id,
+                    judge_agent_name,
+                    status,
+                    score,
+                    None if passed is None else int(bool(passed)),
+                    json_for_db(feedback_json) if feedback_json is not None else None,
+                    json_for_db(required_changes, []),
+                    json_for_db(evidence_errors, []),
+                    retry_count,
+                ),
+            )
+            return fetch_judge_review(cur, cur.lastrowid)
+
+
+def record_manual_handoff(project_id, source_type, feedback_type="manual_handoff", source_id=None, note=None, status="open", created_by="agent_harness"):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (project_id, source_type, source_id, feedback_type, note, status, created_by),
+            )
+            return fetch_feedback_item(cur, cur.lastrowid)
+
+
+def update_loop_from_step(cur, loop_run_id, project_id, step_name, status, error_type=None, error_message=None):
+    loop_status = status if status in {"partial", "failed", "needs_human"} else "running"
+    finished_expr = "NOW()" if loop_status in {"partial", "failed", "needs_human"} else "finished_at"
+    cur.execute("SELECT status FROM agent_loop_runs WHERE id=%s AND project_id=%s", (loop_run_id, project_id))
+    existing = cur.fetchone()
+    if existing and existing.get("status") in AGENT_LOOP_TERMINAL_STATUSES and existing.get("status") != loop_status:
+        return
+    cur.execute(
+        f"""
+        UPDATE agent_loop_runs
+        SET current_step=%s,
+            status=%s,
+            error_type=%s,
+            error_message=%s,
+            finished_at={finished_expr}
+        WHERE id=%s AND project_id=%s
+        """,
+        (step_name, loop_status, error_type, error_message, loop_run_id, project_id),
+    )
+
+
+def fetch_agent_loop_run(cur, row_id):
+    cur.execute("SELECT * FROM agent_loop_runs WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def fetch_agent_step_run(cur, row_id):
+    cur.execute("SELECT * FROM agent_step_runs WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def fetch_judge_review(cur, row_id):
+    cur.execute("SELECT * FROM judge_reviews WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def fetch_feedback_item(cur, row_id):
+    cur.execute("SELECT * FROM feedback_items WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def json_for_db(value, default=None):
+    if value is None:
+        value = default
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def weibo_fixture_e2e(now):

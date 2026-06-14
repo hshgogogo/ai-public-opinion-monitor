@@ -220,6 +220,28 @@ test("Agent Harness loop migration declares ledger tables and migration order", 
   assert.equal(harnessMigrationIndex > sentimentMigrationIndex, true);
 });
 
+test("Agent Harness worker ledger helpers stay worker-only in foundation slice", () => {
+  const worker = readText("workers/enterprise_worker.py");
+  const server = readText("src/server.js");
+
+  for (const helper of [
+    "create_agent_loop_run",
+    "record_agent_step_run",
+    "start_agent_step_run",
+    "succeed_agent_step_run",
+    "partially_complete_agent_step_run",
+    "fail_agent_step_run",
+    "mark_agent_step_needs_human",
+    "record_judge_review",
+    "record_manual_handoff"
+  ]) {
+    assert.match(worker, new RegExp(`def ${helper}\\(`));
+  }
+
+  assert.doesNotMatch(server, /agent-loop\/run|agent-runs/i);
+  assert.doesNotMatch(worker, /add_payload_parser\(sub,\s*["']weibo-agent-loop/);
+});
+
 test("OpenSpec tasks include real environment and design pass evidence", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md")
     || readText("openspec/changes/archive/2026-06-11-haidao-weibo-agent-mvp/tasks.md");

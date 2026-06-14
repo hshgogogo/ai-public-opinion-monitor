@@ -8,11 +8,11 @@
 
 ## 2. Worker Ledger Contract
 
-- [ ] 2.1 Add a worker helper to create an Agent Loop run with project, platform, trigger mode, target, status, and input JSON.
-- [ ] 2.2 Add worker helpers to start, succeed, partially complete, fail, or mark a step as needing human handling.
-- [ ] 2.3 Add a worker helper to record Judge review skeletons with pass/fail/needs-human status and evidence errors.
-- [ ] 2.4 Add a worker helper to record feedback/manual-handoff items.
-- [ ] 2.5 Add tests for loop run, step run, Judge review, and feedback persistence.
+- [x] 2.1 Add a worker helper to create an Agent Loop run with project, platform, trigger mode, target, status, and input JSON.
+- [x] 2.2 Add worker helpers to start, succeed, partially complete, fail, or mark a step as needing human handling.
+- [x] 2.3 Add a worker helper to record Judge review skeletons with pass/fail/needs-human status and evidence errors.
+- [x] 2.4 Add a worker helper to record feedback/manual-handoff items.
+- [x] 2.5 Add tests for loop run, step run, Judge review, and feedback persistence.
 
 ## 3. Worker Commands
 
