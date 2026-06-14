@@ -26,7 +26,7 @@
 | 1 | haidao-agent-harness-loop-foundation | 建立最小 Agent Loop 账本：run、step、Judge review skeleton、manual handoff skeleton | migration tests, worker command tests, real MySQL persistence tests, OpenSpec strict validate | 已归档 Weibo MVP | 低 | done |
 | 2 | haidao-agent-loop-trigger-api | 暴露 `/api/weibo/agent-loop/run` 和 `GET /api/weibo/agent-runs/:id`，只负责创建/查询 loop，不串完整业务 | API contract tests, MySQL unavailable tests | 1 | 低 | done |
 | 3 | haidao-agent-loop-step-attachment | 让已存在的分析、事件、行动、问答 worker 可选挂载 `agentLoopRunId` 并写 step evidence | worker tests, real MySQL persistence tests | 1 | 中 | done |
-| 4 | haidao-feedback-memory-loop | 用户反馈、人工确认/驳回、偏好写回影响后续建议 | feedback API tests, memory persistence tests, action/event state tests | 1, 3 | 中 | active |
+| 4 | haidao-feedback-memory-loop | 用户反馈、人工确认/驳回、偏好写回影响后续建议 | feedback API tests, memory persistence tests, action/event state tests | 1, 3 | 中 | done |
 | 5 | haidao-knowledge-card-rag-mvp | 建立结构化营销知识卡、检索和建议引用，不把知识写死在代码里 | migration/tests, card validation tests, suggestion citation tests | 1 | 中 | planned |
 | 6 | haidao-judge-agent-retry-loop | Judge Agent 对分析、事件、建议做 pass/fail 复核，最多 3 轮后进入人工处理 | judge schema tests, retry tests, failed-output persistence tests | 1, 3, 5 | 中 | planned |
 | 7 | haidao-report-backtest-agent-loop | Report Agent 和 Backtest Agent 进入 loop，日报/回测结果带证据、归因限制和 Judge 状态 | report tests, backtest tests, no-causal-overclaim tests | 1, 3, 6 | 中 | planned |
