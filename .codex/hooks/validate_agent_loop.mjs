@@ -31,8 +31,16 @@ if (!existsSync("docs/agent-loop.md")) {
   fail("docs/agent-loop.md is missing.");
 }
 
+if (!existsSync("docs/prd-to-openspec.md")) {
+  fail("docs/prd-to-openspec.md is missing.");
+}
+
 if (!existsSync("docs/verification-rubric.md")) {
   fail("docs/verification-rubric.md is missing.");
+}
+
+if (!existsSync("docs/subagent-policy.md")) {
+  fail("docs/subagent-policy.md is missing.");
 }
 
 if (!existsSync("AGENTS.md") || !readFileSync("AGENTS.md", "utf8").includes("Outcome-Driven Agent Loop")) {

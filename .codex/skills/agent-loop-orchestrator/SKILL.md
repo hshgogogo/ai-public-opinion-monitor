@@ -1,7 +1,7 @@
 ---
 name: agent-loop-orchestrator
 description: >
-  当用户说 "use agent loop"、"使用 agent loop"、"按 agent loop 开发"、"根据 PRD 自动开发"、"无人值守开发"、"持续推进 OpenSpec/PRD"，或要求 Codex 根据 PRD/OpenSpec 自主开发，并且需要 rubric、TDD、验证、review、evidence、memory、commit、push、PR 更新闭环时使用。该 skill 负责按 docs/agent-loop.md 编排项目工作流。不适用于一次性解释、用户明确不要 loop 的小改动，或需要人工审批的高风险动作。
+  当用户说 "use agent loop"、"使用 agent loop"、"按 agent loop 开发"、"根据 PRD 自动开发"、"把 PRD 拆成 OpenSpec changes"、"无人值守开发"、"持续推进 OpenSpec/PRD"，或要求 Codex 根据 PRD/OpenSpec 自主开发，并且需要 PRD 拆解、rubric、TDD、验证、review、evidence、memory、commit、push、PR 更新闭环时使用。该 skill 负责按 docs/agent-loop.md 和 docs/prd-to-openspec.md 编排项目工作流。不适用于一次性解释、用户明确不要 loop 的小改动，或需要人工审批的高风险动作。
 ---
 
 # Agent Loop Orchestrator
@@ -14,6 +14,7 @@ description: >
 
 - 用户明确说 "use agent loop"、"使用 agent loop"、"按 agent loop"、"启动 agent loop"、"用智能体循环"。
 - 用户要求 Codex 根据 PRD、OpenSpec change、任务清单或实施方案进行低人工干预开发。
+- 用户要求把大型 PRD 拆成 OpenSpec changes、change queue、任务队列、里程碑队列或可执行切片。
 - 用户希望进行迭代式自动开发，并包含 TDD、验证、反驳式 review、evidence report、memory、commit、feature branch push 和 PR 更新。
 - 用户要求“最终验收”“真实使用测试”“全流程测试”“用 Computer Use 测试网站/程序”“边看日志边验收”等项目收尾流程。
 
@@ -28,6 +29,7 @@ description: >
 
 - `AGENTS.md`
 - `docs/agent-loop.md`
+- `docs/prd-to-openspec.md`
 - `docs/verification-rubric.md`
 - `docs/final-acceptance.md`
 - `docs/` 下相关 PRD
@@ -39,22 +41,29 @@ description: >
 
 ## 执行循环
 
-每一轮 loop：
+PRD 拆解硬门：
 
-1. 从 PRD/OpenSpec、项目文档、memory 和 git status 读取上下文。
-2. 选择一个小的、可本地验证、低风险切片。
-3. 写 3-7 条 done rubric 后再编辑代码。
-4. 使用 TDD：失败测试、最小实现、重构。
-5. 运行定向测试、全量测试、必要时 OpenSpec validate、`git diff --check`、`git status --short`。
-6. 做反驳式 review：尝试证明该切片没有完成。
-7. 修复 P1/P2 并重新验证；P0 必须停止。
-8. 生成 evidence report，把每条 rubric 映射到证据。
-9. 只有证据充分时才更新 tasks/docs/memory。
-10. 如果当前在安全 feature branch 且 gate 通过，自动 commit、push，并创建或更新 PR。
-11. 继续下一切片，直到全部开发任务完成或触发人工 gate。
-12. 所有任务完成后，进入 `docs/final-acceptance.md` 定义的最终验收。
-13. 使用 Computer Use 或浏览器工具真实操作程序/网站，同时监控后台日志。
-14. 最终验收发现问题时，把问题转成新的修复切片，回到 loop；修复后重新验收。
+- 如果用户给的是 PRD、长需求、路线图，或只说“根据 PRD 自动开发”但没有指定 `<CHANGE_ID>`，先执行 `docs/prd-to-openspec.md`。
+- 拆解阶段只允许创建/更新 change queue、OpenSpec change 和计划文档；禁止直接写业务代码。
+- 拆解完成后，从 `docs/agent-loop-change-queue.md` 选择第一个低风险 change，再进入实现 loop。
+
+每一轮实现 loop：
+
+1. 从 PRD/OpenSpec、change queue、项目文档、memory 和 git status 读取上下文。
+2. 选择一个 OpenSpec change，再选择一个小的、可本地验证、低风险切片。
+3. 执行 Subagent Routing Gate：大型 PRD/change queue/跨模块/用户要求 subagent/连续切片/review/QA/最终验收，必须使用真实子 agent，不允许主 Orchestrator 自己扮演多个角色。
+4. 写 3-7 条 done rubric 后再编辑代码。
+5. 使用 TDD：失败测试、最小实现、重构。
+6. 运行定向测试、全量测试、必要时 OpenSpec validate、`git diff --check`、`git status --short`。
+7. 做反驳式 review：尝试证明该切片没有完成。Subagent-Driven 模式下 review 必须由独立子 agent 或串行 handoff worker 完成。
+8. 修复 P1/P2 并重新验证；P0 必须停止。
+9. 生成 evidence report，把每条 rubric 映射到证据，并列出真实子 agent 证据和生命周期状态。
+10. 只有证据充分时才更新 tasks/docs/memory。
+11. 如果当前在安全 feature branch 且 gate 通过，自动 commit、push，并创建或更新 PR。
+12. 继续下一切片，直到全部开发任务完成或触发人工 gate。
+13. 所有任务完成后，进入 `docs/final-acceptance.md` 定义的最终验收。
+14. 使用 Computer Use 或浏览器工具真实操作程序/网站，同时监控后台日志。
+15. 最终验收发现问题时，把问题转成新的修复切片，回到 loop；修复后重新验收。
 
 ## 分支与自动化规则
 
@@ -82,7 +91,19 @@ agent/<change-id-or-prd>/<slice-name>
 
 ## 子 Agent 路由
 
-小的单切片任务由主 Orchestrator 执行。
+小的单切片任务可以由主 Orchestrator 执行，但必须满足：不来自大型 PRD/change queue、不跨模块、用户没有要求 subagent、不涉及最终验收或高风险 review。
+
+以下情况必须 spawn 真实子 agent：
+
+- 用户明确要求 subagent-driven development、子 agent、多智能体、worker/reviewer/QA agent。
+- 当前任务来自 `docs/agent-loop-change-queue.md`。
+- 同一 PRD 已连续推进到第二个及后续切片。
+- 切片跨两个以上系统边界。
+- 需要反驳式 review、Computer Use/browser QA、日志监控、最终验收或安全/数据风险审查。
+
+在必须使用子 agent 的任务里，主 Orchestrator 只负责选切片、写 rubric、分配范围、审查结果、验证和集成；不得自己扮演 worker/reviewer/QA 后声称完成。
+
+子 agent 完成且结果已集成后，必须关闭不再需要的 agent。每轮开始前先处理遗留子 agent：能复用就复用，不能复用就关闭，避免 completed agents 长期占用并发槽。
 
 以下情况使用 `$serial-agent-handoff`：
 
@@ -116,6 +137,13 @@ Done rubric 证据：
 
 反驳式 review：
 -
+
+子 Agent 证据：
+- 模式：
+- agent_id / agent_type：
+- 子 agent 职责：
+- 子 agent 输出摘要：
+- 生命周期：
 
 未验证：
 -

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 
 let input = "";
 process.stdin.setEncoding("utf8");
@@ -45,6 +46,7 @@ const command = collectStrings(payload).join("\n");
 const normalized = command.replace(/\s+/g, " ").trim();
 const branch = currentBranch();
 const protectedBranch = branch === "main" || branch === "master";
+const turnId = payload.turn_id || payload.turnId || "";
 
 if (!normalized) {
   process.exit(0);
@@ -52,6 +54,51 @@ if (!normalized) {
 
 if (/\bgit\s+commit\b/.test(normalized) && protectedBranch) {
   block("Agent loop guard: commits on main/master are not pre-authorized. Create an agent feature branch first.");
+}
+
+function changedFiles() {
+  try {
+    const staged = execFileSync("git", ["diff", "--cached", "--name-only"], { encoding: "utf8" }).trim();
+    const unstaged = execFileSync("git", ["diff", "--name-only"], { encoding: "utf8" }).trim();
+    return [...new Set([...staged.split("\n"), ...unstaged.split("\n")].filter(Boolean))];
+  } catch {
+    return [];
+  }
+}
+
+function isCodeLike(file) {
+  return /\.(js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|swift|php|cs|sql|html|css|scss|vue|svelte)$/i.test(file)
+    || /^(src|app|server|client|public|workers|migrations|test|tests|frontend|backend|api)\//.test(file);
+}
+
+function requiresSubagentEvidence(files) {
+  if (!files.some(isCodeLike)) return false;
+  if (existsSync("docs/agent-loop-change-queue.md")) return true;
+  if (files.filter(isCodeLike).length > 3 && existsSync("docs/subagent-policy.md")) return true;
+  return false;
+}
+
+function hasSubagentEvidence() {
+  const paths = [
+    ".codex/agent-loop/subagent-events.jsonl",
+    "docs/agent-loop/subagent-events.jsonl",
+  ];
+
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    const text = readFileSync(path, "utf8");
+    if (turnId && text.includes(turnId) && /Subagent(Start|Stop)|subagent/i.test(text)) return true;
+    if (!turnId && /"agent_id"\s*:\s*"[^"]+"/.test(text)) return true;
+  }
+
+  return false;
+}
+
+if (/\bgit\s+commit\b/.test(normalized)) {
+  const files = changedFiles();
+  if (requiresSubagentEvidence(files) && !hasSubagentEvidence()) {
+    block("Agent loop guard: this looks like a PRD/change-queue or multi-file code slice, but no subagent evidence was recorded. Spawn a real subagent or use serial-agent-handoff before committing.");
+  }
 }
 
 if (/\bgit\s+push\b/.test(normalized)) {

@@ -48,6 +48,7 @@ description: >
 - 每个 worker 只负责 1-2 个清晰功能块。
 - 每个 worker 编辑前必须读取当前交接文件，并且不得回滚其他人的改动。
 - 交接文件是跨上下文压缩、worker 回合、未来会话的 durable memory。
+- 每个 worker 完成、主控集成并验证后，必须关闭不再需要的子 Agent，避免 completed agents 占用后续并发槽。
 - 不要在每个 worker 后自动 commit。只有当前任务明确包含 commit 行为，或用户授权时，才 commit。
 
 ## 模式
@@ -176,6 +177,7 @@ docs/需求文档/<topic>/<feature-name>开发任务交接记录.md
 - UI 改动在可行且有意义时，用 browser/device/screenshot 验证。
 - 后端改动检查 route、schema、幂等、鉴权，以及风险匹配的测试。
 - 部署改动使用仓库部署脚本，并按项目策略保留备份。
+- 验证通过且不再需要继续追问该 worker 时，关闭该 worker 子 Agent，并在交接文件执行日志中记录生命周期状态。
 
 可选 validator agent：
 

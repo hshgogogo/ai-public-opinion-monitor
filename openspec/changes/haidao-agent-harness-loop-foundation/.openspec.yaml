@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-06-14
+goal: Make Weibo analysis, events, actions, memory, and Q&A run under an
+  auditable Agent Loop Harness before larger FastAPI/CrewAI/React migration.

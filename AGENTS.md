@@ -1,4 +1,4 @@
-# 项目智能体说明
+# Agent Loop Harness 项目说明
 
 这是 `yuqingjiance` workspace 里的应用代码仓库和 Git 仓库。OpenSpec 文件跟随本仓库管理，gstack 已经全局安装给 Codex 使用。
 
@@ -24,11 +24,17 @@
 - 使用 Superpowers 做 TDD、系统化调试、完成前验证和 code review 流程约束。
 - OpenSpec 是需求事实源，Superpowers 是质量 gate，gstack 是规划、QA、ship 工作流层。
 
+## 外部服务授权
+
+- 用户已授权本项目使用 `.env` 中的 DeepSeek API 做分析，不必因 DeepSeek 费用单独暂停；但不得打印、提交或泄露 API key。
+- 其他付费 API、大规模外部调用、生产数据库破坏性操作、真实 Cookie/token 提交或合规风险仍必须人工确认。
+
 ## Outcome-Driven Agent Loop
 
-- 使用 `docs/agent-loop.md` 作为本仓库的智能体开发循环。
 - 当用户说“use agent loop”“使用 agent loop”“按 agent loop 开发”，或要求根据 PRD/OpenSpec 自动开发时，必须使用 `$agent-loop-orchestrator`。
-- 每个 OpenSpec/PRD 功能一次只推进一个小的、可本地验证、低风险的切片。
+- PRD、OpenSpec、设计文档、任务清单是需求事实源；不要凭空补需求。
+- 当输入是大型 PRD、PRD 还没有对应 OpenSpec change，或用户说“根据 PRD 自动开发”但没有指定 `<CHANGE_ID>` 时，必须先执行 `docs/prd-to-openspec.md`：把 PRD 拆成 OpenSpec changes 队列。拆解完成前禁止直接写业务代码。
+- 每轮只推进一个小的、可本地验证、低风险切片。
 - 实现前必须写 3-7 条 done rubric。
 - 完成前必须走 TDD、定向验证、全量测试、必要时 OpenSpec validate、`git diff --check`、反驳式 review 和 evidence report。
 - 所有开发任务完成后，必须执行 `docs/final-acceptance.md` 的最终验收：用 Computer Use 或浏览器工具真实使用程序/网站，同时监控日志；发现 P0/P1/P2 问题必须回到 agent loop 修复并重新验收。
@@ -46,4 +52,13 @@
 
 - 小的单切片任务可以由主 Orchestrator 直接执行。
 - 大型、跨模块、多 worker 的实现任务必须显式使用 `$serial-agent-handoff`；不要在一个回复里假装多个子 Agent。
+- 一旦任务来自大型 PRD、`docs/agent-loop-change-queue.md`、多个 OpenSpec changes，或用户明确要求“子 agent / subagent / 多智能体”，实现 loop 必须进入 Subagent-Driven 模式：主 Orchestrator 不再独自完成实现、review 和验收。
+- Subagent-Driven 模式下，每个代码切片自动 commit 前必须有真实子 agent 证据：`SubagentStart/SubagentStop` hook 日志，或交接文件中的 worker 执行记录。不允许用“我扮演 reviewer/worker”替代真实子 agent。
 - 当需要把重复流程、review 标准或用户偏好沉淀成可复用 skill 时，使用 `$harness-skill-engineering`。
+
+## 新项目适配
+
+- 如果项目有 PRD 但没有 OpenSpec，先按 `docs/prd-to-openspec.md` 创建 OpenSpec changes 队列；只有极小任务才允许把 PRD 直接作为单轮需求事实源。
+- 如果项目没有 `npm test`，Codex 必须先识别项目实际测试命令，并更新 `docs/agent-loop.md` 或 `package.json`。
+- 如果项目不是 GitHub PR 工作流，Codex 必须把“创建/更新 PR”替换成项目实际的 review 入口。
+- 所有 harness 文档尽量使用中文，便于用户定位问题；命令、字段名、官方事件名可以保留英文。

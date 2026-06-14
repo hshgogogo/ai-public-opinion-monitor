@@ -14,6 +14,7 @@
 - 如果存在活跃 OpenSpec change，`openspec validate <CHANGE_ID> --strict` 通过。
 - `git diff --check` 通过。
 - 反驳式 review 没有未解决的 P0/P1/P2。
+- 进入 Subagent-Driven 模式的切片，必须有真实子 agent 证据：`agent_id`、`agent_type`、子 agent 输出摘要、交接/日志文件、生命周期状态。没有证据不得自动 commit。
 - evidence report 把每条 rubric 映射到证据，或明确标记未验证。
 - 只在真正完成时更新 `tasks.md`。
 - 用户使用方式、风险边界或可复用经验变化时，同步更新 docs 或 memory。
@@ -93,6 +94,14 @@ Done rubric 证据:
 - reviewer:
 - P0/P1/P2:
 - 修复:
+
+子 Agent 证据:
+- 模式:
+- agent_id / agent_type:
+- 子 agent 职责:
+- 子 agent 输出摘要:
+- hook/交接日志:
+- 生命周期:
 
 未验证:
 -
