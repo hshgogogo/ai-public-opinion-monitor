@@ -38,6 +38,13 @@ SOURCE_MATCH_UNKNOWN = {
 
 AGENT_LOOP_TERMINAL_STATUSES = {"succeeded", "partial", "failed", "needs_human"}
 
+AGENT_STEP_ATTACHMENT_CONFIG = {
+    "weibo-comments-analyze": ("Issue Analysis Agent", "comment_analysis"),
+    "weibo-events-build": ("Event Agent", "event_building"),
+    "weibo-actions-build": ("Strategy Agent", "action_recommendation"),
+    "weibo-bot-message": ("QA Agent", "evidence_qa"),
+}
+
 
 class MediaCrawlerParseError(Exception):
     pass
@@ -1086,95 +1093,111 @@ def weibo_comments_analyze_payload(payload_json="{}"):
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database)
-    project = project_from_payload(payload)
-    limit = bounded_limit(payload.get("limit"), default=100, maximum=500)
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    deepseek_context = deepseek_analysis_context(payload)
-    with db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT c.*
-                FROM social_comments c
-                WHERE c.project_id=%s AND c.platform='weibo'
-                ORDER BY c.collected_at DESC, c.id DESC
-                LIMIT %s
-                """,
-                (project["id"], limit),
-            )
-            comments = cur.fetchall()
-            persisted = 0
-            analyses = []
-            for row in comments:
-                comment = comment_db_row_to_analysis_input(row)
-                analysis = analyze_db_comment(comment, now, deepseek_context, len(analyses))
-                analyses.append(analysis)
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-comments-analyze")
+    if attachment_error:
+        return attachment_error
+    def run():
+        limit = bounded_limit(payload.get("limit"), default=100, maximum=500)
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        deepseek_context = deepseek_analysis_context(payload)
+        with db.connect() as conn:
+            with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO sentiment_results(
-                      comment_id, model, sentiment, score, confidence, topics, risks,
-                      evidence, stance, issue_summary, intensity, weight_snapshot,
-                      analysis_json, fallback_type, analyzed_at
+                    SELECT c.*
+                    FROM social_comments c
+                    WHERE c.project_id=%s AND c.platform='weibo'
+                    ORDER BY c.collected_at DESC, c.id DESC
+                    LIMIT %s
+                    """,
+                    (project["id"], limit),
+                )
+                comments = cur.fetchall()
+                persisted = 0
+                analyses = []
+                for row in comments:
+                    comment = comment_db_row_to_analysis_input(row)
+                    analysis = analyze_db_comment(comment, now, deepseek_context, len(analyses))
+                    analyses.append(analysis)
+                    cur.execute(
+                        """
+                        INSERT INTO sentiment_results(
+                          comment_id, model, sentiment, score, confidence, topics, risks,
+                          evidence, stance, issue_summary, intensity, weight_snapshot,
+                          analysis_json, fallback_type, analyzed_at
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                          sentiment=VALUES(sentiment),
+                          score=VALUES(score),
+                          confidence=VALUES(confidence),
+                          topics=VALUES(topics),
+                          risks=VALUES(risks),
+                          evidence=VALUES(evidence),
+                          stance=VALUES(stance),
+                          issue_summary=VALUES(issue_summary),
+                          intensity=VALUES(intensity),
+                          weight_snapshot=VALUES(weight_snapshot),
+                          analysis_json=VALUES(analysis_json),
+                          fallback_type=VALUES(fallback_type),
+                          analyzed_at=VALUES(analyzed_at)
+                        """,
+                        (
+                            row["id"],
+                            analysis["model"],
+                            analysis["sentiment"],
+                            analysis["score"],
+                            analysis["confidence"],
+                            json.dumps(analysis["topics"], ensure_ascii=False),
+                            json.dumps(analysis["risks"], ensure_ascii=False),
+                            analysis["evidence"],
+                            analysis["stance"],
+                            analysis["issue_summary"],
+                            analysis["intensity"],
+                            analysis["weight"],
+                            json.dumps(analysis["analysis_json"], ensure_ascii=False),
+                            analysis["fallback_type"],
+                            mysql_timestamp(now),
+                        ),
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON DUPLICATE KEY UPDATE
-                      sentiment=VALUES(sentiment),
-                      score=VALUES(score),
-                      confidence=VALUES(confidence),
-                      topics=VALUES(topics),
-                      risks=VALUES(risks),
-                      evidence=VALUES(evidence),
-                      stance=VALUES(stance),
-                      issue_summary=VALUES(issue_summary),
-                      intensity=VALUES(intensity),
-                      weight_snapshot=VALUES(weight_snapshot),
-                      analysis_json=VALUES(analysis_json),
-                      fallback_type=VALUES(fallback_type),
-                      analyzed_at=VALUES(analyzed_at)
+                    persisted += 1
+                agent_run = analysis_agent_run(deepseek_context, len(comments))
+                cur.execute(
+                    """
+                    INSERT INTO agent_runs(project_id, agent_name, status, input_json, output_json, finished_at)
+                    VALUES (%s,%s,'succeeded',%s,%s,NOW())
                     """,
                     (
-                        row["id"],
-                        analysis["model"],
-                        analysis["sentiment"],
-                        analysis["score"],
-                        analysis["confidence"],
-                        json.dumps(analysis["topics"], ensure_ascii=False),
-                        json.dumps(analysis["risks"], ensure_ascii=False),
-                        analysis["evidence"],
-                        analysis["stance"],
-                        analysis["issue_summary"],
-                        analysis["intensity"],
-                        analysis["weight"],
-                        json.dumps(analysis["analysis_json"], ensure_ascii=False),
-                        analysis["fallback_type"],
-                        mysql_timestamp(now),
+                        project["id"],
+                        agent_run["agent_name"],
+                        json.dumps({"endpoint": endpoint, "limit": limit, "deepseek": deepseek_context["status"]}, ensure_ascii=False),
+                        json.dumps(agent_run, ensure_ascii=False),
                     ),
                 )
-                persisted += 1
-            agent_run = analysis_agent_run(deepseek_context, len(comments))
-            cur.execute(
-                """
-                INSERT INTO agent_runs(project_id, agent_name, status, input_json, output_json, finished_at)
-                VALUES (%s,%s,'succeeded',%s,%s,NOW())
-                """,
-                (
-                    project["id"],
-                    agent_run["agent_name"],
-                    json.dumps({"endpoint": endpoint, "limit": limit, "deepseek": deepseek_context["status"]}, ensure_ascii=False),
-                    json.dumps(agent_run, ensure_ascii=False),
-                ),
-            )
-            agent_run["id"] = cur.lastrowid
-    return {
-        "ok": True,
-        "mode": "weibo-agent-mvp",
-        "projectId": project["id"],
-        "analyzed_comments": len(comments),
-        "persisted_sentiments": persisted,
-        "analyses": analyses[:20],
-        "agent_run": agent_run,
-        "deepseek": deepseek_payload(deepseek_context),
-    }
+                agent_run["id"] = cur.lastrowid
+        result = {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "analyzed_comments": len(comments),
+            "persisted_sentiments": persisted,
+            "analyses": analyses[:20],
+            "agent_run": agent_run,
+            "deepseek": deepseek_payload(deepseek_context),
+        }
+        evidence_ids = [f"comment-{row['id']}" for row in comments]
+        status = "succeeded" if persisted > 0 and evidence_ids else "partial"
+        error_type = None if status == "succeeded" else "no_comments_to_analyze"
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json=agent_step_output("weibo-comments-analyze", result, ["analyzed_comments", "persisted_sentiments", "deepseek"]),
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message="No Weibo comments were available for analysis." if error_type else None,
+        )
+    return run_attached_worker_command(attachment, run)
 
 
 def comment_db_row_to_analysis_input(row):
@@ -1375,39 +1398,64 @@ def weibo_events_build_payload(payload_json="{}"):
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database)
-    project = project_from_payload(payload)
-    limit = bounded_limit(payload.get("limit"), default=500, maximum=2000)
-    evidence = load_weibo_analysis_evidence(project["id"], limit)
-    if not evidence:
-        return {
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-events-build")
+    if attachment_error:
+        return attachment_error
+    def run():
+        limit = bounded_limit(payload.get("limit"), default=500, maximum=2000)
+        evidence = load_weibo_analysis_evidence(project["id"], limit)
+        if not evidence:
+            result = {
+                "ok": True,
+                "mode": "weibo-agent-mvp",
+                "projectId": project["id"],
+                "events": [],
+                "persisted_events": 0,
+                "data_gap": "no_analysis_evidence",
+                "deepseek": {"status": "not_run", "reason": "no_analysis_evidence"},
+            }
+            return attach_agent_step_run(
+                result,
+                attachment,
+                status="partial",
+                output_json=agent_step_output("weibo-events-build", result, ["persisted_events", "data_gap", "deepseek"]),
+                evidence_ids=[],
+                error_type="no_analysis_evidence",
+                error_message="No analyzed Weibo comment evidence was available for event building.",
+            )
+        grouped = {}
+        for item in evidence:
+            for issue in recall_issue_keys(item):
+                grouped.setdefault(issue, []).append(item)
+        events = []
+        for issue_key, items in grouped.items():
+            for cluster in merge_evidence_window(items):
+                event = build_event_from_evidence(issue_key, cluster)
+                event["event_explanation"] = {"model": "local-rules", "fallback_type": "local_events_slice"}
+                events.append(event)
+        persisted_events = persist_events(project["id"], events)
+        result = {
             "ok": True,
             "mode": "weibo-agent-mvp",
             "projectId": project["id"],
-            "events": [],
-            "persisted_events": 0,
-            "data_gap": "no_analysis_evidence",
-            "deepseek": {"status": "not_run", "reason": "no_analysis_evidence"},
+            "evidence_count": len(evidence),
+            "events": events,
+            "persisted_events": persisted_events,
+            "deepseek": {"status": "not_run", "reason": "local_events_slice"},
         }
-    grouped = {}
-    for item in evidence:
-        for issue in recall_issue_keys(item):
-            grouped.setdefault(issue, []).append(item)
-    events = []
-    for issue_key, items in grouped.items():
-        for cluster in merge_evidence_window(items):
-            event = build_event_from_evidence(issue_key, cluster)
-            event["event_explanation"] = {"model": "local-rules", "fallback_type": "local_events_slice"}
-            events.append(event)
-    persisted_events = persist_events(project["id"], events)
-    return {
-        "ok": True,
-        "mode": "weibo-agent-mvp",
-        "projectId": project["id"],
-        "evidence_count": len(evidence),
-        "events": events,
-        "persisted_events": persisted_events,
-        "deepseek": {"status": "not_run", "reason": "local_events_slice"},
-    }
+        evidence_ids = event_step_evidence_ids(events)
+        status = "succeeded" if persisted_events > 0 and evidence_ids else "partial"
+        error_type = None if status == "succeeded" else "no_events_built"
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json=agent_step_output("weibo-events-build", result, ["evidence_count", "persisted_events", "deepseek"]),
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message="No evidence-backed Weibo events were built." if error_type else None,
+        )
+    return run_attached_worker_command(attachment, run)
 
 
 def load_weibo_analysis_evidence(project_id, limit):
@@ -2970,33 +3018,49 @@ def weibo_actions_build_payload(payload_json="{}"):
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database)
-    project = project_from_payload(payload)
-    limit = bounded_limit(payload.get("limit"), default=20, maximum=100)
-    now = payload.get("now") or datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    with db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM artist_public_opinion_events
-                WHERE project_id=%s AND platform='weibo'
-                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
-                LIMIT %s
-                """,
-                (project["id"], limit),
-            )
-            rows = cur.fetchall()
-    actions = [action_from_event(row, now) for row in rows]
-    persisted = persist_publicity_actions(project["id"], actions, {"by_external_id": {}, "by_display_name": {}, "all_ids": []}) if actions else 0
-    return {
-        "ok": True,
-        "mode": "weibo-agent-mvp",
-        "projectId": project["id"],
-        "events_considered": len(rows),
-        "actions": actions,
-        "persisted_actions": persisted,
-        "deepseek": {"status": "not_run", "reason": "deterministic_strategy_slice"},
-    }
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-actions-build")
+    if attachment_error:
+        return attachment_error
+    def run():
+        limit = bounded_limit(payload.get("limit"), default=20, maximum=100)
+        now = payload.get("now") or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM artist_public_opinion_events
+                    WHERE project_id=%s AND platform='weibo'
+                    ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (project["id"], limit),
+                )
+                rows = cur.fetchall()
+        actions = [action_from_event(row, now) for row in rows]
+        persisted = persist_publicity_actions(project["id"], actions, {"by_external_id": {}, "by_display_name": {}, "all_ids": []}) if actions else 0
+        result = {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "events_considered": len(rows),
+            "actions": actions,
+            "persisted_actions": persisted,
+            "deepseek": {"status": "not_run", "reason": "deterministic_strategy_slice"},
+        }
+        evidence_ids = action_step_evidence_ids(actions)
+        status = "succeeded" if persisted > 0 and evidence_ids else "partial"
+        error_type = None if status == "succeeded" else "no_events_for_actions"
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json=agent_step_output("weibo-actions-build", result, ["events_considered", "persisted_actions", "deepseek"]),
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message="No evidence-backed Weibo actions were recommended." if error_type else None,
+        )
+    return run_attached_worker_command(attachment, run)
 
 
 def action_from_event(row, now):
@@ -3101,27 +3165,61 @@ def weibo_bot_message_payload(payload_json="{}"):
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database)
-    project = project_from_payload(payload)
-    question = str(payload.get("question") or payload.get("message") or "").strip()
-    if not question:
-        return weibo_error(
-            "question_required",
-            "Weibo bot question is required.",
-            "The request did not include question or message text.",
-            "Ask a concrete question about current Weibo evidence.",
-            docs_anchor="weibo-bot",
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-bot-message")
+    if attachment_error:
+        return attachment_error
+    def run():
+        question = str(payload.get("question") or payload.get("message") or "").strip()
+        if not question:
+            error = weibo_error(
+                "question_required",
+                "Weibo bot question is required.",
+                "The request did not include question or message text.",
+                "Ask a concrete question about current Weibo evidence.",
+                docs_anchor="weibo-bot",
+            )
+            return attach_agent_step_run(
+                error,
+                attachment,
+                status="failed",
+                output_json=agent_step_output("weibo-bot-message", error, ["error_type", "message", "cause", "fix"]),
+                evidence_ids=[],
+                error_type=error["error_type"],
+                error_message=error["message"],
+            )
+        records = load_weibo_bot_records(project["id"])
+        answer = answer_weibo_question(records, question)
+        conversation_id = persist_bot_exchange(project["id"], question, answer)
+        result = {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "conversationId": conversation_id,
+            "question": question,
+            "answer": answer,
+        }
+        evidence_ids = list(answer.get("citations") or [])
+        answer_error = answer.get("error") or {}
+        status = "succeeded" if evidence_ids and not answer_error else "partial"
+        error_type = answer_error.get("error_type") if answer_error else (None if status == "succeeded" else "insufficient_evidence")
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json={
+                "command": "weibo-bot-message",
+                "conversationId": conversation_id,
+                "answer_error": answer_error or None,
+                "facts_count": len(answer.get("facts") or []),
+                "inferences_count": len(answer.get("inferences") or []),
+                "recommendations_count": len(answer.get("recommendations") or []),
+                "citation_count": len(evidence_ids),
+            },
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message=answer_error.get("message") if answer_error else None,
         )
-    records = load_weibo_bot_records(project["id"])
-    answer = answer_weibo_question(records, question)
-    conversation_id = persist_bot_exchange(project["id"], question, answer)
-    return {
-        "ok": True,
-        "mode": "weibo-agent-mvp",
-        "projectId": project["id"],
-        "conversationId": conversation_id,
-        "question": question,
-        "answer": answer,
-    }
+    return run_attached_worker_command(attachment, run)
 
 
 def load_weibo_bot_records(project_id):
@@ -3801,6 +3899,136 @@ def mysql_unavailable_payload(endpoint, database, **ids):
         "request": {key: value for key, value in ids.items() if value is not None},
     })
     return error
+
+
+def prepare_agent_step_attachment(payload, project_id, command):
+    if "agentLoopRunId" not in payload:
+        return None, None
+    loop_run_id = numeric_nullable(payload.get("agentLoopRunId"))
+    if loop_run_id is None or not load_agent_loop_run(project_id, loop_run_id):
+        return None, weibo_error(
+            "agent_loop_not_found",
+            "Agent Loop run was not found for this project.",
+            "The agentLoopRunId does not exist or belongs to another project.",
+            "Check projectId and agentLoopRunId, then retry.",
+            docs_anchor="agent-loop-ledger",
+        )
+    agent_name, step_name = AGENT_STEP_ATTACHMENT_CONFIG[command]
+    return {
+        "loop_run_id": loop_run_id,
+        "project_id": project_id,
+        "agent_name": agent_name,
+        "step_name": step_name,
+        "command": command,
+        "input_json": {
+            "command": command,
+            "payload_keys": sorted(str(key) for key in payload.keys()),
+        },
+    }, None
+
+
+def project_and_agent_step_attachment(payload, command):
+    if "agentLoopRunId" not in payload:
+        return project_from_payload(payload), None, None
+    project, project_error = require_project_from_payload(payload)
+    if project_error:
+        return None, None, project_error
+    attachment, attachment_error = prepare_agent_step_attachment(payload, project["id"], command)
+    return project, attachment, attachment_error
+
+
+def run_attached_worker_command(attachment, run):
+    if not attachment:
+        return run()
+    try:
+        return run()
+    except Exception as exc:
+        error = weibo_error(
+            "worker_execution_failed",
+            f"{attachment['command']} failed during Agent Loop step execution.",
+            type(exc).__name__,
+            "Inspect the worker logs and retry after fixing the underlying data or schema issue.",
+            docs_anchor="agent-loop-step-attachment",
+        )
+        return attach_agent_step_run(
+            error,
+            attachment,
+            status="failed",
+            output_json=agent_step_output(attachment["command"], error, ["error_type", "message", "cause", "fix"]),
+            evidence_ids=[],
+            error_type=error["error_type"],
+            error_message=error["message"],
+        )
+
+
+def attach_agent_step_run(result, attachment, status, output_json=None, evidence_ids=None, error_type=None, error_message=None):
+    if not attachment:
+        return result
+    safe_evidence_ids = unique_evidence_ids(evidence_ids or [])
+    try:
+        step = record_agent_step_run(
+            loop_run_id=attachment["loop_run_id"],
+            project_id=attachment["project_id"],
+            agent_name=attachment["agent_name"],
+            step_name=attachment["step_name"],
+            status=status,
+            input_json=attachment["input_json"],
+            output_json=output_json,
+            evidence_ids=safe_evidence_ids,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        result["agentStepRun"] = agent_step_run_to_payload(step)
+    except Exception as exc:
+        result["agentStepError"] = {
+            "error_type": "agent_step_record_failed",
+            "message": "Agent Loop step could not be recorded.",
+            "cause": type(exc).__name__,
+            "fix": "Check Agent Loop ledger tables and retry the worker command.",
+        }
+    return result
+
+
+def agent_step_output(command, result, keys):
+    output = {"command": command}
+    for key in keys:
+        if key in result:
+            output[key] = result[key]
+    if not result.get("ok"):
+        for key in ["error_type", "message", "cause", "fix", "docs_anchor"]:
+            if key in result:
+                output[key] = result[key]
+    return output
+
+
+def unique_evidence_ids(values):
+    seen = set()
+    unique = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique.append(value)
+    return unique
+
+
+def event_step_evidence_ids(events):
+    evidence_ids = []
+    for event in events:
+        evidence_ids.extend(event.get("evidence_ids") or [])
+    return unique_evidence_ids(evidence_ids)
+
+
+def action_step_evidence_ids(actions):
+    evidence_ids = []
+    for action in actions:
+        if action.get("related_event_id"):
+            evidence_ids.append(f"event-{action['related_event_id']}")
+        evidence_ids.extend(action.get("evidence_ids") or [])
+    return unique_evidence_ids(evidence_ids)
 
 
 def create_agent_loop_run(project_id, platform="weibo", trigger_mode="manual", target_id=None, status="running", current_step=None, input_json=None, summary_json=None, error_type=None, error_message=None):

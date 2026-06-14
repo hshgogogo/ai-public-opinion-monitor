@@ -1334,6 +1334,381 @@ test(
 );
 
 test(
+  "attaches existing Weibo worker commands to Agent Loop run when exact agentLoopRunId is provided",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    assert.equal(runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        keyword: "海岛舒服日志",
+        limit: 10,
+        fixturePath: "test/fixtures/weibo-search.jsonl"
+      })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-target-select",
+      "--payload-json",
+      JSON.stringify({ projectId, targetId: "1001" })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-collect-target",
+      "--target-id",
+      "1001",
+      "--payload-json",
+      JSON.stringify({ projectId, fixturePath: "test/fixtures/weibo-detail.jsonl" })
+    ]).ok, true);
+
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        triggerMode: "manual",
+        input: { source: "step-attachment-test" }
+      })
+    ]);
+    assert.equal(loop.ok, true);
+    const agentLoopRunId = loop.run.id;
+
+    const analysis = runWorker([
+      "weibo-comments-analyze",
+      "--payload-json",
+      JSON.stringify({ projectId, limit: 10, agentLoopRunId })
+    ]);
+    assert.equal(analysis.ok, true);
+    assert.equal(analysis.agentStepRun.step_name, "comment_analysis");
+    assert.equal(analysis.agentStepRun.status, "succeeded");
+    assert.equal(analysis.agentStepRun.evidence_ids.length > 0, true);
+
+    const events = runWorker([
+      "weibo-events-build",
+      "--payload-json",
+      JSON.stringify({ projectId, agentLoopRunId })
+    ]);
+    assert.equal(events.ok, true);
+    assert.equal(events.persisted_events > 0, true);
+    assert.equal(events.agentStepRun.step_name, "event_building");
+    assert.equal(events.agentStepRun.status, "succeeded");
+    assert.equal(events.agentStepRun.evidence_ids.length > 0, true);
+
+    const actions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, agentLoopRunId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(actions.ok, true);
+    assert.equal(actions.persisted_actions > 0, true);
+    assert.equal(actions.agentStepRun.step_name, "action_recommendation");
+    assert.equal(actions.agentStepRun.status, "succeeded");
+    assert.equal(actions.agentStepRun.evidence_ids.length > 0, true);
+
+    const bot = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, agentLoopRunId, question: "为什么微博负面升高，现在该做什么？" })
+    ]);
+    assert.equal(bot.ok, true);
+    assert.equal(bot.answer.error, null);
+    assert.equal(bot.agentStepRun.step_name, "evidence_qa");
+    assert.equal(bot.agentStepRun.status, "succeeded");
+    assert.equal(bot.agentStepRun.evidence_ids.length > 0, true);
+
+    const persistedSteps = queryRows(
+      "SELECT agent_name, step_name, status, JSON_LENGTH(evidence_ids) AS evidence_count, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.command')) AS command FROM agent_step_runs WHERE loop_run_id=%s ORDER BY id",
+      [agentLoopRunId]
+    );
+    assert.deepEqual(persistedSteps, [
+      {
+        agent_name: "Issue Analysis Agent",
+        step_name: "comment_analysis",
+        status: "succeeded",
+        evidence_count: analysis.agentStepRun.evidence_ids.length,
+        command: "weibo-comments-analyze"
+      },
+      {
+        agent_name: "Event Agent",
+        step_name: "event_building",
+        status: "succeeded",
+        evidence_count: events.agentStepRun.evidence_ids.length,
+        command: "weibo-events-build"
+      },
+      {
+        agent_name: "Strategy Agent",
+        step_name: "action_recommendation",
+        status: "succeeded",
+        evidence_count: actions.agentStepRun.evidence_ids.length,
+        command: "weibo-actions-build"
+      },
+      {
+        agent_name: "QA Agent",
+        step_name: "evidence_qa",
+        status: "succeeded",
+        evidence_count: bot.agentStepRun.evidence_ids.length,
+        command: "weibo-bot-message"
+      }
+    ]);
+
+    const status = runWorker([
+      "weibo-agent-loop-status",
+      "--payload-json",
+      JSON.stringify({ projectId, loopRunId: agentLoopRunId })
+    ]);
+    assert.deepEqual(status.steps.map((step) => step.step_name), [
+      "comment_analysis",
+      "event_building",
+      "action_recommendation",
+      "evidence_qa"
+    ]);
+  }
+);
+
+test(
+  "rejects invalid or cross-project agentLoopRunId before business writeback",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    assert.equal(runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        keyword: "海岛舒服日志",
+        limit: 10,
+        fixturePath: "test/fixtures/weibo-search.jsonl"
+      })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-target-select",
+      "--payload-json",
+      JSON.stringify({ projectId, targetId: "1001" })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-collect-target",
+      "--target-id",
+      "1001",
+      "--payload-json",
+      JSON.stringify({ projectId, fixturePath: "test/fixtures/weibo-detail.jsonl" })
+    ]).ok, true);
+
+    const missingRun = runWorker([
+      "weibo-comments-analyze",
+      "--payload-json",
+      JSON.stringify({ projectId, limit: 10, agentLoopRunId: 999999 })
+    ]);
+    assert.equal(missingRun.ok, false);
+    assert.equal(missingRun.error_type, "agent_loop_not_found");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM sentiment_results")[0].count, 0);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM agent_runs")[0].count, 0);
+
+    for (const command of ["weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
+      const missing = runWorker(commandArgs(command, { projectId, agentLoopRunId: 999999 }));
+      assert.equal(missing.ok, false, command);
+      assert.equal(missing.error_type, "agent_loop_not_found", command);
+    }
+
+    queryRows(
+      "INSERT INTO monitor_projects(project_name, category, audience, keywords, actors, active_platforms) VALUES (%s,%s,%s,%s,%s,%s)",
+      [
+        "海岛舒服日志 Step Attachment 隔离项目",
+        "微博 MVP",
+        "测试隔离",
+        JSON.stringify(["海岛舒服日志"]),
+        JSON.stringify(["刘昊然", "李兰迪"]),
+        JSON.stringify(["weibo"])
+      ]
+    );
+    const otherProjectId = queryRows("SELECT id FROM monitor_projects WHERE project_name=%s", ["海岛舒服日志 Step Attachment 隔离项目"])[0].id;
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId, triggerMode: "manual" })
+    ]);
+    for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
+      const crossProject = runWorker(commandArgs(command, { projectId: otherProjectId, agentLoopRunId: loop.run.id }));
+      assert.equal(crossProject.ok, false, command);
+      assert.equal(crossProject.error_type, "agent_loop_not_found", command);
+    }
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [otherProjectId])[0].count, 0);
+  }
+);
+
+test(
+  "rejects attached commands with explicit missing project before default project fallback",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId, triggerMode: "manual" })
+    ]);
+    const before = writebackCounts(projectId);
+
+    for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
+      const result = runWorker(commandArgs(command, { projectId: 999999, agentLoopRunId: loop.run.id }));
+      assert.equal(result.ok, false, command);
+      assert.equal(result.error_type, "project_not_found", command);
+    }
+
+    assert.deepEqual(writebackCounts(projectId), before);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM agent_step_runs WHERE loop_run_id=%s", [loop.run.id])[0].count, 0);
+  }
+);
+
+test(
+  "records no-evidence Agent Loop attachments as partial and ignores run id aliases",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId, triggerMode: "manual" })
+    ]);
+    const agentLoopRunId = loop.run.id;
+
+    for (const aliasKey of ["loopRunId", "agent_loop_run_id"]) {
+      for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
+        const aliasOnly = runWorker(commandArgs(command, { projectId, [aliasKey]: agentLoopRunId }));
+        assert.equal(aliasOnly.ok, true, `${command} ${aliasKey}`);
+      }
+    }
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM agent_step_runs WHERE loop_run_id=%s", [agentLoopRunId])[0].count, 0);
+
+    for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
+      const exact = runWorker(commandArgs(command, { projectId, agentLoopRunId }));
+      assert.equal(exact.ok, true, command);
+      assert.equal(exact.agentStepRun.status, "partial", command);
+      assert.notEqual(exact.agentStepRun.step_name, undefined, command);
+      assert.deepEqual(exact.agentStepRun.evidence_ids, [], command);
+    }
+
+    const stepRows = queryRows(
+      "SELECT step_name, status, JSON_LENGTH(evidence_ids) AS evidence_count, error_type FROM agent_step_runs WHERE loop_run_id=%s ORDER BY id",
+      [agentLoopRunId]
+    );
+    assert.deepEqual(stepRows, [
+      { step_name: "comment_analysis", status: "partial", evidence_count: 0, error_type: "no_comments_to_analyze" },
+      { step_name: "event_building", status: "partial", evidence_count: 0, error_type: "no_analysis_evidence" },
+      { step_name: "action_recommendation", status: "partial", evidence_count: 0, error_type: "no_events_for_actions" },
+      { step_name: "evidence_qa", status: "partial", evidence_count: 0, error_type: "insufficient_evidence" }
+    ]);
+  }
+);
+
+test(
+  "preserves original worker error fields when an attached Agent Loop step fails",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId, triggerMode: "manual" })
+    ]);
+
+    const failed = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, agentLoopRunId: loop.run.id })
+    ]);
+    assert.equal(failed.ok, false);
+    assert.equal(failed.error_type, "question_required");
+    assert.equal(typeof failed.cause, "string");
+    assert.equal(typeof failed.fix, "string");
+    assert.equal(failed.agentStepRun.step_name, "evidence_qa");
+    assert.equal(failed.agentStepRun.status, "failed");
+    assert.equal(failed.agentStepRun.error_type, "question_required");
+
+    const stepRow = queryRows(
+      "SELECT status, error_type, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.error_type')) AS output_error_type, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.cause')) AS output_cause, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.fix')) AS output_fix FROM agent_step_runs WHERE loop_run_id=%s",
+      [loop.run.id]
+    )[0];
+    assert.equal(stepRow.status, "failed");
+    assert.equal(stepRow.error_type, "question_required");
+    assert.equal(stepRow.output_error_type, "question_required");
+    assert.equal(typeof stepRow.output_cause, "string");
+    assert.equal(typeof stepRow.output_fix, "string");
+  }
+);
+
+test(
+  "records an attached failed step when worker execution raises unexpectedly",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({ projectId, triggerMode: "manual" })
+    ]);
+    assert.equal(runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        keyword: "海岛舒服日志",
+        limit: 10,
+        fixturePath: "test/fixtures/weibo-search.jsonl"
+      })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-target-select",
+      "--payload-json",
+      JSON.stringify({ projectId, targetId: "1001" })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-collect-target",
+      "--target-id",
+      "1001",
+      "--payload-json",
+      JSON.stringify({ projectId, fixturePath: "test/fixtures/weibo-detail.jsonl" })
+    ]).ok, true);
+
+    queryRows("DROP TABLE sentiment_results");
+
+    const failed = runWorker([
+      "weibo-comments-analyze",
+      "--payload-json",
+      JSON.stringify({ projectId, agentLoopRunId: loop.run.id })
+    ]);
+    assert.equal(failed.ok, false);
+    assert.equal(failed.error_type, "worker_execution_failed");
+    assert.equal(typeof failed.cause, "string");
+    assert.equal(typeof failed.fix, "string");
+    assert.equal(failed.agentStepRun.status, "failed");
+    assert.equal(failed.agentStepRun.error_type, "worker_execution_failed");
+
+    const stepRow = queryRows(
+      "SELECT status, error_type, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.error_type')) AS output_error_type, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.cause')) AS output_cause, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.fix')) AS output_fix FROM agent_step_runs WHERE loop_run_id=%s",
+      [loop.run.id]
+    )[0];
+    assert.equal(stepRow.status, "failed");
+    assert.equal(stepRow.error_type, "worker_execution_failed");
+    assert.equal(stepRow.output_error_type, "worker_execution_failed");
+    assert.equal(typeof stepRow.output_cause, "string");
+    assert.equal(typeof stepRow.output_fix, "string");
+  }
+);
+
+test(
   "persists agent runs, events, action ledger state, and bot memory items into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -1631,6 +2006,29 @@ function runWorker(args, envOverrides = {}) {
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
+}
+
+function commandArgs(command, payload) {
+  const commandPayload = { ...payload };
+  if (command === "weibo-bot-message" && !Object.hasOwn(commandPayload, "question")) {
+    commandPayload.question = "现在微博发生了什么？";
+  }
+  return [command, "--payload-json", JSON.stringify(commandPayload)];
+}
+
+function writebackCounts(projectId) {
+  return queryRows(
+    `
+    SELECT
+      (SELECT COUNT(*) FROM sentiment_results sr JOIN social_comments c ON c.id=sr.comment_id WHERE c.project_id=%s) AS sentiments,
+      (SELECT COUNT(*) FROM agent_runs WHERE project_id=%s) AS agent_runs,
+      (SELECT COUNT(*) FROM artist_public_opinion_events WHERE project_id=%s) AS events,
+      (SELECT COUNT(*) FROM publicity_actions WHERE project_id=%s) AS actions,
+      (SELECT COUNT(*) FROM bot_conversations WHERE project_id=%s) AS conversations,
+      (SELECT COUNT(*) FROM bot_messages WHERE project_id=%s) AS messages
+    `,
+    [projectId, projectId, projectId, projectId, projectId, projectId]
+  )[0];
 }
 
 function resetTestDatabase() {
