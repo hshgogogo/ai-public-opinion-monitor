@@ -37,6 +37,7 @@ SOURCE_MATCH_UNKNOWN = {
 }
 
 AGENT_LOOP_TERMINAL_STATUSES = {"succeeded", "partial", "failed", "needs_human"}
+FEEDBACK_LEDGER_STATUSES = {"open", "in_review", "resolved", "rejected", "archived"}
 
 AGENT_STEP_ATTACHMENT_CONFIG = {
     "weibo-comments-analyze": ("Issue Analysis Agent", "comment_analysis"),
@@ -4399,13 +4400,181 @@ def weibo_feedback_payload(payload_json="{}"):
     if project_id_error:
         return project_id_error
     source_id = positive_integer_value(payload.get("sourceId") or payload.get("source_id"))
-    validation_error = validate_feedback_payload(source_type, feedback_type, source_id, endpoint)
+    feedback_status = normalized_feedback_status(payload)
+    validation_error = validate_feedback_payload(source_type, feedback_type, source_id, endpoint, feedback_status)
     if validation_error:
         return validation_error
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database, source_type=source_type, source_id=source_id)
+    if source_type == "event":
+        return persist_event_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database)
     return real_weibo_endpoint_payload(endpoint, payload_json, source_type=source_type, source_id=source_id)
+
+
+def persist_event_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM artist_public_opinion_events
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    FOR UPDATE
+                    """,
+                    (source_id, project["id"]),
+                )
+                event = cur.fetchone()
+                if not event:
+                    conn.rollback()
+                    error = weibo_error(
+                        "event_not_found",
+                        "Feedback event was not found.",
+                        "The event sourceId does not exist for this project and platform.",
+                        "Retry with a Weibo event id that belongs to the selected project.",
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": "event", "source_id": source_id})
+                    return error
+
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "event", source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+
+                from_status = event.get("status")
+                to_status = event_feedback_status(feedback_type, from_status)
+                if to_status != from_status:
+                    cur.execute(
+                        "UPDATE artist_public_opinion_events SET status=%s WHERE id=%s AND project_id=%s",
+                        (to_status, source_id, project["id"]),
+                    )
+                if event_feedback_writes_history(feedback_type):
+                    cur.execute(
+                        "INSERT INTO event_status_history(event_id, from_status, to_status, reason) VALUES (%s,%s,%s,%s)",
+                        (source_id, from_status, to_status, event_feedback_reason(feedback_type, note)),
+                    )
+
+                memory_identity = f"feedback:event:{source_id}:{feedback_type}"
+                memory_title = event_feedback_memory_title(feedback_type, event)
+                memory_json = {
+                    "feedback_id": feedback_id,
+                    "feedback_type": feedback_type,
+                    "feedback_status": feedback_status,
+                    "note": note,
+                    "created_by": created_by,
+                    "event_status": to_status,
+                    "event_title": event.get("title"),
+                }
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "event",
+                        source_id,
+                        memory_identity,
+                        memory_title,
+                        note or f"用户反馈：{feedback_type}",
+                        event.get("evidence_ids") or json_for_db([]),
+                        json_for_db(memory_json),
+                        0.8,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {"type": "event", "id": source_id, "status": to_status},
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def event_feedback_status(feedback_type, current_status):
+    return {
+        "event_confirmed": "confirmed",
+        "event_rejected": "rejected",
+        "event_observation_only": "observing",
+        "event_note": current_status,
+    }[feedback_type]
+
+
+def event_feedback_writes_history(feedback_type):
+    return feedback_type in {"event_confirmed", "event_rejected", "event_observation_only"}
+
+
+def event_feedback_reason(feedback_type, note):
+    return f"{feedback_type}: {note}" if note else feedback_type
+
+
+def event_feedback_memory_title(feedback_type, event):
+    action = {
+        "event_confirmed": "确认",
+        "event_rejected": "驳回",
+        "event_observation_only": "标记观察",
+        "event_note": "备注",
+    }[feedback_type]
+    return f"用户{action}事件：{event.get('title') or event.get('event_identity') or event.get('id')}"
+
+
+def memory_item_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "source_kind": row.get("source_kind"),
+        "source_id": row.get("source_id"),
+        "memory_identity": row.get("memory_identity"),
+        "title": row.get("title"),
+        "summary": row.get("summary"),
+        "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+        "memory_json": db.jloads(row.get("memory_json"), {}),
+        "importance": float(row["importance"]) if row.get("importance") is not None else None,
+        "created_at": iso_or_none(row.get("created_at")),
+        "updated_at": iso_or_none(row.get("updated_at")),
+    }
 
 
 def feedback_project_id(payload, endpoint):
@@ -4425,7 +4594,7 @@ def feedback_project_id(payload, endpoint):
     return None, error
 
 
-def validate_feedback_payload(source_type, feedback_type, source_id, endpoint):
+def validate_feedback_payload(source_type, feedback_type, source_id, endpoint, feedback_status="open"):
     if source_type not in FEEDBACK_TYPES_BY_SOURCE:
         error = weibo_error(
             "invalid_feedback_source_type",
@@ -4456,7 +4625,21 @@ def validate_feedback_payload(source_type, feedback_type, source_id, endpoint):
         )
         error.update({"endpoint": endpoint})
         return error
+    if not isinstance(feedback_status, str) or feedback_status not in FEEDBACK_LEDGER_STATUSES:
+        error = weibo_error(
+            "invalid_feedback_status",
+            "Feedback status is invalid.",
+            "Feedback ledger status must be open, in_review, resolved, rejected, or archived.",
+            "Retry with status open, in_review, resolved, rejected, or archived.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
     return None
+
+
+def normalized_feedback_status(payload):
+    return "open" if "status" not in payload or payload.get("status") is None else payload.get("status")
 
 
 def positive_integer_value(value):

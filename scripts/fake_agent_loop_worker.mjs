@@ -68,6 +68,19 @@ if (process.env.FAKE_WORKER_MODE === "invalid_feedback_type") {
   process.exit(0);
 }
 
+if (process.env.FAKE_WORKER_MODE === "invalid_feedback_status") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_feedback_status",
+    message: "Feedback status is invalid.",
+    cause: "done is not a feedback ledger status.",
+    fix: "Use status open, in_review, resolved, rejected, or archived."
+  });
+  process.exit(0);
+}
+
 if (process.env.FAKE_WORKER_MODE === "source_not_found") {
   emit({
     ok: false,

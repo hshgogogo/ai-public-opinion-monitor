@@ -462,6 +462,131 @@ test(
 );
 
 test(
+  "persists event feedback into feedback ledger, event status history, and memory in one MySQL transaction",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("cross-project-feedback-event");
+    const eventId = createEvent(projectId, "event-feedback-confirmed");
+    const observationEventId = createEvent(projectId, "event-feedback-observation-only");
+    const otherEventId = createEvent(otherProjectId, "event-feedback-other-project");
+
+    const confirmed = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "event",
+        sourceId: eventId,
+        feedbackType: "event_confirmed",
+        note: "人工确认这是需要纳入复盘的真实舆情事件。",
+        status: "resolved",
+        createdBy: "operator-test"
+      })
+    ]);
+
+    assert.equal(confirmed.ok, true);
+    assert.equal(confirmed.feedback.feedback_type, "event_confirmed");
+    assert.equal(confirmed.updatedSource.type, "event");
+    assert.equal(confirmed.updatedSource.status, "confirmed");
+    assert.equal(confirmed.memory.source_kind, "event");
+
+    assert.deepEqual(queryRows(
+      "SELECT source_type, source_id, feedback_type, note, status, created_by FROM feedback_items WHERE id=%s",
+      [confirmed.feedback.id]
+    )[0], {
+      source_type: "event",
+      source_id: eventId,
+      feedback_type: "event_confirmed",
+      note: "人工确认这是需要纳入复盘的真实舆情事件。",
+      status: "resolved",
+      created_by: "operator-test"
+    });
+    assert.deepEqual(queryRows(
+      "SELECT status FROM artist_public_opinion_events WHERE id=%s AND project_id=%s",
+      [eventId, projectId]
+    )[0], { status: "confirmed" });
+    assert.deepEqual(queryRows(
+      "SELECT from_status, to_status, reason FROM event_status_history WHERE event_id=%s ORDER BY id",
+      [eventId]
+    ), [{
+      from_status: "observing",
+      to_status: "confirmed",
+      reason: "event_confirmed: 人工确认这是需要纳入复盘的真实舆情事件。"
+    }]);
+    assert.deepEqual(queryRows(
+      "SELECT source_kind, source_id, memory_identity, title, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.feedback_type')) AS feedback_type FROM bot_memory_items WHERE id=%s",
+      [confirmed.memory.id]
+    )[0], {
+      source_kind: "event",
+      source_id: eventId,
+      memory_identity: `feedback:event:${eventId}:event_confirmed`,
+      title: "用户确认事件：测试事件 event-feedback-confirmed",
+      feedback_type: "event_confirmed"
+    });
+
+    const noteOnly = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "event",
+        sourceId: eventId,
+        feedbackType: "event_note",
+        note: "只补充观察备注，不改变事件状态。"
+      })
+    ]);
+    assert.equal(noteOnly.ok, true);
+    assert.equal(noteOnly.updatedSource.status, "confirmed");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM event_status_history WHERE event_id=%s", [eventId])[0].count, 1);
+
+    const observationOnly = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "event",
+        sourceId: observationEventId,
+        feedbackType: "event_observation_only",
+        note: "人工判断只作为观察线索，不升级为事件。"
+      })
+    ]);
+    assert.equal(observationOnly.ok, true);
+    assert.equal(observationOnly.updatedSource.status, "observing");
+    assert.deepEqual(queryRows(
+      "SELECT status FROM artist_public_opinion_events WHERE id=%s AND project_id=%s",
+      [observationEventId, projectId]
+    )[0], { status: "observing" });
+    assert.deepEqual(queryRows(
+      "SELECT from_status, to_status, reason FROM event_status_history WHERE event_id=%s ORDER BY id",
+      [observationEventId]
+    ), [{
+      from_status: "observing",
+      to_status: "observing",
+      reason: "event_observation_only: 人工判断只作为观察线索，不升级为事件。"
+    }]);
+
+    const crossProject = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "event",
+        sourceId: otherEventId,
+        feedbackType: "event_rejected",
+        note: "不应跨项目更新。"
+      })
+    ]);
+    assert.equal(crossProject.ok, false);
+    assert.equal(crossProject.error_type, "event_not_found");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE source_type='event' AND source_id=%s", [otherEventId])[0].count, 0);
+    assert.equal(queryRows("SELECT status FROM artist_public_opinion_events WHERE id=%s", [otherEventId])[0].status, "observing");
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -2115,6 +2240,29 @@ function writebackCounts(projectId) {
     `,
     [projectId, projectId, projectId, projectId, projectId, projectId]
   )[0];
+}
+
+function createProject(name) {
+  queryRows(
+    "INSERT INTO monitor_projects(project_name, category, audience, keywords, actors, active_platforms) VALUES (%s,'电影','测试受众',JSON_ARRAY('海岛舒服日志'),JSON_ARRAY('刘昊然','李兰迪'),JSON_ARRAY('weibo'))",
+    [name]
+  );
+  return queryRows("SELECT id FROM monitor_projects WHERE project_name=%s ORDER BY id DESC LIMIT 1", [name])[0].id;
+}
+
+function createEvent(projectId, identity) {
+  queryRows(
+    `
+    INSERT INTO artist_public_opinion_events(
+      project_id, platform, event_identity, event_type, title, trigger_summary,
+      related_artists, status, risk_level, event_score, evidence_ids,
+      timeline_json, impact_assessment, recommended_actions, first_seen_at, last_seen_at
+    )
+    VALUES (%s,'weibo',%s,'observation_lead',%s,'测试事件触发摘要',JSON_ARRAY('刘昊然'),'observing','medium',12.5,JSON_ARRAY(101,102),JSON_ARRAY(),NULL,JSON_ARRAY(),NOW(),NOW())
+    `,
+    [projectId, identity, `测试事件 ${identity}`]
+  );
+  return queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity=%s", [projectId, identity])[0].id;
 }
 
 function resetTestDatabase() {

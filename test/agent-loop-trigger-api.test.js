@@ -245,6 +245,32 @@ test("POST /api/weibo/feedback maps worker validation errors to HTTP 400", async
   assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback"]);
 });
 
+test("POST /api/weibo/feedback maps invalid feedback status to HTTP 400", async (t) => {
+  const logPath = await withFakeWorker(t, "invalid_feedback_status");
+  const base = await listen(t);
+
+  const response = await fetch(`${base}/api/weibo/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: 1,
+      sourceType: "event",
+      sourceId: 42,
+      feedbackType: "event_confirmed",
+      status: "done"
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.error_type, "invalid_feedback_status");
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+
+  const recorded = await calls(logPath);
+  assert.deepEqual(recorded.map((item) => item.command), ["weibo-feedback"]);
+});
+
 test("POST /api/weibo/feedback rejects invalid JSON before worker calls", async (t) => {
   const logPath = await withFakeWorker(t);
   const base = await listen(t);
