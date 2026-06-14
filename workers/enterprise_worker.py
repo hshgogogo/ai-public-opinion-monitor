@@ -38,6 +38,7 @@ SOURCE_MATCH_UNKNOWN = {
 
 AGENT_LOOP_TERMINAL_STATUSES = {"succeeded", "partial", "failed", "needs_human"}
 FEEDBACK_LEDGER_STATUSES = {"open", "in_review", "resolved", "rejected", "archived"}
+SOURCE_ACCOUNT_TYPES = {"official", "artist", "producer", "marketing", "suspected_matrix", "media", "fan", "organic", "unknown"}
 
 AGENT_STEP_ATTACHMENT_CONFIG = {
     "weibo-comments-analyze": ("Issue Analysis Agent", "comment_analysis"),
@@ -3672,9 +3673,9 @@ def persist_source_accounts(project_id, accounts):
                       external_id=VALUES(external_id),
                       profile_url=VALUES(profile_url),
                       display_name=VALUES(display_name),
-                      source_type=VALUES(source_type),
-                      match_confidence=VALUES(match_confidence),
-                      confirmed_by_user=VALUES(confirmed_by_user),
+                      source_type=IF(confirmed_by_user=1 AND VALUES(confirmed_by_user)=0, source_type, VALUES(source_type)),
+                      match_confidence=IF(confirmed_by_user=1 AND VALUES(confirmed_by_user)=0, match_confidence, VALUES(match_confidence)),
+                      confirmed_by_user=GREATEST(confirmed_by_user, VALUES(confirmed_by_user)),
                       raw_json=VALUES(raw_json)
                     """,
                     values,
@@ -3930,6 +3931,22 @@ def invalid_feedback_effective_at_error(endpoint, cause):
     )
     error.update({"endpoint": endpoint})
     return error
+
+
+def validated_source_type_value(payload, endpoint):
+    value = payload.get("sourceTypeValue") if "sourceTypeValue" in payload else payload.get("source_type_value")
+    text = str(value or "").strip()
+    if text not in SOURCE_ACCOUNT_TYPES:
+        error = weibo_error(
+            "invalid_source_type_value",
+            "Source account type correction is invalid.",
+            "sourceTypeValue/source_type_value must be a supported Weibo source account type.",
+            "Retry with official, artist, producer, marketing, suspected_matrix, media, fan, organic, or unknown.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    return text, None
 
 
 def iso_or_none(value):
@@ -4448,6 +4465,11 @@ def weibo_feedback_payload(payload_json="{}"):
         effective_at, effective_at_error = validated_feedback_effective_at(payload, endpoint)
         if effective_at_error:
             return effective_at_error
+    source_type_value = None
+    if source_type == "source_account":
+        source_type_value, source_type_value_error = validated_source_type_value(payload, endpoint)
+        if source_type_value_error:
+            return source_type_value_error
     database = db.health()
     if not database.get("connected"):
         return mysql_unavailable_payload(endpoint, database, source_type=source_type, source_id=source_id)
@@ -4455,6 +4477,8 @@ def weibo_feedback_payload(payload_json="{}"):
         return persist_event_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database)
     if source_type == "action":
         return persist_action_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, effective_at)
+    if source_type == "source_account":
+        return persist_source_account_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, source_type_value)
     return real_weibo_endpoint_payload(endpoint, payload_json, source_type=source_type, source_id=source_id)
 
 
@@ -4720,6 +4744,136 @@ def persist_action_feedback_payload(endpoint, payload, project_id, source_id, fe
             "type": "action",
             "id": source_id,
             "confirmation_status": updated_action.get("confirmation_status"),
+        },
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def persist_source_account_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, source_type_value):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM source_accounts
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    FOR UPDATE
+                    """,
+                    (source_id, project["id"]),
+                )
+                account = cur.fetchone()
+                if not account:
+                    conn.rollback()
+                    error = weibo_error(
+                        "source_account_not_found",
+                        "Feedback source account was not found.",
+                        "The source account sourceId does not exist for this project and platform.",
+                        "Retry with a Weibo source account id that belongs to the selected project.",
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": "source_account", "source_id": source_id})
+                    return error
+
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "source_account", source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+
+                cur.execute(
+                    """
+                    UPDATE source_accounts
+                    SET source_type=%s,
+                        confirmed_by_user=1,
+                        match_confidence=GREATEST(match_confidence, 1)
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    """,
+                    (source_type_value, source_id, project["id"]),
+                )
+                cur.execute(
+                    "SELECT * FROM source_accounts WHERE id=%s AND project_id=%s AND platform='weibo'",
+                    (source_id, project["id"]),
+                )
+                updated_account = cur.fetchone()
+
+                memory_identity = f"feedback:source_account:{source_id}:source_type_corrected"
+                memory_json = {
+                    "feedback_id": feedback_id,
+                    "feedback_type": feedback_type,
+                    "feedback_status": feedback_status,
+                    "note": note,
+                    "created_by": created_by,
+                    "from_source_type": account.get("source_type"),
+                    "source_type_value": source_type_value,
+                    "display_name": account.get("display_name"),
+                    "external_id": account.get("external_id"),
+                }
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "source_account",
+                        source_id,
+                        memory_identity,
+                        f"用户修正账号类型：{account.get('display_name') or source_id}",
+                        note or f"用户将账号类型修正为 {source_type_value}",
+                        json_for_db([]),
+                        json_for_db(memory_json),
+                        0.75,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": "source_account",
+            "id": source_id,
+            "source_type": updated_account.get("source_type"),
+            "confirmed_by_user": bool(updated_account.get("confirmed_by_user")),
         },
         "memory": memory_item_to_payload(memory),
     }

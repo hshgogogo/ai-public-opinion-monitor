@@ -797,6 +797,128 @@ test(
 );
 
 test(
+  "persists source account feedback into feedback ledger, account type, and memory in one MySQL transaction",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("cross-project-feedback-source-account");
+    const accountId = createSourceAccount(projectId, "source-feedback-account", "unknown");
+    const otherAccountId = createSourceAccount(otherProjectId, "source-feedback-other-project", "unknown");
+
+    const corrected = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "source_account",
+        sourceId: accountId,
+        feedbackType: "source_type_corrected",
+        sourceTypeValue: "official",
+        note: "人工确认这是官方账号。",
+        status: "resolved",
+        createdBy: "operator-test"
+      })
+    ]);
+
+    assert.equal(corrected.ok, true);
+    assert.equal(corrected.feedback.feedback_type, "source_type_corrected");
+    assert.equal(corrected.updatedSource.type, "source_account");
+    assert.equal(corrected.updatedSource.source_type, "official");
+    assert.equal(corrected.updatedSource.confirmed_by_user, true);
+    assert.equal(corrected.memory.source_kind, "source_account");
+
+    assert.deepEqual(queryRows(
+      "SELECT source_type, source_id, feedback_type, note, status, created_by FROM feedback_items WHERE id=%s",
+      [corrected.feedback.id]
+    )[0], {
+      source_type: "source_account",
+      source_id: accountId,
+      feedback_type: "source_type_corrected",
+      note: "人工确认这是官方账号。",
+      status: "resolved",
+      created_by: "operator-test"
+    });
+    assert.deepEqual(queryRows(
+      "SELECT source_type, confirmed_by_user FROM source_accounts WHERE id=%s AND project_id=%s",
+      [accountId, projectId]
+    )[0], {
+      source_type: "official",
+      confirmed_by_user: 1
+    });
+    assert.deepEqual(queryRows(
+      "SELECT source_kind, source_id, memory_identity, JSON_UNQUOTE(JSON_EXTRACT(memory_json, '$.source_type_value')) AS source_type_value FROM bot_memory_items WHERE id=%s",
+      [corrected.memory.id]
+    )[0], {
+      source_kind: "source_account",
+      source_id: accountId,
+      memory_identity: `feedback:source_account:${accountId}:source_type_corrected`,
+      source_type_value: "official"
+    });
+
+    const automaticDowngrade = runWorker([
+      "weibo-source-account-upsert",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        externalId: "account-source-feedback-account",
+        profileUrl: "https://weibo.com/u/source-feedback-account",
+        displayName: "账号 source-feedback-account",
+        sourceType: "fan",
+        confirmedByUser: false
+      })
+    ]);
+    assert.equal(automaticDowngrade.ok, true);
+    assert.deepEqual(queryRows(
+      "SELECT source_type, confirmed_by_user FROM source_accounts WHERE id=%s",
+      [accountId]
+    )[0], {
+      source_type: "official",
+      confirmed_by_user: 1
+    });
+
+    const invalidType = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "source_account",
+        sourceId: accountId,
+        feedbackType: "source_type_corrected",
+        sourceTypeValue: "celebrity"
+      })
+    ]);
+    assert.equal(invalidType.ok, false);
+    assert.equal(invalidType.error_type, "invalid_source_type_value");
+    assert.equal(queryRows("SELECT source_type FROM source_accounts WHERE id=%s", [accountId])[0].source_type, "official");
+
+    const crossProject = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "source_account",
+        sourceId: otherAccountId,
+        feedbackType: "source_type_corrected",
+        sourceTypeValue: "marketing",
+        note: "不应跨项目修正账号。"
+      })
+    ]);
+    assert.equal(crossProject.ok, false);
+    assert.equal(crossProject.error_type, "source_account_not_found");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM feedback_items WHERE source_type='source_account' AND source_id=%s", [otherAccountId])[0].count, 0);
+    assert.deepEqual(queryRows(
+      "SELECT source_type, confirmed_by_user FROM source_accounts WHERE id=%s",
+      [otherAccountId]
+    )[0], {
+      source_type: "unknown",
+      confirmed_by_user: 0
+    });
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -2487,6 +2609,27 @@ function createAction(projectId, identity) {
     [projectId, identity, identity]
   );
   return queryRows("SELECT id FROM publicity_actions WHERE project_id=%s AND action_identity=%s", [projectId, identity])[0].id;
+}
+
+function createSourceAccount(projectId, identity, sourceType = "unknown") {
+  queryRows(
+    `
+    INSERT INTO source_accounts(
+      project_id, platform, external_id, profile_url, display_name,
+      source_type, match_confidence, confirmed_by_user, raw_json
+    )
+    VALUES (%s,'weibo',%s,%s,%s,%s,0.5,0,JSON_OBJECT('identity', %s))
+    `,
+    [
+      projectId,
+      `account-${identity}`,
+      `https://weibo.com/u/${identity}`,
+      `账号 ${identity}`,
+      sourceType,
+      identity
+    ]
+  );
+  return queryRows("SELECT id FROM source_accounts WHERE project_id=%s AND external_id=%s", [projectId, `account-${identity}`])[0].id;
 }
 
 function resetTestDatabase() {

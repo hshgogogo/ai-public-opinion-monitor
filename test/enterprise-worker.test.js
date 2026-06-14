@@ -581,6 +581,35 @@ test("Feedback memory loop ignores effectiveAt validation for non-confirmed acti
   assert.equal(payload.error_type, "mysql_unavailable");
 });
 
+test("Feedback memory loop rejects invalid source account type correction before persistence", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "source_account",
+      sourceId: 42,
+      feedbackType: "source_type_corrected",
+      sourceTypeValue: "celebrity"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "mysql://root:bad@127.0.0.1:1/missing",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_source_type_value");
+  assert.match(payload.fix, /official/);
+});
+
 test("Agent Harness foundation docs preserve compatibility boundaries", () => {
   const readme = readText("README.md");
   const server = readText("src/server.js");

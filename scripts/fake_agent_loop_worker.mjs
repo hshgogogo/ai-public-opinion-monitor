@@ -94,6 +94,19 @@ if (process.env.FAKE_WORKER_MODE === "invalid_feedback_effective_at") {
   process.exit(0);
 }
 
+if (process.env.FAKE_WORKER_MODE === "invalid_source_type_value") {
+  emit({
+    ok: false,
+    mode: "weibo-agent-mvp",
+    command,
+    error_type: "invalid_source_type_value",
+    message: "Source account type correction is invalid.",
+    cause: "sourceTypeValue must be supported.",
+    fix: "Use a supported Weibo source account type."
+  });
+  process.exit(0);
+}
+
 if (process.env.FAKE_WORKER_MODE === "source_not_found") {
   emit({
     ok: false,
