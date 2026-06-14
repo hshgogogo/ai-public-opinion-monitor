@@ -80,6 +80,7 @@ def main():
     add_payload_parser(sub, "weibo-events-build")
     events = add_payload_parser(sub, "weibo-events")
     events.add_argument("--event-id")
+    add_payload_parser(sub, "weibo-actions-build")
     add_payload_parser(sub, "weibo-actions-pending")
     action_confirm = add_payload_parser(sub, "weibo-action-confirm")
     action_confirm.add_argument("--action-id", required=True)
@@ -164,6 +165,8 @@ def main():
             emit(weibo_events_build_payload(args.payload_json))
         elif args.command == "weibo-events":
             emit(weibo_events_payload(args.payload_json, args.event_id))
+        elif args.command == "weibo-actions-build":
+            emit(weibo_actions_build_payload(args.payload_json))
         elif args.command == "weibo-actions-pending":
             emit(weibo_actions_pending_payload(args.payload_json))
         elif args.command == "weibo-action-confirm":
@@ -2944,6 +2947,103 @@ def persist_detail_comments(project_id, comments, post_ids_by_external):
     return persisted
 
 
+def weibo_actions_build_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/actions/build"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=20, maximum=100)
+    now = payload.get("now") or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM artist_public_opinion_events
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            rows = cur.fetchall()
+    actions = [action_from_event(row, now) for row in rows]
+    persisted = persist_publicity_actions(project["id"], actions, {"by_external_id": {}, "by_display_name": {}, "all_ids": []}) if actions else 0
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "events_considered": len(rows),
+        "actions": actions,
+        "persisted_actions": persisted,
+        "deepseek": {"status": "not_run", "reason": "deterministic_strategy_slice"},
+    }
+
+
+def action_from_event(row, now):
+    event = event_row_to_payload(row)
+    evidence_ids = [numeric_id(item) for item in event.get("evidence_ids", [])]
+    if not evidence_ids:
+        evidence_ids = [row["id"]]
+    action_type = recommended_action_type(event)
+    return {
+        "id": f"agent-event-{row['id']}-{action_type}",
+        "source": "agent_recommended",
+        "platform": "weibo",
+        "related_event_id": row["id"],
+        "confirmation_status": "pending",
+        "action_type": action_type,
+        "content_summary": recommended_action_summary(event),
+        "reason": recommended_action_reason(event),
+        "evidence_ids": evidence_ids,
+        "priority": recommended_action_priority(event),
+        "owner_suggestion": "宣发负责人",
+        "confidence": recommended_action_confidence(event),
+        "observed_at": None,
+        "confirmed_at": None,
+        "effective_at": None,
+        "recommended_check_after_at": now,
+    }
+
+
+def recommended_action_type(event):
+    evidence_text = " ".join([event.get("title") or "", event.get("trigger_summary") or "", event.get("impact_assessment") or ""])
+    if "官宣" in evidence_text or "可信度" in evidence_text:
+        return "clarify_official_announcement"
+    if event.get("risk_level") in {"high", "critical"}:
+        return "risk_response_plan"
+    return "monitor_and_prepare_material"
+
+
+def recommended_action_summary(event):
+    if recommended_action_type(event) == "clarify_official_announcement":
+        return "准备微博官宣节奏澄清素材，明确可公开信息与不回应边界。"
+    if event.get("risk_level") in {"high", "critical"}:
+        return "整理高风险议题回应口径，安排后续评论窗口复查。"
+    return "持续观察该微博议题，并准备低风险生活方式或物料补充。"
+
+
+def recommended_action_reason(event):
+    evidence_ids = event.get("evidence_ids") or []
+    return f"{event.get('title') or '微博事件'} 已形成 {len(evidence_ids)} 条证据，当前风险 {event.get('risk_level') or 'unknown'}，建议先进入人工确认队列。"
+
+
+def recommended_action_priority(event):
+    if event.get("risk_level") in {"critical", "high"}:
+        return "high"
+    if event.get("risk_level") == "medium":
+        return "medium"
+    return "low"
+
+
+def recommended_action_confidence(event):
+    evidence_count = len(event.get("evidence_ids") or [])
+    score = float(event.get("event_score") or 0)
+    return round(min(0.85, 0.45 + evidence_count * 0.05 + min(score, 8) * 0.02), 4)
+
+
 def weibo_actions_pending_payload(payload_json="{}"):
     endpoint = "GET /api/weibo/actions/pending"
     payload = json.loads(payload_json or "{}")
@@ -3295,21 +3395,43 @@ def persist_publicity_actions(project_id, actions, account_ids):
             for action in actions:
                 source_account_id = account_ids["by_external_id"].get(action.get("source_account_external_id"))
                 related_event_id = int(action["related_event_id"]) if str(action.get("related_event_id") or "").isdigit() else None
+                identity = action.get("action_identity") or publicity_action_identity(action, related_event_id)
                 cur.execute(
                     """
                     INSERT INTO publicity_actions(
                       project_id, platform, related_event_id, related_target_id, source,
-                      confirmation_status, action_type, content_summary, reason, evidence_ids,
+                      action_identity, confirmation_status, action_type, content_summary, reason, evidence_ids,
                       priority, owner_suggestion, confidence, source_account_id, url,
                       observed_at, confirmed_at, effective_at, recommended_check_after_at, raw_json
                     )
-                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      related_event_id=IF(confirmation_status='pending', VALUES(related_event_id), related_event_id),
+                      related_target_id=IF(confirmation_status='pending', VALUES(related_target_id), related_target_id),
+                      source=IF(confirmation_status='pending', VALUES(source), source),
+                      confirmation_status=IF(confirmation_status='pending', VALUES(confirmation_status), confirmation_status),
+                      action_type=IF(confirmation_status='pending', VALUES(action_type), action_type),
+                      content_summary=IF(confirmation_status='pending', VALUES(content_summary), content_summary),
+                      reason=IF(confirmation_status='pending', VALUES(reason), reason),
+                      evidence_ids=IF(confirmation_status='pending', VALUES(evidence_ids), evidence_ids),
+                      priority=IF(confirmation_status='pending', VALUES(priority), priority),
+                      owner_suggestion=IF(confirmation_status='pending', VALUES(owner_suggestion), owner_suggestion),
+                      confidence=IF(confirmation_status='pending', VALUES(confidence), confidence),
+                      source_account_id=IF(confirmation_status='pending', VALUES(source_account_id), source_account_id),
+                      url=IF(confirmation_status='pending', VALUES(url), url),
+                      observed_at=IF(confirmation_status='pending', VALUES(observed_at), observed_at),
+                      confirmed_at=IF(confirmation_status='pending', VALUES(confirmed_at), confirmed_at),
+                      effective_at=IF(confirmation_status='pending', VALUES(effective_at), effective_at),
+                      recommended_check_after_at=IF(confirmation_status='pending', VALUES(recommended_check_after_at), recommended_check_after_at),
+                      raw_json=IF(confirmation_status='pending', VALUES(raw_json), raw_json)
                     """,
                     (
                         project_id,
                         related_event_id,
                         numeric_nullable(action.get("related_target_id")),
                         action.get("source"),
+                        identity,
                         action.get("confirmation_status", "pending"),
                         action.get("action_type", "unknown"),
                         action.get("content_summary"),
@@ -3341,6 +3463,18 @@ def persist_publicity_actions(project_id, actions, account_ids):
                     memory_identity=f"action:{action.get('id') or action_id}",
                 )
     return persisted
+
+
+def publicity_action_identity(action, related_event_id=None):
+    raw = action.get("id") or "|".join(
+        [
+            str(action.get("source") or "unknown"),
+            str(related_event_id or action.get("related_event_id") or "no-event"),
+            str(action.get("action_type") or "unknown"),
+            ",".join(str(item) for item in action.get("evidence_ids", [])),
+        ]
+    )
+    return f"{action.get('source') or 'action'}::{hashlib.sha1(str(raw).encode('utf-8')).hexdigest()[:24]}"
 
 
 def persist_memory_report(project_id, records, report, now):

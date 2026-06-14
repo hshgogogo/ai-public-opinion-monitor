@@ -294,6 +294,54 @@ test(
     assert.equal(realEventDetail.ok, true);
     assert.equal(realEventDetail.event.id, realEvents.events[0].id);
 
+    const builtActions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(builtActions.ok, true);
+    assert.equal(builtActions.persisted_actions > 0, true);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND source='agent_recommended'", [projectId])[0].count, builtActions.persisted_actions);
+    const builtActionsAgain = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(builtActionsAgain.persisted_actions, builtActions.persisted_actions);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND source='agent_recommended'", [projectId])[0].count, builtActions.persisted_actions);
+    const pendingActions = runWorker([
+      "weibo-actions-pending",
+      "--payload-json",
+      JSON.stringify({ projectId })
+    ]);
+    assert.equal(pendingActions.ok, true);
+    assert.equal(pendingActions.actions.some((action) => action.source === "agent_recommended"), true);
+    const recommended = pendingActions.actions.find((action) => action.source === "agent_recommended");
+    assert.equal(recommended.confirmation_status, "pending");
+    assert.equal(recommended.related_event_id > 0, true);
+    assert.equal(recommended.evidence_ids.length > 0, true);
+    queryRows("UPDATE publicity_actions SET content_summary='人工保留的建议摘要' WHERE id=%s", [recommended.id]);
+    const rejectedRecommendation = runWorker([
+      "weibo-action-confirm",
+      "--action-id",
+      String(recommended.id),
+      "--payload-json",
+      JSON.stringify({ projectId, confirmationStatus: "rejected", note: "人工驳回该建议" })
+    ]);
+    assert.equal(rejectedRecommendation.ok, true);
+    assert.equal(rejectedRecommendation.action.confirmation_status, "rejected");
+    const rebuildAfterRejection = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(rebuildAfterRejection.ok, true);
+    const protectedRecommendation = queryRows("SELECT confirmation_status, content_summary FROM publicity_actions WHERE id=%s", [recommended.id])[0];
+    assert.deepEqual(protectedRecommendation, {
+      confirmation_status: "rejected",
+      content_summary: "人工保留的建议摘要"
+    });
+
     queryRows(
       "INSERT INTO monitor_projects(project_name, category, audience, keywords, actors, active_platforms) VALUES (%s,%s,%s,%s,%s,%s)",
       [

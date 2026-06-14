@@ -222,6 +222,17 @@ test("Weibo event and source account persistence use atomic MySQL upsert", () =>
   assert.doesNotMatch(sourceAccountsSection, /SELECT\s+id\s+FROM\s+source_accounts/i);
 });
 
+test("Weibo publicity action persistence uses atomic MySQL upsert", () => {
+  const sql = readText("migrations/003_weibo_mvp_event_action.sql");
+  const worker = readText("workers/enterprise_worker.py");
+  const actionsSection = worker.match(/def persist_publicity_actions[\s\S]*?\ndef persist_memory_report/)?.[0] || "";
+
+  assert.match(sql, /action_identity/);
+  assert.match(sql, /uniq_action_project_platform_identity/);
+  assert.match(actionsSection, /ON DUPLICATE KEY UPDATE/i);
+  assert.match(actionsSection, /LAST_INSERT_ID\(id\)/i);
+});
+
 test("default project and env example are Weibo MVP scoped", () => {
   const dbPy = readText("workers/db.py");
   const env = readText(".env.example");
