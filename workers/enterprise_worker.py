@@ -1069,6 +1069,7 @@ def weibo_comments_analyze_payload(payload_json="{}"):
     project = project_from_payload(payload)
     limit = bounded_limit(payload.get("limit"), default=100, maximum=500)
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    deepseek_context = deepseek_analysis_context(payload)
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1085,7 +1086,8 @@ def weibo_comments_analyze_payload(payload_json="{}"):
             persisted = 0
             analyses = []
             for row in comments:
-                analysis = analyze_weibo_comment_record_with_local_rules(comment_db_row_to_analysis_input(row), now)
+                comment = comment_db_row_to_analysis_input(row)
+                analysis = analyze_db_comment(comment, now, deepseek_context, len(analyses))
                 analyses.append(analysis)
                 cur.execute(
                     """
@@ -1112,7 +1114,7 @@ def weibo_comments_analyze_payload(payload_json="{}"):
                     """,
                     (
                         row["id"],
-                        "local-rules",
+                        analysis["model"],
                         analysis["sentiment"],
                         analysis["score"],
                         analysis["confidence"],
@@ -1124,18 +1126,12 @@ def weibo_comments_analyze_payload(payload_json="{}"):
                         analysis["intensity"],
                         analysis["weight"],
                         json.dumps(analysis["analysis_json"], ensure_ascii=False),
-                        "local_rules",
+                        analysis["fallback_type"],
                         mysql_timestamp(now),
                     ),
                 )
                 persisted += 1
-            agent_run = {
-                "agent_name": "Local Weibo Issue Analysis",
-                "status": "succeeded",
-                "model": "local-rules",
-                "fallback_type": "local_rules",
-                "comment_count": len(comments),
-            }
+            agent_run = analysis_agent_run(deepseek_context, len(comments))
             cur.execute(
                 """
                 INSERT INTO agent_runs(project_id, agent_name, status, input_json, output_json, finished_at)
@@ -1144,7 +1140,7 @@ def weibo_comments_analyze_payload(payload_json="{}"):
                 (
                     project["id"],
                     agent_run["agent_name"],
-                    json.dumps({"endpoint": endpoint, "limit": limit}, ensure_ascii=False),
+                    json.dumps({"endpoint": endpoint, "limit": limit, "deepseek": deepseek_context["status"]}, ensure_ascii=False),
                     json.dumps(agent_run, ensure_ascii=False),
                 ),
             )
@@ -1157,7 +1153,7 @@ def weibo_comments_analyze_payload(payload_json="{}"):
         "persisted_sentiments": persisted,
         "analyses": analyses[:20],
         "agent_run": agent_run,
-        "deepseek": {"status": "not_run", "reason": "local_rules_slice"},
+        "deepseek": deepseek_payload(deepseek_context),
     }
 
 
@@ -1169,6 +1165,96 @@ def comment_db_row_to_analysis_input(row):
         "reply_count": int(row.get("reply_count") or 0),
         "collected_at": iso_or_none(row.get("collected_at")),
     }
+
+
+def deepseek_analysis_context(payload):
+    response_path = payload.get("deepseekResponsePath")
+    simulate_failure = payload.get("simulateDeepSeekFailure")
+    if simulate_failure:
+        return {"status": "failed", "error_type": "deepseek_failed", "reason": str(simulate_failure), "items": []}
+    if response_path:
+        fixture_path, fixture_error = resolve_fixture_path(response_path)
+        if fixture_error:
+            return {"status": "failed", "error_type": fixture_error["error_type"], "reason": fixture_error["message"], "items": []}
+        try:
+            return {"status": "succeeded", "source": "fixture", "items": parse_deepseek_response(Path(fixture_path).read_text(encoding="utf-8"))}
+        except Exception as exc:
+            return {"status": "failed", "error_type": "deepseek_parse_failed", "reason": type(exc).__name__, "items": []}
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return {"status": "live_enabled", "items": None}
+    return {"status": "not_run", "reason": "deepseek_unavailable", "items": []}
+
+
+def analyze_db_comment(comment, now, deepseek_context, index):
+    if deepseek_context.get("status") == "succeeded":
+        model_item = deepseek_item_for_comment(deepseek_context.get("items") or [], comment, index)
+        return analysis_from_deepseek(comment, model_item, now)
+    if deepseek_context.get("status") == "live_enabled":
+        live = analyze_comment(comment.get("content") or "")
+        if live.get("model") == "deepseek-chat":
+            return analysis_from_model_agent(comment, live, now)
+        deepseek_context["status"] = "failed"
+        deepseek_context["error_type"] = "deepseek_failed"
+        deepseek_context["reason"] = live.get("error") or "deepseek_api_unavailable"
+    return analyze_weibo_comment_record_with_local_rules(comment, now)
+
+
+def deepseek_item_for_comment(items, comment, index):
+    by_comment_id = {str(item.get("comment_id")): item for item in items if isinstance(item, dict)}
+    return by_comment_id.get(str(comment.get("id"))) or (items[index] if index < len(items) and isinstance(items[index], dict) else {})
+
+
+def analysis_from_model_agent(comment, model_item, now):
+    analysis = analysis_from_deepseek(comment, model_item, now)
+    analysis["analysis_json"]["source"] = "deepseek_api"
+    if model_item.get("error"):
+        analysis = analyze_weibo_comment_record_with_local_rules(comment, now)
+        analysis["analysis_json"]["deepseek_error_type"] = "deepseek_failed"
+    return analysis
+
+
+def analysis_agent_run(deepseek_context, comment_count):
+    if deepseek_context.get("status") in {"succeeded", "live_enabled"}:
+        return {
+            "agent_name": "DeepSeek Weibo Analysis",
+            "status": "succeeded",
+            "model": "deepseek-chat",
+            "fallback_type": "none",
+            "comment_count": comment_count,
+            "deepseek_status": deepseek_context.get("status"),
+        }
+    if deepseek_context.get("status") == "failed":
+        return {
+            "agent_name": "DeepSeek Weibo Analysis",
+            "status": "succeeded",
+            "model": "local-rules",
+            "fallback_type": "local_rules",
+            "comment_count": comment_count,
+            "deepseek_status": "failed",
+            "error_type": deepseek_context.get("error_type"),
+        }
+    return {
+        "agent_name": "Local Weibo Issue Analysis",
+        "status": "succeeded",
+        "model": "local-rules",
+        "fallback_type": "local_rules",
+        "comment_count": comment_count,
+        "deepseek_status": "not_run",
+    }
+
+
+def deepseek_payload(deepseek_context):
+    if deepseek_context.get("status") == "succeeded":
+        return {"status": "succeeded", "source": deepseek_context.get("source", "api")}
+    if deepseek_context.get("status") == "live_enabled":
+        return {"status": "succeeded", "source": "api"}
+    if deepseek_context.get("status") == "failed":
+        return {
+            "status": "failed",
+            "error_type": deepseek_context.get("error_type", "deepseek_failed"),
+            "fallback_type": "local_rules",
+        }
+    return {"status": "not_run", "reason": deepseek_context.get("reason", "deepseek_unavailable")}
 
 
 def weibo_analyses_payload(payload_json="{}"):
@@ -1183,7 +1269,7 @@ def weibo_analyses_payload(payload_json="{}"):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT COUNT(*) AS count
+                SELECT COUNT(DISTINCT sr.comment_id) AS count
                 FROM sentiment_results sr
                 JOIN social_comments c ON c.id=sr.comment_id
                 WHERE c.project_id=%s AND c.platform='weibo'
@@ -1193,23 +1279,31 @@ def weibo_analyses_payload(payload_json="{}"):
             total = int(cur.fetchone()["count"] or 0)
             cur.execute(
                 """
-                SELECT
-                  sr.*,
-                  c.project_id,
-                  c.platform,
-                  c.external_id AS comment_external_id,
-                  c.author_name,
-                  c.content,
-                  c.like_count,
-                  c.reply_count,
-                  p.external_id AS post_external_id,
-                  p.url AS post_url,
-                  p.keyword
-                FROM sentiment_results sr
-                JOIN social_comments c ON c.id=sr.comment_id
-                JOIN social_posts p ON p.id=c.post_id
-                WHERE c.project_id=%s AND c.platform='weibo'
-                ORDER BY sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                SELECT *
+                FROM (
+                  SELECT
+                    sr.*,
+                    c.project_id,
+                    c.platform,
+                    c.external_id AS comment_external_id,
+                    c.author_name,
+                    c.content,
+                    c.like_count,
+                    c.reply_count,
+                    p.external_id AS post_external_id,
+                    p.url AS post_url,
+                    p.keyword,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY sr.comment_id
+                      ORDER BY (sr.model='deepseek-chat') DESC, sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                    ) AS preferred_rank
+                  FROM sentiment_results sr
+                  JOIN social_comments c ON c.id=sr.comment_id
+                  JOIN social_posts p ON p.id=c.post_id
+                  WHERE c.project_id=%s AND c.platform='weibo'
+                ) preferred
+                WHERE preferred_rank=1
+                ORDER BY analyzed_at DESC, created_at DESC, id DESC
                 LIMIT %s
                 """,
                 (project["id"], limit),
@@ -1301,33 +1395,41 @@ def load_weibo_analysis_evidence(project_id, limit):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT
-                  sr.id AS analysis_id,
-                  sr.comment_id,
-                  sr.sentiment,
-                  sr.score,
-                  sr.confidence,
-                  sr.topics,
-                  sr.risks,
-                  sr.evidence,
-                  sr.stance,
-                  sr.issue_summary,
-                  sr.intensity,
-                  sr.weight_snapshot,
-                  sr.analyzed_at,
-                  sr.created_at AS analysis_created_at,
-                  c.content,
-                  c.like_count,
-                  c.reply_count,
-                  c.collected_at,
-                  p.external_id AS post_external_id,
-                  p.url AS post_url,
-                  p.keyword
-                FROM sentiment_results sr
-                JOIN social_comments c ON c.id=sr.comment_id
-                JOIN social_posts p ON p.id=c.post_id
-                WHERE c.project_id=%s AND c.platform='weibo'
-                ORDER BY sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                SELECT *
+                FROM (
+                  SELECT
+                    sr.id AS analysis_id,
+                    sr.comment_id,
+                    sr.sentiment,
+                    sr.score,
+                    sr.confidence,
+                    sr.topics,
+                    sr.risks,
+                    sr.evidence,
+                    sr.stance,
+                    sr.issue_summary,
+                    sr.intensity,
+                    sr.weight_snapshot,
+                    sr.analyzed_at,
+                    sr.created_at AS analysis_created_at,
+                    c.content,
+                    c.like_count,
+                    c.reply_count,
+                    c.collected_at,
+                    p.external_id AS post_external_id,
+                    p.url AS post_url,
+                    p.keyword,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY sr.comment_id
+                      ORDER BY (sr.model='deepseek-chat') DESC, sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                    ) AS preferred_rank
+                  FROM sentiment_results sr
+                  JOIN social_comments c ON c.id=sr.comment_id
+                  JOIN social_posts p ON p.id=c.post_id
+                  WHERE c.project_id=%s AND c.platform='weibo'
+                ) preferred
+                WHERE preferred_rank=1
+                ORDER BY analyzed_at DESC, analysis_created_at DESC, analysis_id DESC
                 LIMIT %s
                 """,
                 (project_id, limit),
@@ -3994,7 +4096,7 @@ def parse_deepseek_response(text):
 
 def analysis_from_deepseek(comment, model_item, now):
     content = comment.get("text") or comment.get("content") or ""
-    fallback = analyze_weibo_comment_record(comment, now)
+    fallback = analyze_weibo_comment_record_with_local_rules(comment, now)
     like_count = int(comment.get("like_count") or 0)
     reply_count = int(comment.get("reply_count") or 0)
     ignored = {

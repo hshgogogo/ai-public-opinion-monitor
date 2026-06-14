@@ -190,6 +190,37 @@ test(
     ]);
     assert.equal(localAnalysisAgain.persisted_sentiments, 4);
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM sentiment_results WHERE model='local-rules'")[0].count, 4);
+
+    const deepSeekAnalysis = runWorker([
+      "weibo-comments-analyze",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        limit: 10,
+        deepseekResponsePath: "test/fixtures/deepseek-response.md"
+      })
+    ]);
+    assert.equal(deepSeekAnalysis.ok, true);
+    assert.equal(deepSeekAnalysis.deepseek.status, "succeeded");
+    assert.equal(deepSeekAnalysis.agent_run.agent_name, "DeepSeek Weibo Analysis");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM sentiment_results WHERE model='deepseek-chat'")[0].count, 4);
+    const deepSeekRow = queryRows(
+      "SELECT COUNT(*) AS count FROM sentiment_results WHERE model='deepseek-chat' AND JSON_EXTRACT(analysis_json, '$.ignored_model_numbers.weight') IS NOT NULL"
+    )[0];
+    assert.equal(deepSeekRow.count > 0, true);
+
+    const deepSeekFailure = runWorker([
+      "weibo-comments-analyze",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        limit: 10,
+        simulateDeepSeekFailure: "timeout"
+      })
+    ]);
+    assert.equal(deepSeekFailure.ok, true);
+    assert.equal(deepSeekFailure.deepseek.status, "failed");
+    assert.equal(deepSeekFailure.agent_run.fallback_type, "local_rules");
     const workbenchAfterLocalAnalysis = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
     assert.equal(workbenchAfterLocalAnalysis.setup.progress.analysis_count, 4);
     assert.equal(workbenchAfterLocalAnalysis.setup.partialState, "analysis-without-event");
