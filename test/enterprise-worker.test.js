@@ -220,7 +220,7 @@ test("Agent Harness loop migration declares ledger tables and migration order", 
   assert.equal(harnessMigrationIndex > sentimentMigrationIndex, true);
 });
 
-test("Agent Harness worker ledger commands stay out of public HTTP in foundation slice", () => {
+test("Agent Harness worker ledger commands expose only run/status public HTTP in trigger API slice", () => {
   const worker = readText("workers/enterprise_worker.py");
   const server = readText("src/server.js");
 
@@ -248,7 +248,9 @@ test("Agent Harness worker ledger commands stay out of public HTTP in foundation
     assert.match(worker, new RegExp(command));
   }
 
-  assert.doesNotMatch(server, /agent-loop\/run|agent-runs/i);
+  assert.match(server, /agent-loop\/run/i);
+  assert.match(server, /agent-runs/i);
+  assert.doesNotMatch(server, /agent-loop\/step|agent-loop\/judge|agent-loop\/handoff/i);
 });
 
 test("Agent Harness worker ledger commands return mysql_unavailable without MySQL", () => {
@@ -327,7 +329,9 @@ test("Agent Harness foundation docs preserve compatibility boundaries", () => {
   assert.match(readme, /haidao-agent-loop-step-attachment/);
   assert.match(readme, /haidao-feedback-memory-loop/);
 
-  assert.doesNotMatch(server, /agent-loop\/run|agent-runs/i);
+  assert.match(server, /agent-loop\/run/i);
+  assert.match(server, /agent-runs/i);
+  assert.doesNotMatch(server, /agent-loop\/step|agent-loop\/judge|agent-loop\/handoff/i);
   assert.doesNotMatch(frontend, /agent-loop\/run|agent-runs|weibo-agent-loop/i);
   for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
     assert.doesNotMatch(worker, new RegExp(`${command}[\\s\\S]{0,200}agentLoopRunId`));

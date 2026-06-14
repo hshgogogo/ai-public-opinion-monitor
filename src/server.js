@@ -10,7 +10,9 @@ loadEnvFile(join(rootDir, ".env"));
 const publicDir = join(rootDir, "public");
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "0.0.0.0";
-const pythonBin = process.env.PYTHON_BIN || "/Users/mini-002/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
+const defaultPythonBin = "/Users/mini-002/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
+const defaultWorkerScript = "workers/enterprise_worker.py";
+const publicAgentLoopModes = new Set(["manual", "scheduled", "after_collection"]);
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -43,6 +45,9 @@ export const server = http.createServer(async (request, response) => {
     const actionBacktestMatch = url.pathname.match(/^\/api\/weibo\/actions\/([^/]+)\/backtest$/);
     if (actionBacktestMatch && request.method === "POST") return weiboWorker(request, response, "weibo-action-backtest", "--action-id", actionBacktestMatch[1]);
     if (url.pathname === "/api/weibo/bot/messages" && request.method === "POST") return weiboWorker(request, response, "weibo-bot-message");
+    if (url.pathname === "/api/weibo/agent-loop/run" && request.method === "POST") return runAgentLoop(request, response);
+    const agentRunMatch = url.pathname.match(/^\/api\/weibo\/agent-runs\/([^/]+)$/);
+    if (agentRunMatch && request.method === "GET") return agentLoopStatus(request, response, agentRunMatch[1]);
     if (url.pathname === "/api/stream") return stream(response);
     if (url.pathname === "/api/migrate" && request.method === "POST") return sendJson(response, await worker("migrate"));
     if (url.pathname === "/api/collect" && request.method === "POST") return collect(request, response);
@@ -75,6 +80,87 @@ async function weiboWorker(request, response, command, ...args) {
   sendJson(response, result, statusFor(result));
 }
 
+async function runAgentLoop(request, response) {
+  const { payload, error } = await readAgentLoopPayload(request);
+  if (error) return sendJson(response, error, 400);
+
+  const projectId = optionalPositiveInteger(payload.projectId);
+  if (payload.projectId !== undefined && projectId === null) {
+    return sendJson(response, agentLoopError(
+      "invalid_project_id",
+      "Agent Loop run requires a valid projectId.",
+      "The public payload projectId must be a positive integer when provided.",
+      "Pass a positive integer projectId or omit it to use the default project."
+    ), 400);
+  }
+
+  const targetId = optionalPositiveInteger(payload.targetId);
+  if (payload.targetId !== undefined && targetId === null) {
+    return sendJson(response, agentLoopError(
+      "invalid_agent_loop_payload",
+      "Agent Loop run targetId is invalid.",
+      "The public payload targetId must be a positive integer when provided.",
+      "Pass a positive integer targetId or omit it."
+    ), 400);
+  }
+
+  const mode = payload.mode ?? "manual";
+  if (!publicAgentLoopModes.has(mode)) {
+    return sendJson(response, agentLoopError(
+      "invalid_agent_loop_mode",
+      "Agent Loop mode is not public.",
+      "The public API only accepts manual, scheduled, or after_collection.",
+      "Use one of manual, scheduled, or after_collection."
+    ), 400);
+  }
+
+  if (payload.input !== undefined && !isPlainObject(payload.input)) {
+    return sendJson(response, agentLoopError(
+      "invalid_agent_loop_payload",
+      "Agent Loop input must be a JSON object.",
+      `Received ${Array.isArray(payload.input) ? "array" : typeof payload.input}.`,
+      "Pass input as a JSON object or omit it."
+    ), 400);
+  }
+
+  const workerPayload = { triggerMode: mode };
+  if (projectId !== undefined && projectId !== null) workerPayload.projectId = projectId;
+  if (targetId !== undefined && targetId !== null) workerPayload.targetId = targetId;
+  if (payload.input !== undefined) workerPayload.input = payload.input;
+
+  const result = await worker("weibo-agent-loop-run", "--payload-json", JSON.stringify(workerPayload));
+  sendJson(response, agentLoopRunResponse(result), agentLoopStatusFor(result));
+}
+
+async function agentLoopStatus(request, response, id) {
+  const loopRunId = positiveInteger(id);
+  if (loopRunId === null) {
+    return sendJson(response, agentLoopError(
+      "invalid_agent_run_id",
+      "Agent Loop run id is invalid.",
+      "The path id must be a positive integer.",
+      "Retry with an agentLoopRunId returned by POST /api/weibo/agent-loop/run."
+    ), 400);
+  }
+
+  const payload = queryPayload(request);
+  const projectId = optionalPositiveInteger(payload.projectId);
+  if (payload.projectId !== undefined && projectId === null) {
+    return sendJson(response, agentLoopError(
+      "invalid_project_id",
+      "Agent Loop status requires a valid projectId.",
+      "The query projectId must be a positive integer when provided.",
+      "Pass a positive integer projectId or omit it to use the default project."
+    ), 400);
+  }
+
+  const workerPayload = { loopRunId };
+  if (projectId !== undefined && projectId !== null) workerPayload.projectId = projectId;
+
+  const result = await worker("weibo-agent-loop-status", "--payload-json", JSON.stringify(workerPayload));
+  sendJson(response, agentLoopStatusResponse(result), agentLoopStatusFor(result));
+}
+
 function queryPayload(request) {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
   return Object.fromEntries(url.searchParams.entries());
@@ -84,6 +170,14 @@ function statusFor(payload) {
   if (payload?.error_type === "mysql_unavailable") return 503;
   if (payload?.error_type === "weibo_endpoint_pending_real_data_implementation") return 501;
   return 200;
+}
+
+function agentLoopStatusFor(payload) {
+  if (payload?.ok !== false) return 200;
+  if (payload.error_type === "mysql_unavailable") return 503;
+  if (["invalid_agent_loop_payload", "invalid_agent_run_id", "invalid_agent_loop_mode", "invalid_project_id", "project_not_found"].includes(payload.error_type)) return 400;
+  if (payload.error_type === "agent_loop_not_found") return 404;
+  return 500;
 }
 
 function stream(response) {
@@ -125,7 +219,9 @@ async function serveStatic(pathname, response) {
 
 async function worker(...args) {
   return new Promise((resolve) => {
-    const child = spawn(pythonBin, ["workers/enterprise_worker.py", ...args], {
+    const workerBin = process.env.PYTHON_BIN || defaultPythonBin;
+    const workerScript = process.env.ENTERPRISE_WORKER_SCRIPT || defaultWorkerScript;
+    const child = spawn(workerBin, [workerScript, ...args], {
       cwd: rootDir,
       env: process.env
     });
@@ -153,6 +249,100 @@ async function readJson(request) {
   let body = "";
   for await (const chunk of request) body += chunk;
   return body ? JSON.parse(body) : {};
+}
+
+async function readAgentLoopPayload(request) {
+  try {
+    const payload = await readJson(request);
+    if (!isPlainObject(payload)) {
+      return {
+        error: agentLoopError(
+          "invalid_agent_loop_payload",
+          "Agent Loop payload must be a JSON object.",
+          `Received ${Array.isArray(payload) ? "array" : typeof payload}.`,
+          "Pass a JSON object request body."
+        )
+      };
+    }
+    return { payload };
+  } catch (error) {
+    return {
+      error: agentLoopError(
+        "invalid_agent_loop_payload",
+        "Agent Loop payload must be valid JSON.",
+        error.message,
+        "Send a valid JSON object request body."
+      )
+    };
+  }
+}
+
+function agentLoopRunResponse(payload) {
+  const result = withoutWorkerStderr(payload);
+  if (result?.ok === false) return result;
+  const run = result?.run || {};
+  return {
+    ...result,
+    agentLoopRunId: result.agentLoopRunId ?? run.id,
+    status: result.status ?? run.status
+  };
+}
+
+function agentLoopStatusResponse(payload) {
+  const result = withoutWorkerStderr(payload);
+  if (result?.ok === false) return result;
+  const run = result?.run || {};
+  const judgeReviews = result?.judgeReviews || [];
+  const manualHandoffs = result?.manualHandoffs
+    || (result?.feedbackItems || []).filter((item) => item.feedback_type === "manual_handoff" || item.feedbackType === "manual_handoff");
+  const { feedbackItems, ...publicResult } = result;
+  return {
+    ...publicResult,
+    agentLoopRunId: result.agentLoopRunId ?? run.id,
+    status: result.status ?? run.status,
+    currentStep: result.currentStep ?? run.current_step ?? run.currentStep ?? null,
+    retryCount: result.retryCount ?? retryCountFrom(judgeReviews),
+    manualHandoffs
+  };
+}
+
+function retryCountFrom(judgeReviews) {
+  return judgeReviews.reduce((max, item) => {
+    const count = Number(item.retry_count ?? item.retryCount ?? 0);
+    return Number.isFinite(count) && count > max ? count : max;
+  }, 0);
+}
+
+function withoutWorkerStderr(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const { stderr, ...rest } = payload;
+  return rest;
+}
+
+function agentLoopError(error_type, message, cause, fix) {
+  return {
+    ok: false,
+    mode: "weibo-agent-mvp",
+    error_type,
+    message,
+    cause,
+    fix
+  };
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function optionalPositiveInteger(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  return positiveInteger(value);
+}
+
+function positiveInteger(value) {
+  if (typeof value === "number") return Number.isInteger(value) && value > 0 ? value : null;
+  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return null;
+  return Number(value);
 }
 
 function unsupported(response, message) {
