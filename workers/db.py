@@ -74,6 +74,7 @@ def run_migration(sql_path=None):
         Path("migrations/003_weibo_mvp_event_action.sql"),
         Path("migrations/004_weibo_mvp_memory_report.sql"),
         Path("migrations/005_weibo_mvp_sentiment.sql"),
+        Path("migrations/006_agent_harness_loop.sql"),
     ]
     with connect() as conn:
         with conn.cursor() as cur:

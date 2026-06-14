@@ -183,6 +183,43 @@ test("Weibo MVP sentiment migration extends analysis fields and migration order"
   }
 });
 
+test("Agent Harness loop migration declares ledger tables and migration order", () => {
+  const sql = readText("migrations/006_agent_harness_loop.sql");
+  const dbPy = readText("workers/db.py");
+
+  assert.doesNotMatch(sql, /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i);
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+
+  for (const table of [
+    "agent_loop_runs",
+    "agent_step_runs",
+    "judge_reviews",
+    "feedback_items"
+  ]) {
+    assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`, "i"));
+  }
+
+  for (const token of [
+    "trigger_mode",
+    "current_step",
+    "summary_json",
+    "evidence_ids",
+    "judge_agent_name",
+    "required_changes",
+    "evidence_errors",
+    "feedback_type",
+    "handled_at",
+    "needs_human"
+  ]) {
+    assert.match(sql, new RegExp(token, "i"));
+  }
+
+  const sentimentMigrationIndex = dbPy.indexOf("005_weibo_mvp_sentiment.sql");
+  const harnessMigrationIndex = dbPy.indexOf("006_agent_harness_loop.sql");
+  assert.equal(sentimentMigrationIndex >= 0, true);
+  assert.equal(harnessMigrationIndex > sentimentMigrationIndex, true);
+});
+
 test("OpenSpec tasks include real environment and design pass evidence", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md")
     || readText("openspec/changes/archive/2026-06-11-haidao-weibo-agent-mvp/tasks.md");

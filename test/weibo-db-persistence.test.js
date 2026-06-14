@@ -8,6 +8,26 @@ const testMysqlUrl = process.env.WEIBO_DB_PERSISTENCE_TEST_URL;
 const fakeWeiboCookieFile = "test/fixtures/weibo-cookie.json";
 
 test(
+  "runs Agent Harness loop migration twice and creates ledger tables",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const tables = queryRows(
+      "SELECT TABLE_NAME AS table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('agent_loop_runs','agent_step_runs','judge_reviews','feedback_items') ORDER BY TABLE_NAME"
+    ).map((row) => row.table_name);
+    assert.deepEqual(tables, [
+      "agent_loop_runs",
+      "agent_step_runs",
+      "feedback_items",
+      "judge_reviews"
+    ]);
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

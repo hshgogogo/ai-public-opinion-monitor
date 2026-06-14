@@ -1,10 +1,10 @@
 ## 1. Schema
 
-- [ ] 1.1 Add an idempotent migration for `agent_loop_runs`.
-- [ ] 1.2 Add an idempotent migration for `agent_step_runs`.
-- [ ] 1.3 Add an idempotent migration for `judge_reviews`.
-- [ ] 1.4 Add an idempotent migration for `feedback_items`.
-- [ ] 1.5 Add tests proving the migration is MySQL 8.0/8.4 safe and idempotent.
+- [x] 1.1 Add an idempotent migration for `agent_loop_runs`.
+- [x] 1.2 Add an idempotent migration for `agent_step_runs`.
+- [x] 1.3 Add an idempotent migration for `judge_reviews`.
+- [x] 1.4 Add an idempotent migration for `feedback_items`.
+- [x] 1.5 Add tests proving the migration is MySQL 8.0/8.4 safe and idempotent.
 
 ## 2. Worker Ledger Contract
 
