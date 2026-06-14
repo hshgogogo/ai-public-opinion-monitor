@@ -1,21 +1,21 @@
-## Context
+## 背景
 
-The archived `haidao-weibo-agent-mvp` change proved the Weibo vertical path: discovery, target selection, detail comments, analysis, events, action recommendations, memory, reports, and Q&A. The new PRD asks for an Agent Harness that supervises this path with run state, Judge review, retries, feedback, and eventual CrewAI/FastAPI/React migration.
+已归档的 `haidao-weibo-agent-mvp` change 证明了微博垂直链路：发现、目标选择、详情评论、分析、事件、行动建议、记忆、报告和问答。新的 PRD 要求增加 Agent Harness，用 run state、Judge review、重试、反馈，以及后续 CrewAI/FastAPI/React 迁移来监督这条链路。
 
-This change deliberately starts with a ledger and contract foundation. It should make the current system more auditable without replacing the existing Node/Python architecture.
+本 change 刻意只从账本和契约基础开始。目标是在不替换现有 Node/Python 架构的前提下，让当前系统更可审计。
 
-## Design
+## 设计
 
-### Data Model
+### 数据模型
 
-Add an idempotent migration for four tables.
+增加一个幂等 migration，创建四张表。
 
-`agent_loop_runs` records one top-level Weibo loop:
+`agent_loop_runs` 记录一次顶层微博 loop：
 
 - `id`
 - `project_id`
-- `platform`, initially `weibo`
-- `trigger_mode`: `after_collection`, `scheduled`, `manual`, `fixture`
+- `platform`，初始只支持 `weibo`
+- `trigger_mode`：`after_collection`、`scheduled`、`manual`、`fixture`
 - `target_id`
 - `status`: `pending`, `running`, `succeeded`, `partial`, `failed`, `needs_human`
 - `current_step`
@@ -23,7 +23,7 @@ Add an idempotent migration for four tables.
 - `error_type`, `error_message`
 - `input_json`, `summary_json`
 
-`agent_step_runs` records each stage:
+`agent_step_runs` 记录每个阶段：
 
 - `id`
 - `loop_run_id`
@@ -37,13 +37,13 @@ Add an idempotent migration for four tables.
 - `started_at`, `finished_at`
 - `error_type`, `error_message`
 
-`judge_reviews` records review results:
+`judge_reviews` 记录评审结果：
 
 - `id`
 - `loop_run_id`
 - `step_run_id`
 - `judge_agent_name`
-- `status`: `pending`, `passed`, `failed`, `needs_human`
+- `status`：`pending`、`passed`、`failed`、`needs_human`
 - `score`
 - `passed`
 - `feedback_json`
@@ -52,7 +52,7 @@ Add an idempotent migration for four tables.
 - `retry_count`
 - `created_at`
 
-`feedback_items` records manual handoff skeletons in this change. Full user feedback semantics are reserved for `haidao-feedback-memory-loop`:
+`feedback_items` 在本 change 中记录人工交接骨架。完整用户反馈语义保留给 `haidao-feedback-memory-loop`：
 
 - `id`
 - `project_id`
@@ -65,58 +65,58 @@ Add an idempotent migration for four tables.
 - `created_at`
 - `handled_at`
 
-All tables are additive. No existing Weibo evidence tables are replaced.
+所有表都是增量新增，不替换现有微博证据表。
 
-### Worker Contract
+### Worker 契约
 
-Add small worker commands before orchestration grows:
+在编排层扩大之前，先增加一组小的 worker 命令：
 
-- `weibo-agent-loop-run`: create a run without executing the downstream business loop.
-- `weibo-agent-loop-status`: read one run with steps and Judge reviews.
-- `weibo-agent-loop-step`: create or update a step record for tests and later integrations.
-- `weibo-agent-loop-judge-review`: create a Judge review skeleton for tests and later integrations.
-- `weibo-agent-loop-handoff`: create a manual handoff skeleton for tests and later integrations.
-- Internal helpers:
-  - create loop run
-  - start/finish/fail step
-  - create Judge review skeleton
-  - create manual feedback item
+- `weibo-agent-loop-run`：创建 run，但不执行下游业务 loop。
+- `weibo-agent-loop-status`：读取一个 run 及其 steps、Judge reviews。
+- `weibo-agent-loop-step`：为测试和后续集成创建或更新 step 记录。
+- `weibo-agent-loop-judge-review`：为测试和后续集成创建 Judge review 骨架。
+- `weibo-agent-loop-handoff`：为测试和后续集成创建人工交接骨架。
+- 内部 helper：
+  - 创建 loop run
+  - 启动、完成、失败或标记 step
+  - 创建 Judge review 骨架
+  - 创建人工 feedback item
 
-Existing commands such as `weibo-comments-analyze`, `weibo-events-build`, `weibo-actions-build`, and `weibo-bot-message` remain unchanged in this foundation change. Optional `agentLoopRunId` attachment belongs to the later `haidao-agent-loop-step-attachment` change.
+`weibo-comments-analyze`、`weibo-events-build`、`weibo-actions-build` 和 `weibo-bot-message` 等现有命令在本基础 change 中保持不变。可选的 `agentLoopRunId` 绑定属于后续 `haidao-agent-loop-step-attachment` change。
 
-### API Contract
+### API 契约
 
-Do not expose new HTTP endpoints in this foundation change. The following endpoints belong to the later `haidao-agent-loop-trigger-api` change:
+本基础 change 不暴露新的 HTTP endpoint。以下 endpoint 属于后续 `haidao-agent-loop-trigger-api` change：
 
 - `POST /api/weibo/agent-loop/run`
 - `GET /api/weibo/agent-runs/:id`
 
-The foundation only ensures the worker/status payload shape is ready for those endpoints.
+本基础层只确保 worker/status payload 形状已经为这些 endpoint 做好准备。
 
-### Judge Foundation
+### Judge 基础
 
-This change does not implement a full LLM Judge. It creates the persistence and deterministic guard shape:
+本 change 不实现完整 LLM Judge，只创建持久化与确定性 guard 的形状：
 
-- Judge reviews can be recorded as passed/failed/needs_human.
-- Evidence errors include missing citation IDs, wrong source type, or insufficient evidence.
-- Retry fields exist, but full retry orchestration is reserved for `haidao-judge-agent-retry-loop`.
+- Judge review 可以记录为 `passed`、`failed` 或 `needs_human`。
+- 证据错误包括缺失 citation ID、source type 错误或证据不足。
+- retry 字段先预留；完整重试编排保留给 `haidao-judge-agent-retry-loop`。
 
-### Failure Handling
+### 失败处理
 
-- If MySQL is unavailable, worker commands return the existing `mysql_unavailable` payload style.
-- If a step fails, the loop moves to `failed` or `needs_human` with `error_type`, `error_message`, and current step.
-- Partial downstream completion must be visible as `partial`, not converted to success.
+- 如果 MySQL 不可用，worker 命令返回现有 `mysql_unavailable` payload 风格。
+- 如果某个 step 失败，loop 必须带上 `error_type`、`error_message` 和 current step，进入 `failed` 或 `needs_human`。
+- 下游只完成一部分时必须显示为 `partial`，不能转换成成功。
 
-### Security
+### 安全
 
-- No `.env`, Cookie, token, or browser state is read or printed by tests for this change.
-- Real Weibo login and MediaCrawler remain outside this foundation.
-- DeepSeek is user-authorized for later use, but live calls are not required for this ledger change.
+- 本 change 的测试不读取也不打印 `.env`、Cookie、token 或浏览器状态。
+- 真实微博登录和 MediaCrawler 不属于这个基础层。
+- 用户已授权后续使用 DeepSeek，但本账本 change 不要求 live call。
 
-## Validation Strategy
+## 验证策略
 
-- Migration tests assert table and column declarations and no unsafe MySQL syntax.
-- Real MySQL tests run migrations twice and verify loop/step/Judge/feedback records persist.
-- Worker tests prove ledger commands write run, step, Judge review, and manual handoff records while existing Weibo commands remain compatible.
-- OpenSpec validation runs for this change.
-- `npm test`, real MySQL `npm test`, `git diff --check`, and `npm run agent:guard` run before commit.
+- Migration 测试断言表和列声明存在，并且没有不安全 MySQL 语法。
+- 真实 MySQL 测试连续跑两遍 migrations，并验证 loop/step/Judge/feedback 记录可持久化。
+- Worker 测试证明账本命令能写入 run、step、Judge review 和人工交接记录，同时现有微博命令保持兼容。
+- 对本 change 运行 OpenSpec validation。
+- commit 前运行 `npm test`、真实 MySQL `npm test`、`git diff --check` 和 `npm run agent:guard`。

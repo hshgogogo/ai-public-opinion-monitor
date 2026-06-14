@@ -316,9 +316,9 @@ test("Agent Harness foundation docs preserve compatibility boundaries", () => {
   const frontend = readText("public/app.js");
   const worker = readText("workers/enterprise_worker.py");
 
-  assert.match(readme, /Agent Harness Foundation/);
-  assert.match(readme, /worker-only contract/);
-  assert.match(readme, /不新增 public HTTP endpoint/);
+  assert.match(readme, /Agent Harness 基础层/);
+  assert.match(readme, /worker-only 契约/);
+  assert.match(readme, /不新增公开 HTTP endpoint/);
   assert.match(readme, /不修改前端 workbench/);
   assert.match(readme, /weibo-comments-analyze/);
   assert.match(readme, /weibo-events-build/);

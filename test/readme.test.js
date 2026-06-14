@@ -2,20 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-test("README documents Weibo MVP setup, fixture E2E, auth troubleshooting, and limitations", () => {
+test("README documents Weibo MVP setup, fixture E2E, auth troubleshooting, and limitations in Chinese", () => {
   const readme = readFileSync("README.md", "utf8");
 
   for (const text of [
-    "Weibo MVP",
+    "微博 MVP",
     "weibo-fixture-e2e",
     "MEDIACRAWLER_HOME",
     "MEDIACRAWLER_CDP_PORT",
     "WEIBO_COOKIE_FILE",
     "target_detail_unsupported",
     "real_weibo_auth_missing",
-    "No Xiaohongshu or Douyin collection",
-    "fixture-driven MySQL persistence",
-    "MediaCrawler Weibo search/detail adapters",
+    "不启用小红书或抖音采集",
+    "fixture 驱动的 MySQL 持久化",
+    "MediaCrawler 微博 search/detail adapters",
     "tasks.md"
   ]) {
     assert.equal(readme.includes(text), true, text);

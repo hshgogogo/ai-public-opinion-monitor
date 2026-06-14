@@ -1,10 +1,10 @@
 # AI舆情监测系统
 
-## Weibo MVP
+## 微博 MVP
 
-当前 OpenSpec change `haidao-weibo-agent-mvp` 将第一阶段收窄为 Weibo MVP：只验证《海岛舒服日志》在微博上的 Agent 工作流。No Xiaohongshu or Douyin collection is active in this MVP.
+当前 OpenSpec change `haidao-weibo-agent-mvp` 将第一阶段收窄为微博 MVP：只验证《海岛舒服日志》在微博上的 Agent 工作流。这个 MVP 不启用小红书或抖音采集。
 
-### Weibo MVP 环境变量
+### 微博 MVP 环境变量
 
 ```bash
 export MYSQL_URL='mysql://user:password@127.0.0.1:3306/yuqing_monitor'
@@ -18,7 +18,7 @@ export MEDIACRAWLER_CDP_PORT='9222'
 
 不要提交 `.env`、`config/cookies/`、`storage/`、浏览器登录态或真实 API key。
 
-### Fixture E2E
+### Fixture 闭环测试
 
 无需真实微博登录、Chrome CDP、MediaCrawler 或 MySQL，可先跑 fixture 闭环：
 
@@ -29,7 +29,7 @@ python workers/enterprise_worker.py weibo-fixture-e2e --now 2026-06-10T12:00:00Z
 
 该命令会验证 migration 文件存在，解析微博搜索 fixture，推荐目标，选择目标，解析 detail 评论，做本地/fixture 分析，生成事件线索、行动记录、backtest unknown/信号结果、带引用的 Q&A，并渲染 workbench payload。
 
-### Weibo Auth Troubleshooting
+### 微博登录态排查
 
 - `auth_required`: 检查 `WEIBO_COOKIE_FILE` 是否存在并指向本地 cookie 文件。
 - `chrome_cdp_unavailable`: 检查 Chrome 是否开启 remote debugging，并确认 `MEDIACRAWLER_CDP_PORT`。
@@ -37,19 +37,19 @@ python workers/enterprise_worker.py weibo-fixture-e2e --now 2026-06-10T12:00:00Z
 - `target_detail_unsupported`: 目标缺少可用于 detail 采集的 `weibo_mid`、`external_id` 或详情 URL。
 - `real_weibo_auth_missing`: fixture 模式未使用真实登录态；这是预期限制，不代表真实采集已完成。
 
-### MVP Limitations
+### MVP 限制
 
-- 已完成 fixture-driven MySQL persistence，可在本地测试 Weibo task、target、detail posts/comments、event、action、backtest memory、report 和 preference memory 入库链路。
-- 已完成 MediaCrawler Weibo search/detail adapters、task-specific output path、raw JSONL 归档和 search/detail JSONL 入库链路；真实环境验收仍以 11.5 为准。
+- 已完成 fixture 驱动的 MySQL 持久化，可在本地测试微博 task、target、detail posts/comments、event、action、backtest memory、report 和 preference memory 入库链路。
+- 已完成 MediaCrawler 微博 search/detail adapters、task-specific output path、raw JSONL 归档和 search/detail JSONL 入库链路；真实环境验收仍以 11.5 为准。
 - 真实微博登录态、Chrome CDP、MediaCrawler 环境验收仍未完成。
 - 已完成 DeepSeek 事件解释 adapter；无 `DEEPSEEK_API_KEY` 或模型失败时，事件仍保留确定性阈值结果并降级为本地/fixture 解释。
 - 剩余未完成或部分保留的工作以 `openspec/changes/haidao-weibo-agent-mvp/tasks.md` 为准。
 - Agent 不自动发帖，不保管账号密码，不绕过验证码或反爬机制。
 - 没有足够 evidence 时，Q&A、report、backtest 必须返回 insufficient-data 或 unknown，不能编造事件、评论或行动效果。
 
-### Agent Harness Foundation
+### Agent Harness 基础层
 
-当前 `haidao-agent-harness-loop-foundation` change 只建立 Agent Loop 账本和 worker-only contract。可用命令包括：
+当前 `haidao-agent-harness-loop-foundation` change 只建立 Agent Loop 账本和 worker-only 契约。可用命令包括：
 
 ```bash
 python workers/enterprise_worker.py weibo-agent-loop-run --payload-json '{"triggerMode":"manual","input":{}}'
@@ -59,7 +59,7 @@ python workers/enterprise_worker.py weibo-agent-loop-judge-review --payload-json
 python workers/enterprise_worker.py weibo-agent-loop-handoff --payload-json '{"sourceType":"loop","sourceId":1,"feedbackType":"manual_handoff"}'
 ```
 
-本 foundation change 不新增 public HTTP endpoint，不修改前端 workbench，不把 `weibo-comments-analyze`、`weibo-events-build`、`weibo-actions-build` 或 `weibo-bot-message` 强制挂载到 Agent Loop。可选 `agentLoopRunId` step attachment 属于后续 `haidao-agent-loop-step-attachment` change；完整用户确认、驳回、偏好写回语义属于后续 `haidao-feedback-memory-loop` change。
+本基础 change 不新增公开 HTTP endpoint，不修改前端 workbench，不把 `weibo-comments-analyze`、`weibo-events-build`、`weibo-actions-build` 或 `weibo-bot-message` 强制挂载到 Agent Loop。可选 `agentLoopRunId` step attachment 属于后续 `haidao-agent-loop-step-attachment` change；完整用户确认、驳回、偏好写回语义属于后续 `haidao-feedback-memory-loop` change。
 
 面向影视制作公司的企业级 AI 舆情监测 Web 服务。系统限定监控小红书、抖音、微博，使用授权 Cookie 采集真实内容，写入本机 MySQL，并由 DeepSeek Agent 做逐评论情感分析和营销策略生成。
 

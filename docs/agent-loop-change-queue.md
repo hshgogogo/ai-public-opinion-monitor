@@ -23,7 +23,7 @@
 
 | 顺序 | Change ID | Outcome | 本地验证方式 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|---|---|
-| 1 | haidao-agent-harness-loop-foundation | 建立最小 Agent Loop 账本：run、step、Judge review skeleton、manual handoff skeleton | migration tests, worker command tests, real MySQL persistence tests, OpenSpec strict validate | 已归档 Weibo MVP | 低 | active |
+| 1 | haidao-agent-harness-loop-foundation | 建立最小 Agent Loop 账本：run、step、Judge review skeleton、manual handoff skeleton | migration tests, worker command tests, real MySQL persistence tests, OpenSpec strict validate | 已归档 Weibo MVP | 低 | done |
 | 2 | haidao-agent-loop-trigger-api | 暴露 `/api/weibo/agent-loop/run` 和 `GET /api/weibo/agent-runs/:id`，只负责创建/查询 loop，不串完整业务 | API contract tests, MySQL unavailable tests | 1 | 低 | planned |
 | 3 | haidao-agent-loop-step-attachment | 让已存在的分析、事件、行动、问答 worker 可选挂载 `agentLoopRunId` 并写 step evidence | worker tests, real MySQL persistence tests | 1 | 中 | planned |
 | 4 | haidao-feedback-memory-loop | 用户反馈、人工确认/驳回、偏好写回影响后续建议 | feedback API tests, memory persistence tests, action/event state tests | 1, 3 | 中 | planned |
