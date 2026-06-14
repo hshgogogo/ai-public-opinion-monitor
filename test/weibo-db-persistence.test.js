@@ -193,6 +193,23 @@ test(
     const workbenchAfterLocalAnalysis = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
     assert.equal(workbenchAfterLocalAnalysis.setup.progress.analysis_count, 4);
     assert.equal(workbenchAfterLocalAnalysis.setup.partialState, "analysis-without-event");
+    const analysesList = runWorker([
+      "weibo-analyses",
+      "--payload-json",
+      JSON.stringify({ projectId, limit: 3 })
+    ]);
+    assert.equal(analysesList.ok, true);
+    assert.equal(analysesList.mode, "weibo-agent-mvp");
+    assert.equal(analysesList.total, 4);
+    assert.equal(analysesList.analyses.length, 3);
+    assert.equal(analysesList.analyses[0].platform, "weibo");
+    assert.equal(analysesList.analyses[0].comment_id > 0, true);
+    assert.equal(typeof analysesList.analyses[0].content, "string");
+    assert.equal(Object.hasOwn(analysesList.analyses[0], "sentiment"), true);
+    assert.equal(Object.hasOwn(analysesList.analyses[0], "topics"), true);
+    assert.equal(Object.hasOwn(analysesList.analyses[0], "risks"), true);
+    assert.equal(Object.hasOwn(analysesList.analyses[0], "stance"), true);
+    assert.equal(analysesList.citations.includes(`comment-${analysesList.analyses[0].comment_id}`), true);
     const analysisOnly = runWorker([
       "weibo-deepseek-fixture",
       "--comments",

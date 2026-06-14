@@ -9,13 +9,14 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workers import db
 from workers.agents.sentiment_agent import analyze_comment
+from workers.analyzer_core import fallback_analysis
 from workers.collectors import douyin, weibo, xiaohongshu
 
 
@@ -73,6 +74,7 @@ def main():
     add_payload_parser(sub, "weibo-source-account-upsert")
     add_payload_parser(sub, "weibo-comments")
     add_payload_parser(sub, "weibo-comments-analyze")
+    add_payload_parser(sub, "weibo-analyses")
     collect_target = add_payload_parser(sub, "weibo-collect-target")
     collect_target.add_argument("--target-id", required=True)
     events = add_payload_parser(sub, "weibo-events")
@@ -153,6 +155,8 @@ def main():
             emit(weibo_comments_payload(args.payload_json))
         elif args.command == "weibo-comments-analyze":
             emit(weibo_comments_analyze_payload(args.payload_json))
+        elif args.command == "weibo-analyses":
+            emit(weibo_analyses_payload(args.payload_json))
         elif args.command == "weibo-collect-target":
             emit(weibo_collect_target_payload(args.payload_json, args.target_id))
         elif args.command == "weibo-events":
@@ -253,7 +257,7 @@ def snapshot_payload(project_id=None):
 
 
 def empty_snapshot(database, message=None):
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     return {
         "generatedAt": now,
         "config": db.DEFAULT_PROJECT,
@@ -1061,7 +1065,7 @@ def weibo_comments_analyze_payload(payload_json="{}"):
         return mysql_unavailable_payload(endpoint, database)
     project = project_from_payload(payload)
     limit = bounded_limit(payload.get("limit"), default=100, maximum=500)
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1078,7 +1082,7 @@ def weibo_comments_analyze_payload(payload_json="{}"):
             persisted = 0
             analyses = []
             for row in comments:
-                analysis = analyze_weibo_comment_record(comment_db_row_to_analysis_input(row), now)
+                analysis = analyze_weibo_comment_record_with_local_rules(comment_db_row_to_analysis_input(row), now)
                 analyses.append(analysis)
                 cur.execute(
                     """
@@ -1161,6 +1165,90 @@ def comment_db_row_to_analysis_input(row):
         "like_count": int(row.get("like_count") or 0),
         "reply_count": int(row.get("reply_count") or 0),
         "collected_at": iso_or_none(row.get("collected_at")),
+    }
+
+
+def weibo_analyses_payload(payload_json="{}"):
+    endpoint = "GET /api/weibo/analyses"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=50, maximum=200)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM sentiment_results sr
+                JOIN social_comments c ON c.id=sr.comment_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                """,
+                (project["id"],),
+            )
+            total = int(cur.fetchone()["count"] or 0)
+            cur.execute(
+                """
+                SELECT
+                  sr.*,
+                  c.project_id,
+                  c.platform,
+                  c.external_id AS comment_external_id,
+                  c.author_name,
+                  c.content,
+                  c.like_count,
+                  c.reply_count,
+                  p.external_id AS post_external_id,
+                  p.url AS post_url,
+                  p.keyword
+                FROM sentiment_results sr
+                JOIN social_comments c ON c.id=sr.comment_id
+                JOIN social_posts p ON p.id=c.post_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                ORDER BY sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            rows = cur.fetchall()
+    analyses = [analysis_row_to_payload(row) for row in rows]
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "limit": limit,
+        "total": total,
+        "analyses": analyses,
+        "citations": [analysis["citation"] for analysis in analyses],
+    }
+
+
+def analysis_row_to_payload(row):
+    return {
+        "analysis_id": row["id"],
+        "comment_id": row["comment_id"],
+        "comment_external_id": row.get("comment_external_id"),
+        "post_external_id": row.get("post_external_id"),
+        "platform": row["platform"],
+        "author_name": row.get("author_name"),
+        "content": row.get("content"),
+        "sentiment": row["sentiment"],
+        "score": float(row.get("score") or 0),
+        "confidence": float(row.get("confidence") or 0),
+        "topics": db.jloads(row.get("topics"), []),
+        "risks": db.jloads(row.get("risks"), []),
+        "stance": row.get("stance") or "unclear",
+        "issue_summary": row.get("issue_summary"),
+        "intensity": float(row.get("intensity") or 0),
+        "weight_snapshot": float(row.get("weight_snapshot") or 1),
+        "evidence": row.get("evidence"),
+        "fallback_type": row.get("fallback_type") or "none",
+        "model": row.get("model"),
+        "keyword": row.get("keyword"),
+        "post_url": row.get("post_url"),
+        "analyzed_at": iso_or_none(row.get("analyzed_at")),
+        "citation": f"comment-{row['comment_id']}",
     }
 
 
@@ -3593,6 +3681,18 @@ def analyze_weibo_comments_fixture(fixture_path, now):
 def analyze_weibo_comment_record(comment, now):
     content = comment.get("text") or comment.get("content") or ""
     base = analyze_comment(content)
+    return build_weibo_comment_analysis(comment, now, base)
+
+
+def analyze_weibo_comment_record_with_local_rules(comment, now):
+    content = comment.get("text") or comment.get("content") or ""
+    base = fallback_analysis(content)
+    base["model"] = "local-rules"
+    return build_weibo_comment_analysis(comment, now, base)
+
+
+def build_weibo_comment_analysis(comment, now, base):
+    content = comment.get("text") or comment.get("content") or ""
     risks = base.get("risks") or []
     weight = comment_weight(
         int(comment.get("like_count") or 0),
@@ -3664,7 +3764,7 @@ def run_deepseek_fixture(comments_path, now, response_path=None, simulate_failur
                 "message": f"Simulated DeepSeek failure: {simulate_failure}",
             },
             "raw_comments": comments,
-            "analyses": [analyze_weibo_comment_record(comment, now) for comment in comments],
+            "analyses": [analyze_weibo_comment_record_with_local_rules(comment, now) for comment in comments],
             "agent_runs": [
                 {"agent_name": "DeepSeek Weibo Analysis", "status": "running"},
                 {"agent_name": "DeepSeek Weibo Analysis", "status": "failed", "error_type": "deepseek_failed"},

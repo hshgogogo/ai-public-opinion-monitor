@@ -2,6 +2,8 @@ const state = {
   workbench: null,
   comments: [],
   commentsError: null,
+  analyses: [],
+  analysesError: null,
   pendingActionConfirmation: null,
   submittingActionIds: new Set()
 };
@@ -22,6 +24,7 @@ const els = {
   events: document.querySelector("#events"),
   pendingActions: document.querySelector("#pendingActions"),
   comments: document.querySelector("#comments"),
+  analyses: document.querySelector("#analyses"),
   dataGaps: document.querySelector("#dataGaps"),
   citations: document.querySelector("#citations"),
   lastAction: document.querySelector("#lastAction"),
@@ -41,13 +44,16 @@ window.setInterval(refreshWorkbench, 30000);
 
 async function refreshWorkbench() {
   try {
-    const [workbench, comments] = await Promise.all([
+    const [workbench, comments, analyses] = await Promise.all([
       fetchJson("/api/weibo/workbench"),
-      fetchJson("/api/weibo/comments?limit=20")
+      fetchJson("/api/weibo/comments?limit=20"),
+      fetchJson("/api/weibo/analyses?limit=20")
     ]);
     state.workbench = workbench;
     state.comments = comments?.ok === false ? [] : comments.comments || [];
     state.commentsError = comments?.ok === false ? comments : null;
+    state.analyses = analyses?.ok === false ? [] : analyses.analyses || [];
+    state.analysesError = analyses?.ok === false ? analyses : null;
     const blocked = state.workbench?.ok === false || Boolean(state.workbench?.error_type);
     setConnection(!blocked, blocked ? "依赖未就绪" : "微博 Agent 就绪");
     renderWorkbench();
@@ -55,6 +61,8 @@ async function refreshWorkbench() {
     setConnection(false, "读取失败");
     state.comments = [];
     state.commentsError = { message: error.message };
+    state.analyses = [];
+    state.analysesError = { message: error.message };
     setText(els.lastAction, error.message);
   }
 }
@@ -188,6 +196,7 @@ function renderWorkbench() {
   renderEvents(workbench.events || []);
   renderActions(workbench.pendingActions || []);
   renderComments(state.comments || [], state.commentsError);
+  renderAnalyses(state.analyses || [], state.analysesError);
   renderDataGaps(dataGaps);
   renderCitations(workbench.citations || []);
 }
@@ -463,6 +472,41 @@ function commentCard(comment) {
         <span>回复 ${escapeHtml(String(comment.reply_count ?? 0))}</span>
         <span>帖子 ${escapeHtml(comment.post_external_id || "-")}</span>
         <span>引用 ${escapeHtml(comment.citation || "-")}</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderAnalyses(analyses, error) {
+  if (error) {
+    setHtml(els.analyses, empty({
+      title: "分析暂不可用",
+      message: error.fix || error.message || "连接 MySQL 并完成评论分析后才能读取分析结果。",
+      actionLabel: "查看数据缺口",
+      scrollTarget: "#dataGaps"
+    }));
+    return;
+  }
+  setHtml(els.analyses, analyses.length
+    ? analyses.map(analysisCard).join("")
+    : empty({ title: "暂无评论分析", message: "采集评论并运行分析后，这里会显示议题、立场、风险和证据句。" }));
+}
+
+function analysisCard(analysis) {
+  const topics = formatList(analysis.topics);
+  const risks = formatList(analysis.risks);
+  return `
+    <section class="list-item analysis-card">
+      <div class="card-head">
+        <strong>${escapeHtml(analysis.issue_summary || analysis.sentiment || "评论分析")}</strong>
+        ${chip(stateLabel(analysis.stance || "unclear"), "trust")}
+      </div>
+      <p>${escapeHtml(analysis.evidence || analysis.content || "")}</p>
+      <div class="comment-meta">
+        <span>情绪 ${escapeHtml(stateLabel(analysis.sentiment || "neutral"))}</span>
+        <span>议题 ${escapeHtml(topics)}</span>
+        <span>风险 ${escapeHtml(risks)}</span>
+        <span>引用 ${escapeHtml(analysis.citation || "-")}</span>
       </div>
     </section>
   `;
