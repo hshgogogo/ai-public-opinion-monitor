@@ -27,9 +27,9 @@
 
 ## 4. 偏好影响后续建议与问答
 
-- [ ] 4.1 `weibo-actions-build` 读取 preference memory。
-- [ ] 4.2 用户拒绝公开澄清偏好会降低或替换公开澄清建议。
-- [ ] 4.3 action reason/raw_json 引用 preference memory ID。
+- [x] 4.1 `weibo-actions-build` 读取 preference memory。
+- [x] 4.2 用户拒绝公开澄清偏好会降低或替换公开澄清建议。
+- [x] 4.3 action reason/raw_json 引用 preference memory ID。
 - [ ] 4.4 `weibo-bot-message` 可引用 preference memory，且不把偏好写成外部事实。
 
 ## 5. 验证
@@ -38,7 +38,7 @@
 - [x] 5.2 增加 worker command static/no-DB tests。
 - [x] 5.3 增加真实 MySQL event feedback persistence tests。
 - [x] 5.4 增加 event cross-project source 拒绝测试。
-- [ ] 5.5 增加 preference 影响 action build 测试。
+- [x] 5.5 增加 preference 影响 action build 测试。
 - [x] 5.6 运行定向测试。
 - [x] 5.7 运行真实 MySQL schema/migration 测试。
 - [x] 5.8 运行 `npm test`。

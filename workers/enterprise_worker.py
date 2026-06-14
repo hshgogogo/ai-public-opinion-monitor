@@ -3052,7 +3052,8 @@ def weibo_actions_build_payload(payload_json="{}"):
                     (project["id"], limit),
                 )
                 rows = cur.fetchall()
-        actions = [action_from_event(row, now) for row in rows]
+                preference_memories = load_preference_memories(cur, project["id"])
+        actions = [action_from_event(row, now, preference_memories) for row in rows]
         persisted = persist_publicity_actions(project["id"], actions, {"by_external_id": {}, "by_display_name": {}, "all_ids": []}) if actions else 0
         result = {
             "ok": True,
@@ -3078,21 +3079,52 @@ def weibo_actions_build_payload(payload_json="{}"):
     return run_attached_worker_command(attachment, run)
 
 
-def action_from_event(row, now):
+def load_preference_memories(cur, project_id):
+    cur.execute(
+        """
+        SELECT id, memory_identity, title, summary, memory_json, importance
+        FROM bot_memory_items
+        WHERE project_id=%s AND source_kind='preference'
+        ORDER BY importance DESC, updated_at DESC, id DESC
+        LIMIT 20
+        """,
+        (project_id,),
+    )
+    return [preference_memory_payload(row) for row in cur.fetchall()]
+
+
+def preference_memory_payload(row):
+    memory_json = db.jloads(row.get("memory_json"), {})
+    return {
+        "id": row["id"],
+        "memory_identity": row.get("memory_identity"),
+        "title": row.get("title"),
+        "summary": row.get("summary"),
+        "memory_json": memory_json,
+        "preference_type": memory_json.get("preference_type"),
+        "source_of_truth": memory_json.get("source_of_truth"),
+        "importance": float(row.get("importance") or 0),
+    }
+
+
+def action_from_event(row, now, preference_memories=None):
     event = event_row_to_payload(row)
     evidence_ids = [numeric_id(item) for item in event.get("evidence_ids", [])]
     if not evidence_ids:
         evidence_ids = [row["id"]]
     action_type = recommended_action_type(event)
+    preference_constraint = action_preference_constraint(action_type, preference_memories or [])
+    if preference_constraint:
+        action_type = "monitor_and_prepare_material"
     return {
-        "id": f"agent-event-{row['id']}-{action_type}",
+        "id": f"agent-event-{row['id']}",
         "source": "agent_recommended",
         "platform": "weibo",
         "related_event_id": row["id"],
         "confirmation_status": "pending",
         "action_type": action_type,
-        "content_summary": recommended_action_summary(event),
-        "reason": recommended_action_reason(event),
+        "content_summary": recommended_action_summary(event, action_type),
+        "reason": recommended_action_reason(event, preference_constraint),
         "evidence_ids": evidence_ids,
         "priority": recommended_action_priority(event),
         "owner_suggestion": "宣发负责人",
@@ -3101,6 +3133,7 @@ def action_from_event(row, now):
         "confirmed_at": None,
         "effective_at": None,
         "recommended_check_after_at": now,
+        "raw_json": action_preference_raw_json(preference_constraint),
     }
 
 
@@ -3113,17 +3146,43 @@ def recommended_action_type(event):
     return "monitor_and_prepare_material"
 
 
-def recommended_action_summary(event):
-    if recommended_action_type(event) == "clarify_official_announcement":
+def action_preference_constraint(action_type, preference_memories):
+    if action_type != "clarify_official_announcement":
+        return None
+    for memory in preference_memories:
+        preference_type = str(memory.get("preference_type") or "").strip()
+        if preference_type == "avoid_public_clarification":
+            return memory
+    return None
+
+
+def action_preference_raw_json(preference_constraint):
+    if not preference_constraint:
+        return {}
+    return {
+        "preference_memory_ids": [preference_constraint["id"]],
+        "preference_memory_identity": preference_constraint.get("memory_identity"),
+        "preference_type": preference_constraint.get("preference_type"),
+        "preference_constraint_source": preference_constraint.get("source_of_truth") or "user_feedback",
+        "preference_not_external_fact": True,
+    }
+
+
+def recommended_action_summary(event, action_type=None):
+    action_type = action_type or recommended_action_type(event)
+    if action_type == "clarify_official_announcement":
         return "准备微博官宣节奏澄清素材，明确可公开信息与不回应边界。"
     if event.get("risk_level") in {"high", "critical"}:
         return "整理高风险议题回应口径，安排后续评论窗口复查。"
     return "持续观察该微博议题，并准备低风险生活方式或物料补充。"
 
 
-def recommended_action_reason(event):
+def recommended_action_reason(event, preference_constraint=None):
     evidence_ids = event.get("evidence_ids") or []
-    return f"{event.get('title') or '微博事件'} 已形成 {len(evidence_ids)} 条证据，当前风险 {event.get('risk_level') or 'unknown'}，建议先进入人工确认队列。"
+    base = f"{event.get('title') or '微博事件'} 已形成 {len(evidence_ids)} 条证据，当前风险 {event.get('risk_level') or 'unknown'}，建议先进入人工确认队列。"
+    if not preference_constraint:
+        return base
+    return f"{base} 用户偏好记忆 #{preference_constraint['id']} 要求避免默认公开澄清，本建议改为继续观察并准备材料。"
 
 
 def recommended_action_priority(event):
@@ -3696,6 +3755,9 @@ def persist_publicity_actions(project_id, actions, account_ids):
                 source_account_id = account_ids["by_external_id"].get(action.get("source_account_external_id"))
                 related_event_id = int(action["related_event_id"]) if str(action.get("related_event_id") or "").isdigit() else None
                 identity = action.get("action_identity") or publicity_action_identity(action, related_event_id)
+                legacy_identity = existing_pending_clarify_action_identity(cur, project_id, action, related_event_id)
+                if legacy_identity:
+                    identity = legacy_identity
                 cur.execute(
                     """
                     INSERT INTO publicity_actions(
@@ -3750,19 +3812,47 @@ def persist_publicity_actions(project_id, actions, account_ids):
                     ),
                 )
                 action_id = cur.lastrowid
+                cur.execute("SELECT * FROM publicity_actions WHERE id=%s", (action_id,))
+                persisted_action = action_row_to_payload(cur.fetchone())
                 persisted += 1
                 write_memory_item(
                     project_id,
                     "action",
                     action_id,
-                    f"Weibo action: {action.get('action_type', 'unknown')}",
-                    action.get("content_summary") or action.get("reason") or "Persisted Weibo publicity action.",
-                    action.get("evidence_ids", []),
-                    action,
+                    f"Weibo action: {persisted_action.get('action_type', 'unknown')}",
+                    persisted_action.get("content_summary") or persisted_action.get("reason") or "Persisted Weibo publicity action.",
+                    persisted_action.get("evidence_ids", []),
+                    persisted_action,
                     0.7,
                     memory_identity=f"action:{action.get('id') or action_id}",
                 )
     return persisted
+
+
+def existing_pending_clarify_action_identity(cur, project_id, action, related_event_id):
+    if not related_event_id:
+        return None
+    raw_json = action.get("raw_json") if isinstance(action.get("raw_json"), dict) else {}
+    if not raw_json.get("preference_memory_ids"):
+        return None
+    if action.get("source") != "agent_recommended" or action.get("action_type") != "monitor_and_prepare_material":
+        return None
+    cur.execute(
+        """
+        SELECT action_identity
+        FROM publicity_actions
+        WHERE project_id=%s
+          AND platform='weibo'
+          AND related_event_id=%s
+          AND source='agent_recommended'
+          AND action_type='clarify_official_announcement'
+        ORDER BY FIELD(confirmation_status,'rejected','confirmed','partial','uncertain','pending'), id DESC
+        LIMIT 1
+        """,
+        (project_id, related_event_id),
+    )
+    row = cur.fetchone()
+    return row.get("action_identity") if row else None
 
 
 def publicity_action_identity(action, related_event_id=None):

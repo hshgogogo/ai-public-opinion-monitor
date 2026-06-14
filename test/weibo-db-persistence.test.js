@@ -1208,6 +1208,374 @@ test(
 );
 
 test(
+  "uses preference memory to replace public clarification recommendations",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    queryRows(
+      `
+      INSERT INTO artist_public_opinion_events(
+        project_id, platform, event_identity, event_type, title, trigger_summary,
+        related_artists, status, risk_level, event_score, evidence_ids,
+        timeline_json, impact_assessment, recommended_actions, first_seen_at, last_seen_at
+      )
+      VALUES (
+        %s, 'weibo', 'preference-action-event', 'formal_event',
+        '官宣可信度争议', '多条评论质疑官宣可信度',
+        JSON_ARRAY('刘昊然'), 'observing', 'medium', 11.5,
+        JSON_ARRAY(101,102), JSON_ARRAY(),
+        '用户围绕官宣可信度反复争议', JSON_ARRAY(), NOW(), NOW()
+      )
+      `,
+      [projectId]
+    );
+    const eventId = queryRows(
+      "SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity='preference-action-event'",
+      [projectId]
+    )[0].id;
+
+    const initialActions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, now: "2026-06-10T11:00:00Z" })
+    ]);
+    assert.equal(initialActions.ok, true);
+    assert.equal(initialActions.actions[0].action_type, "clarify_official_announcement");
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND related_event_id=%s AND action_type='clarify_official_announcement' AND confirmation_status='pending'",
+      [projectId, eventId]
+    )[0].count, 1);
+
+    const preference = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceId: "public-clarification-policy",
+        preferenceType: "avoid_public_clarification",
+        summary: "团队不希望默认推荐公开澄清，除非争议明显扩大。"
+      })
+    ]);
+    assert.equal(preference.ok, true);
+
+    const builtActions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(builtActions.ok, true);
+    assert.equal(builtActions.persisted_actions, 1);
+    assert.equal(builtActions.actions.length, 1);
+    assert.equal(builtActions.actions[0].related_event_id, eventId);
+    assert.notEqual(builtActions.actions[0].action_type, "clarify_official_announcement");
+    assert.equal(builtActions.actions[0].action_type, "monitor_and_prepare_material");
+    assert.match(builtActions.actions[0].reason, /用户偏好/);
+    assert.deepEqual(builtActions.actions[0].raw_json.preference_memory_ids, [preference.memory.id]);
+    assert.equal(builtActions.actions[0].raw_json.preference_constraint_source, "user_feedback");
+
+    const actionRow = queryRows(
+      "SELECT action_type, reason, JSON_EXTRACT(raw_json, '$.raw_json.preference_memory_ids[0]') AS memory_id, JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.raw_json.preference_constraint_source')) AS source FROM publicity_actions WHERE project_id=%s AND related_event_id=%s",
+      [projectId, eventId]
+    )[0];
+    assert.equal(actionRow.action_type, "monitor_and_prepare_material");
+    assert.match(actionRow.reason, /用户偏好/);
+    assert.equal(Number(actionRow.memory_id), preference.memory.id);
+    assert.equal(actionRow.source, "user_feedback");
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND related_event_id=%s AND confirmation_status='pending'",
+      [projectId, eventId]
+    )[0].count, 1);
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND related_event_id=%s AND action_type='clarify_official_announcement' AND confirmation_status='pending'",
+      [projectId, eventId]
+    )[0].count, 0);
+
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const legacyProjectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    queryRows(
+      `
+      INSERT INTO artist_public_opinion_events(
+        project_id, platform, event_identity, event_type, title, trigger_summary,
+        related_artists, status, risk_level, event_score, evidence_ids,
+        timeline_json, impact_assessment, recommended_actions, first_seen_at, last_seen_at
+      )
+      VALUES (
+        %s, 'weibo', 'legacy-preference-action-event', 'formal_event',
+        '官宣可信度旧建议', '评论质疑官宣可信度',
+        JSON_ARRAY('刘昊然'), 'observing', 'medium', 11.5,
+        JSON_ARRAY(151,152), JSON_ARRAY(),
+        '用户围绕官宣可信度争议', JSON_ARRAY(), NOW(), NOW()
+      )
+      `,
+      [legacyProjectId]
+    );
+    const legacyEventId = queryRows(
+      "SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity='legacy-preference-action-event'",
+      [legacyProjectId]
+    )[0].id;
+    queryRows(
+      `
+      INSERT INTO publicity_actions(
+        project_id, platform, related_event_id, source, action_identity,
+        confirmation_status, action_type, content_summary, reason, evidence_ids,
+        priority, owner_suggestion, confidence, raw_json
+      )
+      VALUES (
+        %s, 'weibo', %s, 'agent_recommended',
+        CONCAT('agent_recommended::legacy-', %s),
+        'pending', 'clarify_official_announcement',
+        '旧版准备微博官宣节奏澄清素材', '旧版 action identity 行为',
+        JSON_ARRAY(151,152), 'medium', '宣发负责人', 0.7, JSON_OBJECT('legacy', true)
+      )
+      `,
+      [legacyProjectId, legacyEventId, legacyEventId]
+    );
+    const legacyPreference = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId: legacyProjectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "avoid_public_clarification",
+        summary: "团队不希望默认推荐公开澄清。"
+      })
+    ]);
+    assert.equal(legacyPreference.ok, true);
+    const legacyRebuild = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId: legacyProjectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(legacyRebuild.ok, true);
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND related_event_id=%s AND source='agent_recommended'",
+      [legacyProjectId, legacyEventId]
+    )[0].count, 1);
+    assert.deepEqual(queryRows(
+      "SELECT action_type, confirmation_status FROM publicity_actions WHERE project_id=%s AND related_event_id=%s",
+      [legacyProjectId, legacyEventId]
+    )[0], {
+      action_type: "monitor_and_prepare_material",
+      confirmation_status: "pending"
+    });
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND related_event_id=%s AND action_type='clarify_official_announcement'",
+      [legacyProjectId, legacyEventId]
+    )[0].count, 0);
+
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const legacyRejectedProjectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    queryRows(
+      `
+      INSERT INTO artist_public_opinion_events(
+        project_id, platform, event_identity, event_type, title, trigger_summary,
+        related_artists, status, risk_level, event_score, evidence_ids,
+        timeline_json, impact_assessment, recommended_actions, first_seen_at, last_seen_at
+      )
+      VALUES (
+        %s, 'weibo', 'legacy-rejected-preference-action-event', 'formal_event',
+        '官宣可信度旧驳回建议', '评论质疑官宣可信度',
+        JSON_ARRAY('刘昊然'), 'observing', 'medium', 11.5,
+        JSON_ARRAY(161,162), JSON_ARRAY(),
+        '用户围绕官宣可信度争议', JSON_ARRAY(), NOW(), NOW()
+      )
+      `,
+      [legacyRejectedProjectId]
+    );
+    const legacyRejectedEventId = queryRows(
+      "SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity='legacy-rejected-preference-action-event'",
+      [legacyRejectedProjectId]
+    )[0].id;
+    queryRows(
+      `
+      INSERT INTO publicity_actions(
+        project_id, platform, related_event_id, source, action_identity,
+        confirmation_status, action_type, content_summary, reason, evidence_ids,
+        priority, owner_suggestion, confidence, raw_json
+      )
+      VALUES (
+        %s, 'weibo', %s, 'agent_recommended',
+        CONCAT('agent_recommended::legacy-rejected-', %s),
+        'rejected', 'clarify_official_announcement',
+        '旧版已驳回官宣澄清建议', '用户已经驳回旧版建议',
+        JSON_ARRAY(161,162), 'medium', '宣发负责人', 0.7, JSON_OBJECT('legacy', true)
+      )
+      `,
+      [legacyRejectedProjectId, legacyRejectedEventId, legacyRejectedEventId]
+    );
+    const legacyRejectedPreference = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId: legacyRejectedProjectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "avoid_public_clarification",
+        summary: "团队不希望默认推荐公开澄清。"
+      })
+    ]);
+    assert.equal(legacyRejectedPreference.ok, true);
+    const legacyRejectedRebuild = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId: legacyRejectedProjectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(legacyRejectedRebuild.ok, true);
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND related_event_id=%s AND source='agent_recommended'",
+      [legacyRejectedProjectId, legacyRejectedEventId]
+    )[0].count, 1);
+    assert.deepEqual(queryRows(
+      "SELECT action_type, confirmation_status FROM publicity_actions WHERE project_id=%s AND related_event_id=%s",
+      [legacyRejectedProjectId, legacyRejectedEventId]
+    )[0], {
+      action_type: "clarify_official_announcement",
+      confirmation_status: "rejected"
+    });
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='action' AND memory_identity LIKE %s AND JSON_CONTAINS_PATH(memory_json, 'one', '$.raw_json.preference_memory_ids')",
+      [legacyRejectedProjectId, "action:agent-event-%"]
+    )[0].count, 0);
+
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const rejectedProjectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    queryRows(
+      `
+      INSERT INTO artist_public_opinion_events(
+        project_id, platform, event_identity, event_type, title, trigger_summary,
+        related_artists, status, risk_level, event_score, evidence_ids,
+        timeline_json, impact_assessment, recommended_actions, first_seen_at, last_seen_at
+      )
+      VALUES (
+        %s, 'weibo', 'rejected-preference-action-event', 'formal_event',
+        '官宣可信度二次争议', '评论继续质疑官宣可信度',
+        JSON_ARRAY('刘昊然'), 'observing', 'medium', 11.5,
+        JSON_ARRAY(201,202), JSON_ARRAY(),
+        '用户围绕官宣可信度继续争议', JSON_ARRAY(), NOW(), NOW()
+      )
+      `,
+      [rejectedProjectId]
+    );
+    const rejectedEventId = queryRows(
+      "SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity='rejected-preference-action-event'",
+      [rejectedProjectId]
+    )[0].id;
+    const rejectedInitial = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId: rejectedProjectId, now: "2026-06-10T11:00:00Z" })
+    ]);
+    assert.equal(rejectedInitial.actions[0].action_type, "clarify_official_announcement");
+    const rejectedAction = queryRows(
+      "SELECT id FROM publicity_actions WHERE project_id=%s AND related_event_id=%s AND action_type='clarify_official_announcement'",
+      [rejectedProjectId, rejectedEventId]
+    )[0];
+    const rejectedFeedback = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId: rejectedProjectId,
+        sourceType: "action",
+        sourceId: rejectedAction.id,
+        feedbackType: "action_rejected",
+        note: "用户已驳回这条 Agent 建议。"
+      })
+    ]);
+    assert.equal(rejectedFeedback.ok, true);
+    const rejectedPreference = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId: rejectedProjectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "avoid_public_clarification",
+        summary: "团队不希望默认推荐公开澄清。"
+      })
+    ]);
+    assert.equal(rejectedPreference.ok, true);
+    const rebuildAfterRejected = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId: rejectedProjectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(rebuildAfterRejected.ok, true);
+    assert.equal(queryRows(
+      "SELECT COUNT(*) AS count FROM publicity_actions WHERE project_id=%s AND related_event_id=%s",
+      [rejectedProjectId, rejectedEventId]
+    )[0].count, 1);
+    assert.deepEqual(queryRows(
+      "SELECT confirmation_status, action_type FROM publicity_actions WHERE id=%s",
+      [rejectedAction.id]
+    )[0], {
+      confirmation_status: "rejected",
+      action_type: "clarify_official_announcement"
+    });
+    const rejectedActionMemory = queryRows(
+      "SELECT summary, memory_json FROM bot_memory_items WHERE project_id=%s AND source_kind='action' AND memory_identity=%s",
+      [rejectedProjectId, `action:agent-event-${rejectedEventId}`]
+    )[0];
+    assert.match(rejectedActionMemory.summary, /官宣节奏澄清/);
+    assert.equal(
+      queryRows(
+        "SELECT COUNT(*) AS count FROM bot_memory_items WHERE project_id=%s AND source_kind='action' AND memory_identity=%s AND JSON_CONTAINS_PATH(memory_json, 'one', '$.raw_json.preference_memory_ids')",
+        [rejectedProjectId, `action:agent-event-${rejectedEventId}`]
+      )[0].count,
+      0
+    );
+
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const neutralProjectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    queryRows(
+      `
+      INSERT INTO artist_public_opinion_events(
+        project_id, platform, event_identity, event_type, title, trigger_summary,
+        related_artists, status, risk_level, event_score, evidence_ids,
+        timeline_json, impact_assessment, recommended_actions, first_seen_at, last_seen_at
+      )
+      VALUES (
+        %s, 'weibo', 'neutral-preference-action-event', 'formal_event',
+        '官宣可信度中性争议', '评论讨论官宣可信度',
+        JSON_ARRAY('刘昊然'), 'observing', 'medium', 11.5,
+        JSON_ARRAY(301,302), JSON_ARRAY(),
+        '用户围绕官宣可信度讨论', JSON_ARRAY(), NOW(), NOW()
+      )
+      `,
+      [neutralProjectId]
+    );
+    const neutralPreference = runWorker([
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId: neutralProjectId,
+        sourceType: "preference",
+        feedbackType: "preference_added",
+        preferenceType: "clarification_policy",
+        summary: "团队不是不公开澄清，只是不反对先准备澄清材料。"
+      })
+    ]);
+    assert.equal(neutralPreference.ok, true);
+    const neutralActions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId: neutralProjectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(neutralActions.ok, true);
+    assert.equal(neutralActions.actions[0].action_type, "clarify_official_announcement");
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
