@@ -307,6 +307,30 @@ test("Agent Harness worker ledger commands return standard errors for malformed 
   }
 });
 
+test("Agent Harness foundation docs preserve compatibility boundaries", () => {
+  const readme = readText("README.md");
+  const server = readText("src/server.js");
+  const frontend = readText("public/app.js");
+  const worker = readText("workers/enterprise_worker.py");
+
+  assert.match(readme, /Agent Harness Foundation/);
+  assert.match(readme, /worker-only contract/);
+  assert.match(readme, /不新增 public HTTP endpoint/);
+  assert.match(readme, /不修改前端 workbench/);
+  assert.match(readme, /weibo-comments-analyze/);
+  assert.match(readme, /weibo-events-build/);
+  assert.match(readme, /weibo-actions-build/);
+  assert.match(readme, /weibo-bot-message/);
+  assert.match(readme, /haidao-agent-loop-step-attachment/);
+  assert.match(readme, /haidao-feedback-memory-loop/);
+
+  assert.doesNotMatch(server, /agent-loop\/run|agent-runs/i);
+  assert.doesNotMatch(frontend, /agent-loop\/run|agent-runs|weibo-agent-loop/i);
+  for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
+    assert.doesNotMatch(worker, new RegExp(`${command}[\\s\\S]{0,200}agentLoopRunId`));
+  }
+});
+
 test("OpenSpec tasks include real environment and design pass evidence", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md")
     || readText("openspec/changes/archive/2026-06-11-haidao-weibo-agent-mvp/tasks.md");

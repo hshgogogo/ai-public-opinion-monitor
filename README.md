@@ -47,6 +47,20 @@ python workers/enterprise_worker.py weibo-fixture-e2e --now 2026-06-10T12:00:00Z
 - Agent 不自动发帖，不保管账号密码，不绕过验证码或反爬机制。
 - 没有足够 evidence 时，Q&A、report、backtest 必须返回 insufficient-data 或 unknown，不能编造事件、评论或行动效果。
 
+### Agent Harness Foundation
+
+当前 `haidao-agent-harness-loop-foundation` change 只建立 Agent Loop 账本和 worker-only contract。可用命令包括：
+
+```bash
+python workers/enterprise_worker.py weibo-agent-loop-run --payload-json '{"triggerMode":"manual","input":{}}'
+python workers/enterprise_worker.py weibo-agent-loop-status --payload-json '{"loopRunId":1}'
+python workers/enterprise_worker.py weibo-agent-loop-step --payload-json '{"loopRunId":1,"agentName":"Issue Analysis Agent","stepName":"comment_analysis","status":"running"}'
+python workers/enterprise_worker.py weibo-agent-loop-judge-review --payload-json '{"loopRunId":1,"judgeAgentName":"Judge Agent","status":"pending"}'
+python workers/enterprise_worker.py weibo-agent-loop-handoff --payload-json '{"sourceType":"loop","sourceId":1,"feedbackType":"manual_handoff"}'
+```
+
+本 foundation change 不新增 public HTTP endpoint，不修改前端 workbench，不把 `weibo-comments-analyze`、`weibo-events-build`、`weibo-actions-build` 或 `weibo-bot-message` 强制挂载到 Agent Loop。可选 `agentLoopRunId` step attachment 属于后续 `haidao-agent-loop-step-attachment` change；完整用户确认、驳回、偏好写回语义属于后续 `haidao-feedback-memory-loop` change。
+
 面向影视制作公司的企业级 AI 舆情监测 Web 服务。系统限定监控小红书、抖音、微博，使用授权 Cookie 采集真实内容，写入本机 MySQL，并由 DeepSeek Agent 做逐评论情感分析和营销策略生成。
 
 ## 已实现

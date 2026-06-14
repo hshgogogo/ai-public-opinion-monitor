@@ -23,10 +23,10 @@
 
 ## 4. Compatibility Boundaries
 
-- [ ] 4.1 Preserve standalone behavior of `weibo-comments-analyze`, `weibo-events-build`, `weibo-actions-build`, and `weibo-bot-message`.
-- [ ] 4.2 Document that optional step attachment belongs to `haidao-agent-loop-step-attachment`.
-- [ ] 4.3 Ensure this change does not add public HTTP endpoints.
-- [ ] 4.4 Ensure this change does not add front-end workbench behavior.
+- [x] 4.1 Preserve standalone behavior of `weibo-comments-analyze`, `weibo-events-build`, `weibo-actions-build`, and `weibo-bot-message`.
+- [x] 4.2 Document that optional step attachment belongs to `haidao-agent-loop-step-attachment`.
+- [x] 4.3 Ensure this change does not add public HTTP endpoints.
+- [x] 4.4 Ensure this change does not add front-end workbench behavior.
 
 ## 5. Manual Handoff Skeleton
 
