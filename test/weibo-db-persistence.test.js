@@ -227,6 +227,42 @@ test(
     assert.equal(workbenchAfterAnalysisOnly.setup.progress.analysis_count > 0, true);
     assert.equal(workbenchAfterAnalysisOnly.dataGaps.some((gap) => gap.code === "weibo_event_needed"), true);
 
+    const builtEvents = runWorker([
+      "weibo-events-build",
+      "--payload-json",
+      JSON.stringify({ projectId })
+    ]);
+    assert.equal(builtEvents.ok, true);
+    assert.equal(builtEvents.deepseek.status, "not_run");
+    assert.equal(builtEvents.persisted_events > 0, true);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [projectId])[0].count, builtEvents.persisted_events);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM event_evidence_links")[0].count > 0, true);
+    const builtEventsAgain = runWorker([
+      "weibo-events-build",
+      "--payload-json",
+      JSON.stringify({ projectId })
+    ]);
+    assert.equal(builtEventsAgain.persisted_events, builtEvents.persisted_events);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM artist_public_opinion_events WHERE project_id=%s", [projectId])[0].count, builtEvents.persisted_events);
+    const realEvents = runWorker([
+      "weibo-events",
+      "--payload-json",
+      JSON.stringify({ projectId })
+    ]);
+    assert.equal(realEvents.ok, true);
+    assert.equal(realEvents.events.length, builtEvents.persisted_events);
+    assert.equal(realEvents.events[0].platform, "weibo");
+    assert.equal(Object.hasOwn(realEvents.events[0], "evidence_ids"), true);
+    const realEventDetail = runWorker([
+      "weibo-events",
+      "--event-id",
+      String(realEvents.events[0].id),
+      "--payload-json",
+      JSON.stringify({ projectId })
+    ]);
+    assert.equal(realEventDetail.ok, true);
+    assert.equal(realEventDetail.event.id, realEvents.events[0].id);
+
     queryRows(
       "INSERT INTO monitor_projects(project_name, category, audience, keywords, actors, active_platforms) VALUES (%s,%s,%s,%s,%s,%s)",
       [

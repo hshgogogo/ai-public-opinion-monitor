@@ -77,6 +77,7 @@ def main():
     add_payload_parser(sub, "weibo-analyses")
     collect_target = add_payload_parser(sub, "weibo-collect-target")
     collect_target.add_argument("--target-id", required=True)
+    add_payload_parser(sub, "weibo-events-build")
     events = add_payload_parser(sub, "weibo-events")
     events.add_argument("--event-id")
     add_payload_parser(sub, "weibo-actions-pending")
@@ -159,8 +160,10 @@ def main():
             emit(weibo_analyses_payload(args.payload_json))
         elif args.command == "weibo-collect-target":
             emit(weibo_collect_target_payload(args.payload_json, args.target_id))
+        elif args.command == "weibo-events-build":
+            emit(weibo_events_build_payload(args.payload_json))
         elif args.command == "weibo-events":
-            emit(real_weibo_endpoint_payload("GET /api/weibo/events", args.payload_json, event_id=args.event_id))
+            emit(weibo_events_payload(args.payload_json, args.event_id))
         elif args.command == "weibo-actions-pending":
             emit(weibo_actions_pending_payload(args.payload_json))
         elif args.command == "weibo-action-confirm":
@@ -1249,6 +1252,180 @@ def analysis_row_to_payload(row):
         "post_url": row.get("post_url"),
         "analyzed_at": iso_or_none(row.get("analyzed_at")),
         "citation": f"comment-{row['comment_id']}",
+    }
+
+
+def weibo_events_build_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/events/build"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=500, maximum=2000)
+    evidence = load_weibo_analysis_evidence(project["id"], limit)
+    if not evidence:
+        return {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "events": [],
+            "persisted_events": 0,
+            "data_gap": "no_analysis_evidence",
+            "deepseek": {"status": "not_run", "reason": "no_analysis_evidence"},
+        }
+    grouped = {}
+    for item in evidence:
+        for issue in recall_issue_keys(item):
+            grouped.setdefault(issue, []).append(item)
+    events = []
+    for issue_key, items in grouped.items():
+        for cluster in merge_evidence_window(items):
+            event = build_event_from_evidence(issue_key, cluster)
+            event["event_explanation"] = {"model": "local-rules", "fallback_type": "local_events_slice"}
+            events.append(event)
+    persisted_events = persist_events(project["id"], events)
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "evidence_count": len(evidence),
+        "events": events,
+        "persisted_events": persisted_events,
+        "deepseek": {"status": "not_run", "reason": "local_events_slice"},
+    }
+
+
+def load_weibo_analysis_evidence(project_id, limit):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  sr.id AS analysis_id,
+                  sr.comment_id,
+                  sr.sentiment,
+                  sr.score,
+                  sr.confidence,
+                  sr.topics,
+                  sr.risks,
+                  sr.evidence,
+                  sr.stance,
+                  sr.issue_summary,
+                  sr.intensity,
+                  sr.weight_snapshot,
+                  sr.analyzed_at,
+                  sr.created_at AS analysis_created_at,
+                  c.content,
+                  c.like_count,
+                  c.reply_count,
+                  c.collected_at,
+                  p.external_id AS post_external_id,
+                  p.url AS post_url,
+                  p.keyword
+                FROM sentiment_results sr
+                JOIN social_comments c ON c.id=sr.comment_id
+                JOIN social_posts p ON p.id=c.post_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                ORDER BY sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                LIMIT %s
+                """,
+                (project_id, limit),
+            )
+            rows = cur.fetchall()
+    return [analysis_row_to_event_evidence(row) for row in rows]
+
+
+def analysis_row_to_event_evidence(row):
+    seen_at = row.get("analyzed_at") or row.get("analysis_created_at") or row.get("collected_at")
+    return {
+        "id": row.get("analysis_id"),
+        "analysis_id": row.get("analysis_id"),
+        "comment_id": row.get("comment_id"),
+        "post_external_id": row.get("post_external_id"),
+        "post_url": row.get("post_url"),
+        "keyword": row.get("keyword"),
+        "content": row.get("content") or "",
+        "sentiment": row.get("sentiment") or "neutral",
+        "score": float(row.get("score") or 0),
+        "confidence": float(row.get("confidence") or 0),
+        "topics": db.jloads(row.get("topics"), []),
+        "risks": db.jloads(row.get("risks"), []),
+        "stance": row.get("stance") or "unclear",
+        "issue_summary": row.get("issue_summary"),
+        "intensity": float(row.get("intensity") or 0),
+        "weight": float(row.get("weight_snapshot") or 1),
+        "evidence": row.get("evidence"),
+        "like_count": int(row.get("like_count") or 0),
+        "reply_count": int(row.get("reply_count") or 0),
+        "created_at": iso_or_none(seen_at),
+    }
+
+
+def weibo_events_payload(payload_json="{}", event_id=None):
+    endpoint = "GET /api/weibo/events"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database, event_id=event_id)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=50, maximum=200)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            if event_id:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM artist_public_opinion_events
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    """,
+                    (event_id, project["id"]),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return weibo_error(
+                        "event_not_found",
+                        "Weibo public opinion event was not found.",
+                        "The event id does not match a persisted event for this project.",
+                        "Refresh the Weibo events list and retry.",
+                        docs_anchor="weibo-events",
+                    )
+                return {
+                    "ok": True,
+                    "mode": "weibo-agent-mvp",
+                    "projectId": project["id"],
+                    "event": event_row_to_payload(row),
+                    "citations": [f"event-{row['id']}"],
+                }
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM artist_public_opinion_events
+                WHERE project_id=%s AND platform='weibo'
+                """,
+                (project["id"],),
+            )
+            total = int(cur.fetchone()["count"] or 0)
+            cur.execute(
+                """
+                SELECT *
+                FROM artist_public_opinion_events
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            rows = cur.fetchall()
+    events = [event_row_to_payload(row) for row in rows]
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "limit": limit,
+        "total": total,
+        "events": events,
+        "citations": [f"event-{event['id']}" for event in events],
     }
 
 
