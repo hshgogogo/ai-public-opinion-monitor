@@ -2473,6 +2473,80 @@ test(
 );
 
 test(
+  "answers Weibo Q&A with knowledge card citations as knowledge references",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const commentId = createEvidenceComment(projectId, "knowledge-qa-real-comment");
+    const eventId = createKnowledgeActionEvent(projectId, "knowledge-qa-event", [commentId]);
+    const actionId = createAction(projectId, "knowledge-qa-action");
+    const barbieCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='case:barbie:earned-media-lifestyle-symbol'"
+    )[0].id;
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        triggerMode: "manual",
+        input: { source: "knowledge-qa-test" }
+      })
+    ]);
+    assert.equal(loop.ok, true);
+
+    const botAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        agentLoopRunId: loop.run.id,
+        question: "生活方式视觉符号讨论可以怎么回应？请说明知识依据。"
+      })
+    ]);
+
+    assert.equal(botAnswer.ok, true);
+    assert.equal(botAnswer.answer.error, null);
+    assert.equal(botAnswer.answer.citations.includes(`comment-${commentId}`), true);
+    assert.equal(botAnswer.answer.citations.includes(`event-${eventId}`), true);
+    assert.equal(botAnswer.answer.citations.includes(`action-${actionId}`), true);
+    assert.equal(botAnswer.answer.citations.includes(`knowledge-card-${barbieCardId}`), true);
+    assert.equal(botAnswer.answer.knowledge_references.length > 0, true);
+    const barbieReference = botAnswer.answer.knowledge_references.find((item) => item.card_id === barbieCardId);
+    assert.equal(Boolean(barbieReference), true);
+    assert.equal(barbieReference.id, `knowledge-card-${barbieCardId}`);
+    assert.equal(barbieReference.card_identity, "case:barbie:earned-media-lifestyle-symbol");
+    assert.equal(barbieReference.source_identity, "shortyawards:barbie-2024");
+    assert.equal(barbieReference.reliability_level, "B");
+    assert.equal(barbieReference.citation_role, "knowledge_reference");
+    assert.equal(barbieReference.fact_boundary, "knowledge_reference_not_observed_weibo_fact");
+    assert.equal(
+      barbieReference.citation_url,
+      "https://shortyawards.com/16th/barbie-the-movie-marketing-campaign"
+    );
+    for (const reference of botAnswer.answer.knowledge_references) {
+      assert.equal(reference.fact_boundary, "knowledge_reference_not_observed_weibo_fact");
+      assert.equal(reference.id.startsWith("knowledge-card-"), true);
+    }
+    assert.match(botAnswer.answer.text, /事实|微博证据/);
+    assert.match(botAnswer.answer.text, /知识参考|知识卡/);
+    assert.match(botAnswer.answer.text, /推断|建议/);
+    assert.match(barbieReference.applicable_scenario, /生活方式|视觉符号/);
+    assert.doesNotMatch(botAnswer.answer.facts.join("\n"), /Barbie|Shorty|知识卡|earned media/i);
+    assert.equal(botAnswer.agentStepRun.evidence_ids.includes(`knowledge-card-${barbieCardId}`), false);
+    assert.equal(botAnswer.agentStepRun.evidence_ids.every((citation) => /^(comment|event|action|memory)-\d+$/.test(citation)), true);
+    const conversationMemoryEvidence = JSON.parse(queryRows(
+      "SELECT evidence_ids FROM bot_memory_items WHERE project_id=%s AND source_kind='conversation' ORDER BY id DESC LIMIT 1",
+      [projectId]
+    )[0].evidence_ids);
+    assert.equal(conversationMemoryEvidence.includes(`knowledge-card-${barbieCardId}`), false);
+    assert.equal(conversationMemoryEvidence.every((citation) => /^(comment|event|action|memory)-\d+$/.test(citation)), true);
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

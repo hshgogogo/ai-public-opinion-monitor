@@ -3405,7 +3405,7 @@ def weibo_bot_message_payload(payload_json="{}"):
             "question": question,
             "answer": answer,
         }
-        evidence_ids = list(answer.get("citations") or [])
+        evidence_ids = answer_real_evidence_ids(answer)
         answer_error = answer.get("error") or {}
         status = "succeeded" if evidence_ids and not answer_error else "partial"
         error_type = answer_error.get("error_type") if answer_error else (None if status == "succeeded" else "insufficient_evidence")
@@ -3420,7 +3420,9 @@ def weibo_bot_message_payload(payload_json="{}"):
                 "facts_count": len(answer.get("facts") or []),
                 "inferences_count": len(answer.get("inferences") or []),
                 "recommendations_count": len(answer.get("recommendations") or []),
-                "citation_count": len(evidence_ids),
+                "citation_count": len(answer.get("citations") or []),
+                "evidence_count": len(evidence_ids),
+                "knowledge_reference_count": len(answer.get("knowledge_references") or []),
             },
             evidence_ids=evidence_ids,
             error_type=error_type,
@@ -3522,11 +3524,22 @@ def load_weibo_bot_records(project_id):
                 }
                 for row in cur.fetchall()
             ]
-    return {"targets": [], "comments": comments, "events": events, "actions": actions, "backtests": [], "memory": memory}
+            knowledge_cards = load_active_knowledge_card_rows(cur)
+    return {
+        "project_id": project_id,
+        "targets": [],
+        "comments": comments,
+        "events": events,
+        "actions": actions,
+        "backtests": [],
+        "memory": memory,
+        "knowledge_cards": knowledge_cards,
+    }
 
 
 def persist_bot_exchange(project_id, question, answer):
     citations = answer.get("citations") or []
+    evidence_ids = answer_real_evidence_ids(answer)
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -3563,7 +3576,7 @@ def persist_bot_exchange(project_id, question, answer):
         conversation_id,
         f"Weibo Q&A: {question[:80]}",
         answer.get("text") or "",
-        citations,
+        evidence_ids,
         {"question": question, "answer": answer},
         0.45,
         memory_identity=f"conversation:{conversation_id}",
@@ -7883,6 +7896,7 @@ def answer_weibo_question(records, question):
             "inferences": [],
             "recommendations": [],
             "citations": [],
+            "knowledge_references": [],
             "error": standard_answer_error("insufficient_evidence", "No stored Weibo evidence is available.", "Run Weibo discovery and analysis first."),
         }
     preference_context = bot_preference_context(records.get("memory", []))
@@ -7898,6 +7912,7 @@ def answer_weibo_question(records, question):
                 "recommendations": ["先确认或补充现实动作时间，再采集动作后的评论窗口。"],
                 "citations": citations,
                 "preference_context": preference_context,
+                "knowledge_references": [],
                 "error": standard_answer_error("insufficient_backtest_data", "No confirmed action backtest exists.", "Confirm/log an action and collect post-action windows."),
             }
     events = records.get("events", [])
@@ -7905,6 +7920,8 @@ def answer_weibo_question(records, question):
     actions = records.get("actions", [])
     citations = [item["id"] for item in [*events, *comments[:5], *actions[:5]] if item.get("id")]
     citations.extend([item["id"] for item in preference_context if item.get("id")])
+    knowledge_references = bot_knowledge_references(records, question, citations)
+    citations.extend([item["id"] for item in knowledge_references if item.get("id")])
     facts = []
     if events:
         event = events[0]
@@ -7924,15 +7941,100 @@ def answer_weibo_question(records, question):
         recommendations.append(f"优先处理 {pending_actions[0].get('id')}：{pending_actions[0].get('content_summary') or pending_actions[0].get('reason')}")
     else:
         recommendations.append("先生成或确认一条可执行行动，再收集动作后的微博评论窗口。")
+    knowledge_text = knowledge_answer_suffix(knowledge_references)
     return {
-        "text": "微博负面升高主要来自官宣可信度、非官宣消息和溜粉担忧，相关评论与事件仍在升级观察中。" + preference_answer_suffix(preference_context),
+        "text": "事实/微博证据显示官宣可信度、非官宣消息和溜粉担忧仍是主要讨论点；推断/建议需要在这些证据上生成，不能把知识参考写成当前微博事实。" + knowledge_text + preference_answer_suffix(preference_context),
         "facts": facts,
         "inferences": inferences,
         "recommendations": recommendations,
         "preference_context": preference_context,
+        "knowledge_references": knowledge_references,
         "citations": citations,
         "error": None,
     }
+
+
+def answer_real_evidence_ids(answer):
+    return [
+        citation
+        for citation in unique_evidence_ids(answer.get("citations") or [])
+        if is_real_evidence_reference(citation)
+    ]
+
+
+def is_real_evidence_reference(value):
+    return bool(re.match(r"^(comment|event|action|memory)-[1-9]\d*$", str(value or "")))
+
+
+def bot_knowledge_references(records, question, evidence_ids):
+    project_id = records.get("project_id")
+    knowledge_rows = records.get("knowledge_cards") or []
+    real_evidence_ids = [item for item in unique_evidence_ids(evidence_ids or []) if is_real_evidence_reference(item)]
+    if not project_id or not knowledge_rows or not real_evidence_ids:
+        return []
+    evidence_check = validate_knowledge_evidence(project_id, real_evidence_ids, True)
+    if evidence_check.get("failure_reason"):
+        return []
+    context = bot_knowledge_context(records, question)
+    results = [
+        knowledge_card_validation_result(row, context, real_evidence_ids, evidence_check)
+        for row in knowledge_rows
+    ]
+    passed = [item for item in results if item["passed"] and not item["blocked_by_do_not_apply"]]
+    passed.sort(key=knowledge_result_sort_key)
+    return [bot_knowledge_reference_summary(item) for item in passed[:3]]
+
+
+def bot_knowledge_context(records, question):
+    parts = [question]
+    for event in records.get("events", [])[:5]:
+        parts.extend([
+            event.get("title"),
+            event.get("trigger_summary"),
+            " ".join(event.get("recommended_actions") or []),
+        ])
+    for comment in records.get("comments", [])[:8]:
+        parts.append(comment.get("content"))
+    for action in records.get("actions", [])[:5]:
+        parts.extend([
+            action.get("action_type"),
+            action.get("content_summary"),
+            action.get("reason"),
+        ])
+    text = " ".join(str(part) for part in parts if part)
+    topics = extract_action_knowledge_topics(text)
+    return knowledge_search_context({
+        "platform": "weibo",
+        "query": " ".join([text, *topics]),
+        "topics": topics,
+    })
+
+
+def bot_knowledge_reference_summary(item):
+    citation_role = "weak_inspiration" if item.get("citation_role") == "weak_inspiration" else "knowledge_reference"
+    return {
+        "id": f"knowledge-card-{item.get('card_id')}",
+        "card_id": item.get("card_id"),
+        "card_identity": item.get("card_identity"),
+        "source_id": item.get("source_id"),
+        "source_identity": item.get("source_identity"),
+        "source_title": item.get("source_title"),
+        "reliability_level": item.get("reliability_level"),
+        "citation_role": citation_role,
+        "fact_boundary": "knowledge_reference_not_observed_weibo_fact",
+        "match_reasons": item.get("match_reasons", [])[:8],
+        "applicable_scenario": item.get("applicable_scenario"),
+        "do_not_apply_when": item.get("do_not_apply_when"),
+        "judge_questions": item.get("judge_questions", []),
+        "citation_url": item.get("citation_url"),
+    }
+
+
+def knowledge_answer_suffix(knowledge_references):
+    if not knowledge_references:
+        return ""
+    lead = knowledge_references[0]
+    return f" 知识参考/知识卡：{lead.get('card_identity')} 只作为适用性参考，不作为观察到的微博事实。"
 
 
 def bot_preference_context(memory_items):
