@@ -1175,6 +1175,71 @@ test(
 );
 
 test(
+  "keeps blocked knowledge cards out of Weibo actions and marks C-level cards as weak inspiration",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const barbieCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='case:barbie:earned-media-lifestyle-symbol'"
+    )[0].id;
+    const scctCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='framework:scct:risk-response-fit'"
+    )[0].id;
+
+    const blockedCommentId = createEvidenceComment(projectId, "knowledge-action-blocked-comment");
+    createKnowledgeActionEvent(projectId, "knowledge-action-blocked-event", [blockedCommentId], {
+      title: "生活方式视觉符号出现事实争议",
+      triggerSummary: "评论一边讨论生活方式视觉符号，一边出现事实争议",
+      impactAssessment: "当前舆情核心包含事实争议，不适合套用低争议生活方式放大案例",
+      riskLevel: "medium",
+      eventScore: 9.5
+    });
+
+    const blockedActions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(blockedActions.ok, true);
+    assert.equal(blockedActions.actions[0].evidence_ids.includes(blockedCommentId), true);
+    assert.equal((blockedActions.actions[0].raw_json.knowledge_card_ids || []).includes(barbieCardId), false);
+    assert.equal(
+      (blockedActions.actions[0].raw_json.knowledge_fit || []).some((item) => item.card_id === barbieCardId),
+      false
+    );
+
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const weakProjectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const weakCommentId = createEvidenceComment(weakProjectId, "knowledge-action-weak-comment");
+    createKnowledgeActionEvent(weakProjectId, "knowledge-action-weak-event", [weakCommentId], {
+      title: "危机回应需要判断责任归因",
+      triggerSummary: "微博评论出现责任归因和事实争议，需要判断回应强度",
+      impactAssessment: "讨论集中在事实争议与责任归因，不是普通剧情讨论或轻量玩梗",
+      riskLevel: "high",
+      eventScore: 12.5
+    });
+
+    const weakActions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId: weakProjectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(weakActions.ok, true);
+    assert.equal(weakActions.actions[0].evidence_ids.includes(weakCommentId), true);
+    assert.deepEqual(weakActions.actions[0].raw_json.knowledge_card_ids, [scctCardId]);
+    assert.equal(weakActions.actions[0].raw_json.knowledge_fit[0].card_id, scctCardId);
+    assert.equal(weakActions.actions[0].raw_json.knowledge_fit[0].citation_role, "weak_inspiration");
+    assert.equal(weakActions.actions[0].raw_json.knowledge_fit[0].hard_rule_allowed, false);
+    assert.match(weakActions.actions[0].reason, /弱启发/);
+  }
+);
+
+test(
   "persists event feedback into feedback ledger, event status history, and memory in one MySQL transaction",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -4131,7 +4196,12 @@ function createMemory(projectId, identity) {
   return queryRows("SELECT id FROM bot_memory_items WHERE project_id=%s AND memory_identity=%s", [projectId, `memory-${identity}`])[0].id;
 }
 
-function createKnowledgeActionEvent(projectId, identity, evidenceIds) {
+function createKnowledgeActionEvent(projectId, identity, evidenceIds, overrides = {}) {
+  const title = overrides.title || "生活方式视觉符号正向讨论";
+  const triggerSummary = overrides.triggerSummary || "评论正在围绕生活方式和视觉符号自然二创";
+  const impactAssessment = overrides.impactAssessment || "低争议生活方式讨论适合观察自然扩散";
+  const riskLevel = overrides.riskLevel || "low";
+  const eventScore = overrides.eventScore || 7.5;
   queryRows(
     `
     INSERT INTO artist_public_opinion_events(
@@ -4141,13 +4211,13 @@ function createKnowledgeActionEvent(projectId, identity, evidenceIds) {
     )
     VALUES (
       %s, 'weibo', %s, 'observation_lead',
-      '生活方式视觉符号正向讨论', '评论正在围绕生活方式和视觉符号自然二创',
-      JSON_ARRAY('刘昊然'), 'observing', 'low', 7.5,
+      %s, %s,
+      JSON_ARRAY('刘昊然'), 'observing', %s, %s,
       %s, JSON_ARRAY(),
-      '低争议生活方式讨论适合观察自然扩散', JSON_ARRAY(), NOW(), NOW()
+      %s, JSON_ARRAY(), NOW(), NOW()
     )
     `,
-    [projectId, identity, JSON.stringify(evidenceIds)]
+    [projectId, identity, title, triggerSummary, riskLevel, eventScore, JSON.stringify(evidenceIds), impactAssessment]
   );
   return queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity=%s", [projectId, identity])[0].id;
 }

@@ -3235,7 +3235,6 @@ def extract_action_knowledge_topics(text):
         "可信度",
         "搜索",
         "转发",
-        "评论",
     ]
     return [term for term in candidates if term in text]
 
@@ -3310,7 +3309,10 @@ def recommended_action_reason(event, preference_constraint=None, knowledge_fit=N
     base = f"{event.get('title') or '微博事件'} 已形成 {len(evidence_ids)} 条证据，当前风险 {event.get('risk_level') or 'unknown'}，建议先进入人工确认队列。"
     if knowledge_fit:
         ids = "、".join(f"#{item['card_id']}" for item in knowledge_fit)
-        base = f"{base} 参考知识卡 {ids} 的适用性摘要，但知识卡仅作为宣发参考，真实依据仍为微博证据。"
+        if all(not item.get("hard_rule_allowed") for item in knowledge_fit):
+            base = f"{base} 参考知识卡 {ids} 的弱启发，但知识卡不能作为硬规则，真实依据仍为微博证据。"
+        else:
+            base = f"{base} 参考知识卡 {ids} 的适用性摘要，但知识卡仅作为宣发参考，真实依据仍为微博证据。"
     if preference_constraint:
         base = f"{base} 用户偏好记忆 #{preference_constraint['id']} 要求避免默认公开澄清，本建议改为继续观察并准备材料。"
     return base
