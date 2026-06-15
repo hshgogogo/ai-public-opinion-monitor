@@ -14,6 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+if len(sys.argv) > 1 and sys.argv[1] in {"weibo-knowledge-seed", "weibo-knowledge-search"}:
+    os.environ["YUQING_SKIP_ENV_FILE"] = "1"
+
 from workers import db
 from workers.agents.sentiment_agent import analyze_comment
 from workers.analyzer_core import fallback_analysis
@@ -118,6 +121,7 @@ def main():
     add_payload_parser(sub, "weibo-agent-loop-judge-review")
     add_payload_parser(sub, "weibo-agent-loop-handoff")
     add_payload_parser(sub, "weibo-knowledge-seed")
+    add_payload_parser(sub, "weibo-knowledge-search")
     e2e_fixture = sub.add_parser("weibo-fixture-e2e")
     e2e_fixture.add_argument("--now", required=True)
     search_fixture = sub.add_parser("weibo-parse-search-fixture")
@@ -220,6 +224,8 @@ def main():
             emit(weibo_agent_loop_handoff_payload(args.payload_json))
         elif args.command == "weibo-knowledge-seed":
             emit(weibo_knowledge_seed_payload(args.payload_json))
+        elif args.command == "weibo-knowledge-search":
+            emit(weibo_knowledge_search_payload(args.payload_json))
         elif args.command == "weibo-fixture-e2e":
             emit(weibo_fixture_e2e(args.now))
         elif args.command == "weibo-parse-search-fixture":
@@ -4572,6 +4578,255 @@ def pick_raw_json(raw):
 
 def knowledge_validation_error(error_type, message, cause, fix):
     return weibo_error(error_type, message, cause, fix, docs_anchor="knowledge-card-rag")
+
+
+def weibo_knowledge_search_payload(payload_json="{}"):
+    endpoint = "weibo-knowledge-search"
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_knowledge_search_payload",
+            "Knowledge search payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object with query, platform, topics, risks, or actionType.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if not isinstance(payload, dict):
+        error = weibo_error(
+            "invalid_knowledge_search_payload",
+            "Knowledge search payload must be a JSON object.",
+            f"Received {type(payload).__name__}.",
+            "Pass a JSON object with query, platform, topics, risks, or actionType.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+
+    limit = bounded_limit(payload.get("limit"), default=5, maximum=20)
+    context = knowledge_search_context(payload)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  c.*,
+                  s.source_identity,
+                  s.title AS source_title,
+                  s.source_type,
+                  s.reliability_level,
+                  s.citation_url,
+                  s.publisher
+                FROM knowledge_cards c
+                JOIN knowledge_sources s ON s.id=c.source_id
+                WHERE c.status='active'
+                ORDER BY c.updated_at DESC, c.id DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    results = [knowledge_card_search_result(row, context) for row in rows]
+    matched = [item for item in results if item["primary_match_score"] > 0 or item["blocked_by_do_not_apply"]]
+    matched.sort(key=knowledge_result_sort_key)
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": endpoint,
+        "database": database,
+        "query": payload.get("query") or "",
+        "context": {
+            "project": payload.get("project") or payload.get("projectId") or payload.get("project_id"),
+            "platform": payload.get("platform"),
+            "topics": normalize_context_list(payload.get("topics")),
+            "risks": normalize_context_list(payload.get("risks")),
+            "action_type": payload.get("actionType") or payload.get("action_type"),
+        },
+        "results": matched[:limit],
+        "total": len(matched),
+    }
+
+
+def knowledge_search_context(payload):
+    topics = normalize_context_list(payload.get("topics"))
+    risks = normalize_context_list(payload.get("risks"))
+    action_type = payload.get("actionType") or payload.get("action_type")
+    terms = []
+    terms.extend(context_terms("project", payload.get("project") or payload.get("projectId") or payload.get("project_id")))
+    terms.extend(context_terms("platform", payload.get("platform")))
+    terms.extend(context_terms("action_type", action_type))
+    terms.extend(context_terms("query", payload.get("query")))
+    for topic in topics:
+        terms.extend(context_terms("topic", topic))
+    for risk in risks:
+        terms.extend(context_terms("risk", risk))
+    return {"terms": stable_context_terms(terms)}
+
+
+def normalize_context_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def expand_search_terms(value):
+    if value is None:
+        return []
+    text = str(value).strip().lower()
+    if not text:
+        return []
+    terms = [text]
+    terms.extend(re.findall(r"[a-z0-9_+-]{2,}", text))
+    for piece in re.split(r"[\s,，。；;、/|]+", text):
+        piece = piece.strip()
+        if len(piece) >= 2:
+            terms.append(piece)
+    return terms
+
+
+def stable_terms(terms):
+    seen = set()
+    ordered = []
+    for term in terms:
+        normalized = str(term).strip().lower()
+        if len(normalized) < 2 or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def context_terms(source, value):
+    return [{"source": source, "term": term} for term in expand_search_terms(value)]
+
+
+def stable_context_terms(terms):
+    seen = set()
+    ordered = []
+    for item in terms:
+        source = item["source"]
+        term = str(item["term"]).strip().lower()
+        key = (source, term)
+        if len(term) < 2 or key in seen:
+            continue
+        seen.add(key)
+        ordered.append({"source": source, "term": term})
+    return ordered
+
+
+def knowledge_card_search_result(row, context):
+    tags = db.jloads(row.get("tags"), [])
+    recommended_actions = db.jloads(row.get("recommended_actions"), [])
+    risk_warnings = db.jloads(row.get("risk_warnings"), [])
+    evidence_required = db.jloads(row.get("evidence_required"), [])
+    judge_questions = db.jloads(row.get("judge_questions"), [])
+    corpus_parts = [
+        row.get("framework_or_case"),
+        row.get("applicable_scenario"),
+        row.get("do_not_apply_when"),
+        row.get("source_title"),
+        row.get("source_type"),
+        row.get("reliability_level"),
+        *tags,
+        *recommended_actions,
+        *risk_warnings,
+        *evidence_required,
+        *judge_questions,
+    ]
+    corpus = "\n".join(str(part).lower() for part in corpus_parts if part)
+    tag_text = "\n".join(str(tag).lower() for tag in tags)
+    applicable_text = str(row.get("applicable_scenario") or "").lower()
+    framework_text = str(row.get("framework_or_case") or "").lower()
+    do_not_apply_text = str(row.get("do_not_apply_when") or "").lower()
+
+    match_score = 0
+    primary_match_score = 0
+    match_reasons = []
+    for item in context["terms"]:
+        source = item["source"]
+        term = item["term"]
+        delta = 0
+        location = None
+        if term in tag_text:
+            delta = 8
+            location = "tag"
+        elif term in framework_text:
+            delta = 6
+            location = "framework"
+        elif term in applicable_text:
+            delta = 5
+            location = "applicable"
+        elif term in corpus:
+            delta = 2
+            location = "text"
+        if delta:
+            match_score += delta
+            if source not in {"platform", "project"}:
+                primary_match_score += delta
+            match_reasons.append(f"{source}:{term}:{location}")
+
+    blocked_items = [item for item in context["terms"] if item["term"] and item["term"] in do_not_apply_text]
+    blocked_terms = [item["term"] for item in blocked_items]
+    blocked = bool(blocked_terms)
+    if blocked:
+        for item in blocked_items:
+            prefix = "risk_blocked" if item["source"] == "risk" else "blocked_by_do_not_apply"
+            match_reasons.append(f"{prefix}:{item['term']}")
+    reliability = row.get("reliability_level")
+    weak = reliability == "C"
+    citation_role = "blocked_by_do_not_apply" if blocked else ("weak_inspiration" if weak else "supporting_reference")
+    score = match_score + reliability_weight(reliability)
+    return {
+        "id": row.get("id"),
+        "card_id": row.get("id"),
+        "card_identity": row.get("card_identity"),
+        "source_id": row.get("source_id"),
+        "source_identity": row.get("source_identity"),
+        "source_title": row.get("source_title"),
+        "source_type": row.get("source_type"),
+        "reliability_level": reliability,
+        "citation_url": row.get("citation_url"),
+        "framework_or_case": row.get("framework_or_case"),
+        "applicable_scenario": row.get("applicable_scenario"),
+        "do_not_apply_when": row.get("do_not_apply_when"),
+        "tags": tags,
+        "recommended_actions": recommended_actions,
+        "risk_warnings": risk_warnings,
+        "evidence_required": evidence_required,
+        "judge_questions": judge_questions,
+        "score": score,
+        "match_score": match_score,
+        "primary_match_score": primary_match_score,
+        "match_reasons": match_reasons,
+        "blocked_by_do_not_apply": blocked,
+        "blocked_terms": blocked_terms,
+        "citation_role": citation_role,
+        "hard_rule_allowed": not blocked and not weak,
+    }
+
+
+def reliability_weight(level):
+    return {"A": 30, "B": 20, "C": 5}.get(level, 0)
+
+
+def knowledge_result_sort_key(item):
+    return (
+        1 if item["blocked_by_do_not_apply"] else 0,
+        1 if item["reliability_level"] == "C" else 0,
+        -item["primary_match_score"],
+        -item["match_score"],
+        -reliability_weight(item["reliability_level"]),
+        str(item["card_identity"] or ""),
+    )
 
 
 def prepare_agent_step_attachment(payload, project_id, command):

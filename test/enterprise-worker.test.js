@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const python = process.env.PYTHON_BIN || "/Users/mini-002/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
 
@@ -852,6 +855,41 @@ test("fixture hello-world path returns a Weibo workbench shell without real depe
   ]);
   assert.equal(payload.workbench.events.length, 0);
   assert.equal(payload.workbench.pendingActions.length, 0);
+});
+
+test("knowledge worker commands do not auto-load dotenv at process import time", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "knowledge-worker-env-"));
+  const workerPython = python.startsWith(".") ? join(process.cwd(), python) : python;
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(
+    join(tmp, ".env"),
+    "MYSQL_URL=mysql://root:bad@127.0.0.1:1/should_not_be_loaded\n",
+    "utf8"
+  );
+
+  const result = spawnSync(
+    workerPython,
+    [
+      `${process.cwd()}/workers/enterprise_worker.py`,
+      "weibo-knowledge-search",
+      "--payload-json",
+      "{}"
+    ],
+    {
+      cwd: tmp,
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH || "",
+        PYTHONPATH: process.cwd(),
+        YUQING_SKIP_ENV_FILE: ""
+      }
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.error_type, "mysql_unavailable");
+  assert.match(payload.cause, /MYSQL_URL is not configured/);
 });
 
 function readText(path) {

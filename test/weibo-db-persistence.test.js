@@ -812,6 +812,99 @@ test(
 );
 
 test(
+  "retrieves active knowledge cards with match reasons, blocked markers, and C-level weak inspiration",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+
+    const amplification = runWorker([
+      "weibo-knowledge-search",
+      "--payload-json",
+      JSON.stringify({
+        platform: "weibo",
+        topics: ["生活方式", "视觉符号"],
+        risks: [],
+        actionType: "weibo-amplification",
+        query: "生活方式 earned media 放大"
+      })
+    ]);
+    assert.equal(amplification.ok, true);
+    assert.equal(amplification.command, "weibo-knowledge-search");
+    assert.equal(amplification.results.length >= 1, true);
+    assert.equal(amplification.results[0].card_identity, "case:barbie:earned-media-lifestyle-symbol");
+    assert.equal(amplification.results[0].reliability_level, "B");
+    assert.equal(amplification.results[0].blocked_by_do_not_apply, false);
+    assert.equal(amplification.results[0].hard_rule_allowed, true);
+    assert.equal(amplification.results[0].match_reasons.length > 0, true);
+    assert.equal(amplification.results[0].match_reasons.some((reason) => reason.startsWith("platform:weibo")), true);
+    assert.equal(amplification.results[0].match_reasons.some((reason) => reason.startsWith("topic:生活方式")), true);
+    assert.equal(amplification.results[0].match_reasons.some((reason) => reason.startsWith("action_type:weibo-amplification")), true);
+    assert.equal(amplification.results[0].match_reasons.some((reason) => reason.startsWith("query:earned")), true);
+    assert.equal(Array.isArray(amplification.results[0].tags), true);
+    assert.match(amplification.results[0].citation_url, /^https?:\/\//);
+    assert.equal(typeof amplification.results[0].applicable_scenario, "string");
+    assert.equal(typeof amplification.results[0].do_not_apply_when, "string");
+
+    const crisis = runWorker([
+      "weibo-knowledge-search",
+      "--payload-json",
+      JSON.stringify({
+        platform: "weibo",
+        topics: ["生活方式"],
+        risks: ["艺人危机", "事实争议"],
+        actionType: "amplify_positive_discussion",
+        query: "生活方式 放大 事实争议"
+      })
+    ]);
+    const blockedBarbie = crisis.results.find((item) => item.card_identity === "case:barbie:earned-media-lifestyle-symbol");
+    assert.equal(Boolean(blockedBarbie), true);
+    assert.equal(blockedBarbie.blocked_by_do_not_apply, true);
+    assert.equal(blockedBarbie.match_reasons.some((reason) => reason.startsWith("risk_blocked:事实争议")), true);
+    assert.equal(blockedBarbie.citation_role, "blocked_by_do_not_apply");
+    assert.equal(blockedBarbie.hard_rule_allowed, false);
+
+    const broad = runWorker([
+      "weibo-knowledge-search",
+      "--payload-json",
+      JSON.stringify({
+        platform: "weibo",
+        query: "weibo"
+      })
+    ]);
+    assert.equal(broad.ok, true);
+    const cLevelIndex = broad.results.findIndex((item) => item.reliability_level === "C");
+    const bLevelIndex = broad.results.findIndex((item) => item.reliability_level === "B");
+    assert.equal(cLevelIndex > -1, true);
+    assert.equal(bLevelIndex > -1, true);
+    assert.equal(cLevelIndex > bLevelIndex, true, "C-level sources should rank below B-level sources for broad matches");
+    const cLevel = broad.results[cLevelIndex];
+    assert.equal(cLevel.citation_role, "weak_inspiration");
+    assert.equal(cLevel.hard_rule_allowed, false);
+
+    const unrelated = runWorker([
+      "weibo-knowledge-search",
+      "--payload-json",
+      JSON.stringify({
+        platform: "weibo",
+        query: "totally unrelated pastry supply chain"
+      })
+    ]);
+    assert.equal(unrelated.ok, true);
+    assert.equal(unrelated.results.length, 0);
+
+    const empty = runWorker([
+      "weibo-knowledge-search",
+      "--payload-json",
+      JSON.stringify({})
+    ]);
+    assert.equal(empty.ok, true);
+    assert.equal(empty.results.length, 0);
+  }
+);
+
+test(
   "persists event feedback into feedback ledger, event status history, and memory in one MySQL transaction",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

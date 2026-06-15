@@ -26,13 +26,13 @@
 
 ## 4. Knowledge Retrieval 与 Validator
 
-- [ ] 4.1 先写检索排序测试，覆盖 project/platform/topics/risks/action_type/query 命中 active 知识卡。
-- [ ] 4.2 新增 worker 检索命令或 helper，按 project/platform/topics/risks/action_type/query 检索 active 知识卡。
-- [ ] 4.3 检索结果包含 card id、source id、reliability level、匹配原因、适用条件、禁用条件和 tags。
-- [ ] 4.4 先写禁用条件测试，覆盖命中 `do_not_apply_when` 时排除或标记 `blocked_by_do_not_apply`。
-- [ ] 4.5 实现禁用条件过滤或 blocked 标记。
-- [ ] 4.6 先写 C 级来源测试，断言 C 级来源排序低于 A/B，且不能作为硬规则结果。
-- [ ] 4.7 实现 C 级来源弱启发标记。
+- [x] 4.1 先写检索排序测试，覆盖 project/platform/topics/risks/action_type/query 命中 active 知识卡。
+- [x] 4.2 新增 worker 检索命令或 helper，按 project/platform/topics/risks/action_type/query 检索 active 知识卡。
+- [x] 4.3 检索结果包含 card id、source id、reliability level、匹配原因、适用条件、禁用条件和 tags。
+- [x] 4.4 先写禁用条件测试，覆盖命中 `do_not_apply_when` 时排除或标记 `blocked_by_do_not_apply`。
+- [x] 4.5 实现禁用条件过滤或 blocked 标记。
+- [x] 4.6 先写 C 级来源测试，断言 C 级来源排序低于 A/B，且不能作为硬规则结果。
+- [x] 4.7 实现 C 级来源弱启发标记。
 - [ ] 4.8 先写 Judge/validator 测试，覆盖 applicable_scenario、do_not_apply_when、judge_questions 和 C 级边界。
 - [ ] 4.9 实现 worker 级知识卡适用性 validator，供 Strategy/Q&A/Judge 复用。
 
