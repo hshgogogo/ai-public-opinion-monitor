@@ -39,6 +39,9 @@ SOURCE_MATCH_UNKNOWN = {
 AGENT_LOOP_TERMINAL_STATUSES = {"succeeded", "partial", "failed", "needs_human"}
 FEEDBACK_LEDGER_STATUSES = {"open", "in_review", "resolved", "rejected", "archived"}
 SOURCE_ACCOUNT_TYPES = {"official", "artist", "producer", "marketing", "suspected_matrix", "media", "fan", "organic", "unknown"}
+KNOWLEDGE_SOURCE_TYPES = {"official", "academic", "book", "industry_report", "award_case", "platform_case", "interview", "media_article", "self_media", "other"}
+KNOWLEDGE_RELIABILITY_LEVELS = {"A", "B", "C"}
+KNOWLEDGE_CARD_STATUSES = {"active", "inactive", "draft", "archived"}
 
 AGENT_STEP_ATTACHMENT_CONFIG = {
     "weibo-comments-analyze": ("Issue Analysis Agent", "comment_analysis"),
@@ -114,6 +117,7 @@ def main():
     add_payload_parser(sub, "weibo-agent-loop-step")
     add_payload_parser(sub, "weibo-agent-loop-judge-review")
     add_payload_parser(sub, "weibo-agent-loop-handoff")
+    add_payload_parser(sub, "weibo-knowledge-seed")
     e2e_fixture = sub.add_parser("weibo-fixture-e2e")
     e2e_fixture.add_argument("--now", required=True)
     search_fixture = sub.add_parser("weibo-parse-search-fixture")
@@ -214,6 +218,8 @@ def main():
             emit(weibo_agent_loop_judge_review_payload(args.payload_json))
         elif args.command == "weibo-agent-loop-handoff":
             emit(weibo_agent_loop_handoff_payload(args.payload_json))
+        elif args.command == "weibo-knowledge-seed":
+            emit(weibo_knowledge_seed_payload(args.payload_json))
         elif args.command == "weibo-fixture-e2e":
             emit(weibo_fixture_e2e(args.now))
         elif args.command == "weibo-parse-search-fixture":
@@ -4146,6 +4152,426 @@ def mysql_unavailable_payload(endpoint, database, **ids):
         "request": {key: value for key, value in ids.items() if value is not None},
     })
     return error
+
+
+def default_knowledge_seed_payload():
+    return {
+        "sources": [
+            {
+                "sourceIdentity": "shortyawards:barbie-2024",
+                "title": "Barbie The Movie Marketing Campaign",
+                "sourceType": "award_case",
+                "reliabilityLevel": "B",
+                "citationUrl": "https://shortyawards.com/16th/barbie-the-movie-marketing-campaign",
+                "publisher": "Shorty Awards",
+                "notes": "公开奖项案例；只保存结构化摘要和 citation URL。",
+            },
+            {
+                "sourceIdentity": "dentsu:aisas-2004",
+                "title": "AISAS as a social-era consumer behavior model",
+                "sourceType": "industry_report",
+                "reliabilityLevel": "B",
+                "citationUrl": "https://dentsu-ho.com/en/articles/3100",
+                "publisher": "Dentsu",
+                "notes": "行业方法论来源；用于社媒讨论路径的弱结构化参考。",
+            },
+            {
+                "sourceIdentity": "wikipedia:scct",
+                "title": "Situational Crisis Communication Theory",
+                "sourceType": "other",
+                "reliabilityLevel": "C",
+                "citationUrl": "https://en.wikipedia.org/wiki/Situational_crisis_communication_theory",
+                "publisher": "Wikipedia",
+                "notes": "二手概述来源；只能作为危机回应适配的启发，不作硬规则。",
+            },
+        ],
+        "cards": [
+            {
+                "cardIdentity": "case:barbie:earned-media-lifestyle-symbol",
+                "sourceIdentity": "shortyawards:barbie-2024",
+                "frameworkOrCase": "影视项目的视觉符号与 earned media 扩散",
+                "applicableScenario": "剧集具备清晰视觉符号、生活方式标签、低争议正向讨论或可自然二创素材时。",
+                "doNotApplyWhen": "当前舆情核心是艺人危机、事实争议、道歉澄清或高风险负面情绪时。",
+                "recommendedActions": ["先观察自然二创", "放大低风险生活方式话题", "用轻量物料承接正向讨论"],
+                "riskWarnings": ["商业联动过重会削弱真实讨论感", "负面争议期放大会被理解为转移焦点"],
+                "evidenceRequired": ["正向评论证据", "视觉或生活方式话题证据", "非高风险事件状态"],
+                "judgeQuestions": ["当前微博证据是否支持放大传播，而不是先降温或澄清？"],
+                "tags": ["film-publicity", "earned-media", "lifestyle", "weibo-amplification"],
+            },
+            {
+                "cardIdentity": "framework:aisas:social-sharing-path",
+                "sourceIdentity": "dentsu:aisas-2004",
+                "frameworkOrCase": "AISAS 社媒分享路径",
+                "applicableScenario": "用户已在微博主动搜索、转发、评论或二创，且讨论可以自然进入分享链路时。",
+                "doNotApplyWhen": "讨论停留在小范围争议、证据不足、或用户主要诉求是事实解释时。",
+                "recommendedActions": ["识别搜索触发词", "收集可分享证据点", "避免在证据不足时强推转发"],
+                "riskWarnings": ["把搜索兴趣误判为喜爱会导致过度营销", "转发导向内容不能替代真实口碑"],
+                "evidenceRequired": ["搜索或转发语境", "用户自发表达", "评论情绪和议题证据"],
+                "judgeQuestions": ["当前证据里是否存在从兴趣到分享的连续行为信号？"],
+                "tags": ["social-sharing", "weibo", "behavior-model", "search-interest"],
+            },
+            {
+                "cardIdentity": "framework:scct:risk-response-fit",
+                "sourceIdentity": "wikipedia:scct",
+                "frameworkOrCase": "危机回应与责任感知适配",
+                "applicableScenario": "微博讨论出现责任归因、事实争议、误解扩散或需要判断回应强度时。",
+                "doNotApplyWhen": "当前只是普通剧情讨论、演员好感讨论或轻量玩梗，不涉及责任归因。",
+                "recommendedActions": ["先区分事实争议与情绪表达", "匹配回应强度", "避免把弱启发写成硬性结论"],
+                "riskWarnings": ["C 级来源不能单独驱动正式危机策略", "回应过度会放大原本可观察的轻微风险"],
+                "evidenceRequired": ["负面评论证据", "责任归因或事实争议证据", "传播范围证据"],
+                "judgeQuestions": ["是否有足够微博证据证明这是责任归因问题，而不只是零散不满？"],
+                "tags": ["crisis-response", "risk", "weak-inspiration", "weibo"],
+            },
+        ],
+    }
+
+
+def weibo_knowledge_seed_payload(payload_json="{}"):
+    endpoint = "weibo-knowledge-seed"
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_knowledge_payload",
+            "Knowledge seed payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object with sources and cards.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if not isinstance(payload, dict):
+        error = weibo_error(
+            "invalid_knowledge_payload",
+            "Knowledge seed payload must be a JSON object.",
+            f"Received {type(payload).__name__}.",
+            "Pass a JSON object with sources and cards.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if "sources" not in payload and "cards" not in payload:
+        payload = default_knowledge_seed_payload()
+
+    sources, source_error = validate_knowledge_sources(payload.get("sources"))
+    if source_error:
+        source_error.update({"endpoint": endpoint})
+        return source_error
+    cards, card_error = validate_knowledge_cards(payload.get("cards"), {source["source_identity"] for source in sources})
+    if card_error:
+        card_error.update({"endpoint": endpoint})
+        return card_error
+
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+
+    source_ids = {}
+    card_ids = {}
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                for source in sources:
+                    cur.execute(
+                        """
+                        INSERT INTO knowledge_sources(
+                          source_identity, title, source_type, reliability_level,
+                          citation_url, publisher, published_at, notes, raw_json
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                          id=LAST_INSERT_ID(id),
+                          title=VALUES(title),
+                          source_type=VALUES(source_type),
+                          reliability_level=VALUES(reliability_level),
+                          citation_url=VALUES(citation_url),
+                          publisher=VALUES(publisher),
+                          published_at=VALUES(published_at),
+                          notes=VALUES(notes),
+                          raw_json=VALUES(raw_json)
+                        """,
+                        (
+                            source["source_identity"],
+                            source["title"],
+                            source["source_type"],
+                            source["reliability_level"],
+                            source["citation_url"],
+                            source.get("publisher"),
+                            source.get("published_at"),
+                            source.get("notes"),
+                            json_for_db(source["raw_json"]),
+                        ),
+                    )
+                    source_ids[source["source_identity"]] = cur.lastrowid
+
+                for card in cards:
+                    source_id = source_ids[card["source_identity"]]
+                    cur.execute(
+                        """
+                        INSERT INTO knowledge_cards(
+                          card_identity, source_id, framework_or_case, applicable_scenario,
+                          do_not_apply_when, recommended_actions, risk_warnings,
+                          evidence_required, judge_questions, tags, status, raw_json
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                          id=LAST_INSERT_ID(id),
+                          source_id=VALUES(source_id),
+                          framework_or_case=VALUES(framework_or_case),
+                          applicable_scenario=VALUES(applicable_scenario),
+                          do_not_apply_when=VALUES(do_not_apply_when),
+                          recommended_actions=VALUES(recommended_actions),
+                          risk_warnings=VALUES(risk_warnings),
+                          evidence_required=VALUES(evidence_required),
+                          judge_questions=VALUES(judge_questions),
+                          tags=VALUES(tags),
+                          status=VALUES(status),
+                          raw_json=VALUES(raw_json)
+                        """,
+                        (
+                            card["card_identity"],
+                            source_id,
+                            card["framework_or_case"],
+                            card["applicable_scenario"],
+                            card["do_not_apply_when"],
+                            json_for_db(card["recommended_actions"]),
+                            json_for_db(card["risk_warnings"]),
+                            json_for_db(card["evidence_required"]),
+                            json_for_db(card["judge_questions"]),
+                            json_for_db(card["tags"]),
+                            card["status"],
+                            json_for_db(card["raw_json"]),
+                        ),
+                    )
+                    card_ids[card["card_identity"]] = cur.lastrowid
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": endpoint,
+        "database": database,
+        "seeded": {"sources": len(sources), "cards": len(cards)},
+        "sourceIds": source_ids,
+        "cardIds": card_ids,
+    }
+
+
+def validate_knowledge_sources(raw_sources):
+    if not isinstance(raw_sources, list) or not raw_sources:
+        return None, knowledge_validation_error(
+            "invalid_knowledge_source",
+            "Knowledge seed requires at least one source.",
+            "sources must be a non-empty array.",
+            "Provide one or more knowledge sources with citation URLs.",
+        )
+    sources = []
+    seen = set()
+    for index, raw in enumerate(raw_sources):
+        if not isinstance(raw, dict):
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source must be an object.",
+                f"sources[{index}] is {type(raw).__name__}.",
+                "Provide each source as an object.",
+            )
+        source = {
+            "source_identity": pick_text(raw, "sourceIdentity", "source_identity"),
+            "title": pick_text(raw, "title", "sourceTitle", "source_title"),
+            "source_type": pick_text(raw, "sourceType", "source_type"),
+            "reliability_level": pick_text(raw, "reliabilityLevel", "reliability_level"),
+            "citation_url": pick_text(raw, "citationUrl", "citation_url"),
+            "publisher": pick_text(raw, "publisher"),
+            "published_at": pick_text(raw, "publishedAt", "published_at"),
+            "notes": pick_text(raw, "notes"),
+        }
+        if not source["source_identity"] or source["source_identity"] in seen:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source identity is missing or duplicated.",
+                f"sources[{index}] must have a unique sourceIdentity.",
+                "Use a stable source identity such as shortyawards:barbie-2024.",
+            )
+        seen.add(source["source_identity"])
+        if not source["title"]:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source title is required.",
+                f"sources[{index}] is missing title.",
+                "Add a short source title.",
+            )
+        if source["source_type"] not in KNOWLEDGE_SOURCE_TYPES:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source type is invalid.",
+                f"sources[{index}] sourceType must be one of {sorted(KNOWLEDGE_SOURCE_TYPES)}.",
+                "Use a supported knowledge source type.",
+            )
+        if source["reliability_level"] not in KNOWLEDGE_RELIABILITY_LEVELS:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source reliability level is invalid.",
+                f"sources[{index}] reliabilityLevel must be A, B, or C.",
+                "Classify the source reliability as A, B, or C.",
+            )
+        if not source["citation_url"] or not re.match(r"^https?://", source["citation_url"]):
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source citation URL is required.",
+                f"sources[{index}] must include an http(s) citation URL.",
+                "Add a public citationUrl for the knowledge source.",
+            )
+        raw_json = pick_raw_json(raw) or {
+            "source_identity": source["source_identity"],
+            "summary": source["notes"] or source["title"],
+            "copyright_boundary": "short structured summary only",
+        }
+        if len(json.dumps(raw_json, ensure_ascii=False, default=str)) >= 1800:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source raw_json is too long.",
+                f"sources[{index}] raw_json must stay below 1800 characters.",
+                "Store short structured summaries and citation URLs, not long-form source text.",
+            )
+        source["raw_json"] = raw_json
+        sources.append(source)
+    return sources, None
+
+
+def validate_knowledge_cards(raw_cards, source_identities):
+    if not isinstance(raw_cards, list) or not raw_cards:
+        return None, knowledge_validation_error(
+            "invalid_knowledge_card",
+            "Knowledge seed requires at least one card.",
+            "cards must be a non-empty array.",
+            "Provide one or more structured knowledge cards.",
+        )
+    cards = []
+    seen = set()
+    for index, raw in enumerate(raw_cards):
+        if not isinstance(raw, dict):
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card must be an object.",
+                f"cards[{index}] is {type(raw).__name__}.",
+                "Provide each card as an object.",
+            )
+        card = {
+            "card_identity": pick_text(raw, "cardIdentity", "card_identity"),
+            "source_identity": pick_text(raw, "sourceIdentity", "source_identity"),
+            "framework_or_case": pick_text(raw, "frameworkOrCase", "framework_or_case"),
+            "applicable_scenario": pick_text(raw, "applicableScenario", "applicable_scenario"),
+            "do_not_apply_when": pick_text(raw, "doNotApplyWhen", "do_not_apply_when"),
+            "recommended_actions": pick_list(raw, "recommendedActions", "recommended_actions"),
+            "risk_warnings": pick_list(raw, "riskWarnings", "risk_warnings"),
+            "evidence_required": pick_list(raw, "evidenceRequired", "evidence_required"),
+            "judge_questions": pick_list(raw, "judgeQuestions", "judge_questions"),
+            "tags": pick_list(raw, "tags"),
+            "status": pick_text(raw, "status") or "active",
+        }
+        if not card["card_identity"] or card["card_identity"] in seen:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card identity is missing or duplicated.",
+                f"cards[{index}] must have a unique cardIdentity.",
+                "Use a stable card identity such as case:barbie:earned-media-lifestyle-symbol.",
+            )
+        seen.add(card["card_identity"])
+        if card["source_identity"] not in source_identities:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card source does not exist in this seed payload.",
+                f"cards[{index}] references {card['source_identity'] or 'missing sourceIdentity'}.",
+                "Reference a sourceIdentity included in the same seed payload.",
+            )
+        for key, label in [
+            ("framework_or_case", "frameworkOrCase"),
+            ("applicable_scenario", "applicableScenario"),
+            ("do_not_apply_when", "doNotApplyWhen"),
+        ]:
+            if not card[key]:
+                return None, knowledge_validation_error(
+                    "invalid_knowledge_card",
+                    "Knowledge card is missing a required text field.",
+                    f"cards[{index}] is missing {label}.",
+                    "Add framework/case, applicable scenario, and do-not-apply conditions.",
+                )
+        for key, label in [
+            ("recommended_actions", "recommendedActions"),
+            ("risk_warnings", "riskWarnings"),
+            ("evidence_required", "evidenceRequired"),
+            ("judge_questions", "judgeQuestions"),
+            ("tags", "tags"),
+        ]:
+            if not card[key]:
+                return None, knowledge_validation_error(
+                    "invalid_knowledge_card",
+                    "Knowledge card is missing a required array field.",
+                    f"cards[{index}] is missing {label}.",
+                    "Add non-empty arrays for actions, risks, evidence, Judge questions, and tags.",
+                )
+        if card["status"] not in KNOWLEDGE_CARD_STATUSES:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card status is invalid.",
+                f"cards[{index}] status must be one of {sorted(KNOWLEDGE_CARD_STATUSES)}.",
+                "Use active, inactive, draft, or archived.",
+            )
+        raw_json = pick_raw_json(raw) or {
+            "card_identity": card["card_identity"],
+            "source_identity": card["source_identity"],
+            "summary": card["framework_or_case"],
+            "copyright_boundary": "short structured summary only",
+        }
+        if len(json.dumps(raw_json, ensure_ascii=False, default=str)) >= 1800:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card raw_json is too long.",
+                f"cards[{index}] raw_json must stay below 1800 characters.",
+                "Store structured summaries, not long-form source text.",
+            )
+        card["raw_json"] = raw_json
+        cards.append(card)
+    return cards, None
+
+
+def pick_text(raw, *keys):
+    for key in keys:
+        value = raw.get(key)
+        if value is not None:
+            value = str(value).strip()
+            if value:
+                return value
+    return None
+
+
+def pick_list(raw, *keys):
+    for key in keys:
+        value = raw.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            normalized = [str(item).strip() for item in value if str(item).strip()]
+            return normalized
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+    return []
+
+
+def pick_raw_json(raw):
+    if "rawJson" in raw:
+        return raw.get("rawJson")
+    if "raw_json" in raw:
+        return raw.get("raw_json")
+    return None
+
+
+def knowledge_validation_error(error_type, message, cause, fix):
+    return weibo_error(error_type, message, cause, fix, docs_anchor="knowledge-card-rag")
 
 
 def prepare_agent_step_attachment(payload, project_id, command):

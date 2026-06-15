@@ -694,6 +694,124 @@ test(
 );
 
 test(
+  "seeds validated knowledge cards idempotently without long-form source text",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+
+    const invalid = runWorker([
+      "weibo-knowledge-seed",
+      "--payload-json",
+      JSON.stringify({
+        sources: [
+          {
+            sourceIdentity: "test:missing-url",
+            title: "Missing URL source",
+            sourceType: "award_case",
+            reliabilityLevel: "B"
+          }
+        ],
+        cards: [
+          {
+            cardIdentity: "test:missing-judge",
+            sourceIdentity: "test:missing-url",
+            frameworkOrCase: "Invalid card",
+            applicableScenario: "测试适用条件",
+            doNotApplyWhen: "测试禁用条件",
+            recommendedActions: ["不要写入"],
+            riskWarnings: ["缺少 URL 和 Judge questions"],
+            evidenceRequired: ["真实证据"]
+          }
+        ]
+      })
+    ]);
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.error_type, "invalid_knowledge_source");
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM knowledge_sources")[0].count, 0);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM knowledge_cards")[0].count, 0);
+
+    const validSource = {
+      sourceIdentity: "test:valid-source",
+      title: "Valid source for invalid card cases",
+      sourceType: "award_case",
+      reliabilityLevel: "B",
+      citationUrl: "https://example.com/valid-source"
+    };
+    const validCard = {
+      cardIdentity: "test:invalid-card",
+      sourceIdentity: validSource.sourceIdentity,
+      frameworkOrCase: "Invalid card variants",
+      applicableScenario: "测试适用条件",
+      doNotApplyWhen: "测试禁用条件",
+      recommendedActions: ["不要写入"],
+      riskWarnings: ["缺少必填字段"],
+      evidenceRequired: ["真实证据"],
+      judgeQuestions: ["是否应该拒绝？"],
+      tags: ["test"]
+    };
+    for (const missingField of [
+      "applicableScenario",
+      "doNotApplyWhen",
+      "evidenceRequired",
+      "judgeQuestions"
+    ]) {
+      const card = { ...validCard, cardIdentity: `test:missing-${missingField}` };
+      delete card[missingField];
+      const invalidCard = runWorker([
+        "weibo-knowledge-seed",
+        "--payload-json",
+        JSON.stringify({ sources: [validSource], cards: [card] })
+      ]);
+      assert.equal(invalidCard.ok, false, `${missingField} should reject the card`);
+      assert.equal(invalidCard.error_type, "invalid_knowledge_card");
+      assert.equal(queryRows("SELECT COUNT(*) AS count FROM knowledge_sources")[0].count, 0);
+      assert.equal(queryRows("SELECT COUNT(*) AS count FROM knowledge_cards")[0].count, 0);
+    }
+
+    const seeded = runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]);
+    assert.equal(seeded.ok, true);
+    assert.equal(seeded.seeded.sources >= 3, true);
+    assert.equal(seeded.seeded.sources <= 5, true);
+    assert.equal(seeded.seeded.cards >= 3, true);
+    assert.equal(seeded.seeded.cards <= 5, true);
+
+    const cards = queryRows(
+      `
+      SELECT
+        c.card_identity,
+        s.source_identity,
+        s.citation_url,
+        s.reliability_level,
+        JSON_LENGTH(c.recommended_actions) AS recommended_action_count,
+        JSON_LENGTH(c.risk_warnings) AS risk_warning_count,
+        JSON_LENGTH(c.evidence_required) AS evidence_required_count,
+        JSON_LENGTH(c.judge_questions) AS judge_question_count,
+        CHAR_LENGTH(COALESCE(c.raw_json, JSON_OBJECT())) AS raw_length
+      FROM knowledge_cards c
+      JOIN knowledge_sources s ON s.id=c.source_id
+      ORDER BY c.card_identity
+      `
+    );
+    assert.equal(cards.length, seeded.seeded.cards);
+    for (const card of cards) {
+      assert.match(card.citation_url, /^https?:\/\//);
+      assert.equal(["A", "B", "C"].includes(card.reliability_level), true);
+      assert.equal(card.recommended_action_count > 0, true);
+      assert.equal(card.risk_warning_count > 0, true);
+      assert.equal(card.evidence_required_count > 0, true);
+      assert.equal(card.judge_question_count > 0, true);
+      assert.equal(card.raw_length < 2000, true, `${card.card_identity} raw_json should remain a short structured summary`);
+    }
+
+    const repeated = runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]);
+    assert.equal(repeated.ok, true);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM knowledge_sources")[0].count, seeded.seeded.sources);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM knowledge_cards")[0].count, seeded.seeded.cards);
+  }
+);
+
+test(
   "persists event feedback into feedback ledger, event status history, and memory in one MySQL transaction",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

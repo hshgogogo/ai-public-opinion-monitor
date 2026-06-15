@@ -17,12 +17,12 @@
 
 ## 3. 知识卡 Seed 与校验
 
-- [ ] 3.1 先写 seed 内容测试，断言首批卡片为短摘要、结构化字段和 citation URL，不含长篇版权正文。
-- [ ] 3.2 新增首批 3 到 5 张脱敏/摘要式知识卡 seed，覆盖影视宣发、微博传播、危机应对或通用营销理论。
-- [ ] 3.3 先写知识卡校验测试，覆盖缺少来源 URL、适用条件、禁用条件、证据要求或 Judge questions 的无效卡片。
-- [ ] 3.4 实现知识卡校验，缺少必填字段时拒绝或标记 inactive。
-- [ ] 3.5 先写重复 seed 测试，断言重复 seed 不创建重复 source/card。
-- [ ] 3.6 新增 worker seed 命令，使用 `INSERT ... ON DUPLICATE KEY UPDATE` 幂等写入 knowledge sources/cards。
+- [x] 3.1 先写 seed 内容测试，断言首批卡片为短摘要、结构化字段和 citation URL，不含长篇版权正文。
+- [x] 3.2 新增首批 3 到 5 张脱敏/摘要式知识卡 seed，覆盖影视宣发、微博传播、危机应对或通用营销理论。
+- [x] 3.3 先写知识卡校验测试，覆盖缺少来源 URL、适用条件、禁用条件、证据要求或 Judge questions 的无效卡片。
+- [x] 3.4 实现知识卡校验，缺少必填字段时拒绝或标记 inactive。
+- [x] 3.5 先写重复 seed 测试，断言重复 seed 不创建重复 source/card。
+- [x] 3.6 新增 worker seed 命令，使用 `INSERT ... ON DUPLICATE KEY UPDATE` 幂等写入 knowledge sources/cards。
 
 ## 4. Knowledge Retrieval 与 Validator
 
