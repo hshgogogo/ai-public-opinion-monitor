@@ -2588,6 +2588,95 @@ test(
 );
 
 test(
+  "marks C-level knowledge cards as weak inspiration in Weibo Q&A",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const projectId = createProject("海岛舒服日志 Q&A C级知识弱启发");
+    const commentId = createEvidenceComment(projectId, "knowledge-qa-c-level-comment");
+    const eventId = createKnowledgeActionEvent(projectId, "knowledge-qa-c-level-event", [commentId], {
+      title: "危机回应需要判断责任归因",
+      triggerSummary: "微博评论出现责任归因和事实争议，需要判断回应强度",
+      impactAssessment: "讨论集中在事实争议与责任归因，不是普通剧情讨论或轻量玩梗",
+      riskLevel: "high",
+      eventScore: 12.5
+    });
+    const actionId = createAction(projectId, "knowledge-qa-c-level-action");
+    const scctCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='framework:scct:risk-response-fit'"
+    )[0].id;
+
+    const botAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, question: "责任归因和事实争议下应该怎么回应？" })
+    ]);
+
+    assert.equal(botAnswer.ok, true);
+    assert.equal(botAnswer.answer.error, null);
+    assert.equal(botAnswer.answer.citations.includes(`comment-${commentId}`), true);
+    assert.equal(botAnswer.answer.citations.includes(`event-${eventId}`), true);
+    assert.equal(botAnswer.answer.citations.includes(`action-${actionId}`), true);
+    assert.equal(botAnswer.answer.citations.includes(`knowledge-card-${scctCardId}`), true);
+    const scctReference = botAnswer.answer.knowledge_references.find((item) => item.card_id === scctCardId);
+    assert.equal(Boolean(scctReference), true);
+    assert.equal(scctReference.reliability_level, "C");
+    assert.equal(scctReference.citation_role, "weak_inspiration");
+    assert.equal(scctReference.fact_boundary, "knowledge_reference_not_observed_weibo_fact");
+    assert.match(botAnswer.answer.text, /弱启发|不是硬规则|不作为硬规则/);
+    assert.doesNotMatch(botAnswer.answer.facts.join("\n"), /SCCT|Situational Crisis|危机回应与责任感知适配/i);
+  }
+);
+
+test(
+  "discloses weak inspiration when C-level Q&A knowledge appears after stronger references",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const projectId = createProject("海岛舒服日志 Q&A 混合知识引用");
+    const commentId = createEvidenceComment(projectId, "knowledge-qa-mixed-comment");
+    createKnowledgeActionEvent(projectId, "knowledge-qa-mixed-event", [commentId], {
+      title: "生活方式视觉符号与事实争议并存",
+      triggerSummary: "微博评论既讨论生活方式视觉符号，也出现责任归因和事实争议",
+      impactAssessment: "正向扩散和危机回应都只能作为参考，不能替代当前评论证据",
+      riskLevel: "high",
+      eventScore: 12.5
+    });
+    createAction(projectId, "knowledge-qa-mixed-action");
+    const barbieCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='case:barbie:earned-media-lifestyle-symbol'"
+    )[0].id;
+    const scctCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='framework:scct:risk-response-fit'"
+    )[0].id;
+
+    queryRows(
+      "UPDATE knowledge_cards SET do_not_apply_when='当前仅有线下执行计划且缺少微博讨论证据时。' WHERE card_identity='case:barbie:earned-media-lifestyle-symbol'"
+    );
+
+    const botAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, question: "生活方式视觉符号与责任归因并存时怎么回应？" })
+    ]);
+
+    assert.equal(botAnswer.ok, true);
+    assert.equal(botAnswer.answer.error, null);
+    const barbieIndex = botAnswer.answer.knowledge_references.findIndex((item) => item.card_id === barbieCardId);
+    const scctIndex = botAnswer.answer.knowledge_references.findIndex((item) => item.card_id === scctCardId);
+    assert.equal(barbieIndex >= 0, true);
+    assert.equal(scctIndex > barbieIndex, true);
+    assert.equal(botAnswer.answer.knowledge_references[barbieIndex].citation_role, "knowledge_reference");
+    assert.equal(botAnswer.answer.knowledge_references[scctIndex].citation_role, "weak_inspiration");
+    assert.match(botAnswer.answer.text, /弱启发|不是硬规则|不作为硬规则/);
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

@@ -8034,6 +8034,9 @@ def knowledge_answer_suffix(knowledge_references):
     if not knowledge_references:
         return ""
     lead = knowledge_references[0]
+    has_weak_inspiration = any(item.get("citation_role") == "weak_inspiration" for item in knowledge_references)
+    if has_weak_inspiration:
+        return f" 知识参考/知识卡：{lead.get('card_identity')} 等引用中包含 C 级来源，只作为弱启发，不作为硬规则，也不作为观察到的微博事实。"
     return f" 知识参考/知识卡：{lead.get('card_identity')} 只作为适用性参考，不作为观察到的微博事实。"
 
 
