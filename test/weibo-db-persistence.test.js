@@ -905,6 +905,226 @@ test(
 );
 
 test(
+  "validates knowledge card applicability with Judge questions, blocked conditions, C-level boundaries, and evidence checks",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const evidenceCommentId = createEvidenceComment(projectId, "knowledge-validator-real-evidence");
+    const evidenceEventId = createEvent(projectId, "knowledge-validator-event-evidence");
+    const evidenceActionId = createAction(projectId, "knowledge-validator-action-evidence");
+    const evidenceMemoryId = createMemory(projectId, "knowledge-validator-memory-evidence");
+    const otherProjectId = createProject("knowledge-validator-cross-project");
+    const crossProjectCommentId = createEvidenceComment(otherProjectId, "knowledge-validator-cross-project-evidence");
+
+    const applicable = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        topics: ["生活方式", "视觉符号"],
+        actionType: "weibo-amplification",
+        query: "earned media 生活方式 放大",
+        evidenceIds: [`comment-${evidenceCommentId}`]
+      })
+    ]);
+    assert.equal(applicable.ok, true);
+    assert.equal(applicable.command, "weibo-knowledge-validate");
+    assert.equal(applicable.results.length, 1);
+    assert.equal(applicable.results[0].passed, true);
+    assert.equal(applicable.results[0].citation_role, "supporting_reference");
+    assert.equal(applicable.results[0].hard_rule_allowed, true);
+    assert.equal(applicable.results[0].judge_questions.length > 0, true);
+    assert.equal(applicable.results[0].match_reasons.some((reason) => reason.startsWith("topic:生活方式")), true);
+
+    const blocked = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        topics: ["生活方式"],
+        risks: ["事实争议"],
+        actionType: "weibo-amplification",
+        query: "生活方式 事实争议 放大",
+        evidenceIds: [`comment-${evidenceCommentId}`]
+      })
+    ]);
+    assert.equal(blocked.ok, true);
+    assert.equal(blocked.results[0].passed, false);
+    assert.equal(blocked.results[0].status, "rejected");
+    assert.equal(blocked.results[0].citation_role, "blocked_by_do_not_apply");
+    assert.equal(blocked.results[0].hard_rule_allowed, false);
+    assert.equal(blocked.results[0].failure_reasons.includes("blocked_by_do_not_apply"), true);
+
+    const weak = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["framework:scct:risk-response-fit"],
+        platform: "weibo",
+        topics: ["危机回应"],
+        risks: ["事实争议"],
+        actionType: "risk-response",
+        query: "危机回应 责任归因 事实争议",
+        evidenceIds: [`comment-${evidenceCommentId}`]
+      })
+    ]);
+    assert.equal(weak.ok, true);
+    assert.equal(weak.results[0].passed, true);
+    assert.equal(weak.results[0].citation_role, "weak_inspiration");
+    assert.equal(weak.results[0].hard_rule_allowed, false);
+    assert.equal(weak.results[0].failure_reasons.length, 0);
+
+    const noEvidence = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        topics: ["生活方式"],
+        actionType: "weibo-amplification",
+        query: "生活方式 放大",
+        evidenceIds: [],
+        requireEvidence: true
+      })
+    ]);
+    assert.equal(noEvidence.ok, true);
+    assert.equal(noEvidence.results[0].passed, false);
+    assert.equal(noEvidence.results[0].status, "needs_evidence");
+    assert.equal(noEvidence.results[0].failure_reasons.includes("evidence_insufficient"), true);
+
+    const fakeEvidence = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        topics: ["生活方式"],
+        actionType: "weibo-amplification",
+        query: "生活方式 放大",
+        evidenceIds: ["comment-999999999"]
+      })
+    ]);
+    assert.equal(fakeEvidence.ok, true);
+    assert.equal(fakeEvidence.results[0].passed, false);
+    assert.equal(fakeEvidence.results[0].status, "needs_evidence");
+    assert.equal(fakeEvidence.results[0].failure_reasons.includes("evidence_not_found"), true);
+
+    const missingProject = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        topics: ["生活方式"],
+        actionType: "weibo-amplification",
+        query: "生活方式 放大",
+        evidenceIds: [`comment-${evidenceCommentId}`]
+      })
+    ]);
+    assert.equal(missingProject.ok, true);
+    assert.equal(missingProject.results[0].passed, false);
+    assert.equal(missingProject.results[0].status, "needs_evidence");
+    assert.equal(missingProject.results[0].failure_reasons.includes("evidence_project_required"), true);
+
+    const crossProjectEvidence = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        topics: ["生活方式"],
+        actionType: "weibo-amplification",
+        query: "生活方式 放大",
+        evidenceIds: [`comment-${crossProjectCommentId}`]
+      })
+    ]);
+    assert.equal(crossProjectEvidence.ok, true);
+    assert.equal(crossProjectEvidence.results[0].passed, false);
+    assert.equal(crossProjectEvidence.results[0].status, "needs_evidence");
+    assert.equal(crossProjectEvidence.results[0].failure_reasons.includes("evidence_not_found"), true);
+
+    const multiEvidence = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        topics: ["生活方式"],
+        actionType: "weibo-amplification",
+        query: "生活方式 放大",
+        evidenceIds: [
+          `comment-${evidenceCommentId}`,
+          `event-${evidenceEventId}`,
+          `action-${evidenceActionId}`,
+          `memory-${evidenceMemoryId}`
+        ]
+      })
+    ]);
+    assert.equal(multiEvidence.ok, true);
+    assert.equal(multiEvidence.results[0].passed, true);
+    assert.equal(multiEvidence.results[0].evidence_check.status, "ok");
+    assert.deepEqual(
+      multiEvidence.results[0].evidence_check.found.sort(),
+      [
+        `action-${evidenceActionId}`,
+        `comment-${evidenceCommentId}`,
+        `event-${evidenceEventId}`,
+        `memory-${evidenceMemoryId}`
+      ].sort()
+    );
+
+    const actionTextOnly = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIdentities: ["case:barbie:earned-media-lifestyle-symbol"],
+        platform: "weibo",
+        query: "轻量物料",
+        evidenceIds: [`comment-${evidenceCommentId}`]
+      })
+    ]);
+    assert.equal(actionTextOnly.ok, true);
+    assert.equal(actionTextOnly.results[0].passed, false);
+    assert.equal(actionTextOnly.results[0].status, "no_match");
+    assert.equal(actionTextOnly.results[0].failure_reasons.includes("applicable_context_not_matched"), true);
+
+    const inactiveCardId = queryRows("SELECT id FROM knowledge_cards WHERE card_identity='framework:aisas:social-sharing-path'")[0].id;
+    queryRows("UPDATE knowledge_cards SET status='inactive' WHERE id=%s", [inactiveCardId]);
+    const missingAndInactive = runWorker([
+      "weibo-knowledge-validate",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        cardIds: [999999999, inactiveCardId],
+        platform: "weibo",
+        query: "weibo",
+        evidenceIds: [`comment-${evidenceCommentId}`]
+      })
+    ]);
+    assert.equal(missingAndInactive.ok, true);
+    assert.equal(missingAndInactive.results.length, 2);
+    assert.equal(missingAndInactive.results.some((item) => item.status === "not_found" && item.card_id === 999999999), true);
+    const inactiveResult = missingAndInactive.results.find((item) => item.status === "inactive" && item.card_id === inactiveCardId);
+    assert.equal(Boolean(inactiveResult), true);
+    assert.equal(inactiveResult.hard_rule_allowed, false);
+    assert.notEqual(inactiveResult.citation_role, "supporting_reference");
+  }
+);
+
+test(
   "persists event feedback into feedback ledger, event status history, and memory in one MySQL transaction",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -3802,6 +4022,25 @@ function createProject(name) {
   return queryRows("SELECT id FROM monitor_projects WHERE project_name=%s ORDER BY id DESC LIMIT 1", [name])[0].id;
 }
 
+function createEvidenceComment(projectId, identity) {
+  queryRows(
+    `
+    INSERT INTO social_posts(project_id, platform, external_id, author_name, title, content, keyword, engagement, raw_json)
+    VALUES (%s,'weibo',%s,'测试账号','测试证据帖','测试证据帖内容','海岛舒服日志',1,JSON_OBJECT('identity', %s))
+    `,
+    [projectId, `post-${identity}`, identity]
+  );
+  const postId = queryRows("SELECT id FROM social_posts WHERE project_id=%s AND external_id=%s", [projectId, `post-${identity}`])[0].id;
+  queryRows(
+    `
+    INSERT INTO social_comments(post_id, project_id, platform, external_id, author_name, content, like_count, raw_json)
+    VALUES (%s,%s,'weibo',%s,'测试评论账号','真实评论证据：生活方式讨论正在形成。',1,JSON_OBJECT('identity', %s))
+    `,
+    [postId, projectId, `comment-${identity}`, identity]
+  );
+  return queryRows("SELECT id FROM social_comments WHERE project_id=%s AND external_id=%s", [projectId, `comment-${identity}`])[0].id;
+}
+
 function createEvent(projectId, identity) {
   queryRows(
     `
@@ -3829,6 +4068,17 @@ function createAction(projectId, identity) {
     [projectId, identity, identity]
   );
   return queryRows("SELECT id FROM publicity_actions WHERE project_id=%s AND action_identity=%s", [projectId, identity])[0].id;
+}
+
+function createMemory(projectId, identity) {
+  queryRows(
+    `
+    INSERT INTO bot_memory_items(project_id, source_kind, source_id, memory_identity, title, summary, evidence_ids, memory_json, importance)
+    VALUES (%s,'preference',NULL,%s,'测试记忆','测试记忆证据',JSON_ARRAY(),JSON_OBJECT('identity', %s),0.5)
+    `,
+    [projectId, `memory-${identity}`, identity]
+  );
+  return queryRows("SELECT id FROM bot_memory_items WHERE project_id=%s AND memory_identity=%s", [projectId, `memory-${identity}`])[0].id;
 }
 
 function createSourceAccount(projectId, identity, sourceType = "unknown") {

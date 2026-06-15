@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-if len(sys.argv) > 1 and sys.argv[1] in {"weibo-knowledge-seed", "weibo-knowledge-search"}:
+if len(sys.argv) > 1 and sys.argv[1] in {"weibo-knowledge-seed", "weibo-knowledge-search", "weibo-knowledge-validate"}:
     os.environ["YUQING_SKIP_ENV_FILE"] = "1"
 
 from workers import db
@@ -122,6 +122,7 @@ def main():
     add_payload_parser(sub, "weibo-agent-loop-handoff")
     add_payload_parser(sub, "weibo-knowledge-seed")
     add_payload_parser(sub, "weibo-knowledge-search")
+    add_payload_parser(sub, "weibo-knowledge-validate")
     e2e_fixture = sub.add_parser("weibo-fixture-e2e")
     e2e_fixture.add_argument("--now", required=True)
     search_fixture = sub.add_parser("weibo-parse-search-fixture")
@@ -226,6 +227,8 @@ def main():
             emit(weibo_knowledge_seed_payload(args.payload_json))
         elif args.command == "weibo-knowledge-search":
             emit(weibo_knowledge_search_payload(args.payload_json))
+        elif args.command == "weibo-knowledge-validate":
+            emit(weibo_knowledge_validate_payload(args.payload_json))
         elif args.command == "weibo-fixture-e2e":
             emit(weibo_fixture_e2e(args.now))
         elif args.command == "weibo-parse-search-fixture":
@@ -4750,6 +4753,7 @@ def knowledge_card_search_result(row, context):
 
     match_score = 0
     primary_match_score = 0
+    applicability_match_score = 0
     match_reasons = []
     for item in context["terms"]:
         source = item["source"]
@@ -4772,9 +4776,11 @@ def knowledge_card_search_result(row, context):
             match_score += delta
             if source not in {"platform", "project"}:
                 primary_match_score += delta
+                if location in {"tag", "applicable"}:
+                    applicability_match_score += delta
             match_reasons.append(f"{source}:{term}:{location}")
 
-    blocked_items = [item for item in context["terms"] if item["term"] and item["term"] in do_not_apply_text]
+    blocked_items = [item for item in context["terms"] if term_matches_do_not_apply(item["term"], do_not_apply_text)]
     blocked_terms = [item["term"] for item in blocked_items]
     blocked = bool(blocked_terms)
     if blocked:
@@ -4795,6 +4801,7 @@ def knowledge_card_search_result(row, context):
         "source_type": row.get("source_type"),
         "reliability_level": reliability,
         "citation_url": row.get("citation_url"),
+        "card_status": row.get("status"),
         "framework_or_case": row.get("framework_or_case"),
         "applicable_scenario": row.get("applicable_scenario"),
         "do_not_apply_when": row.get("do_not_apply_when"),
@@ -4806,6 +4813,7 @@ def knowledge_card_search_result(row, context):
         "score": score,
         "match_score": match_score,
         "primary_match_score": primary_match_score,
+        "applicability_match_score": applicability_match_score,
         "match_reasons": match_reasons,
         "blocked_by_do_not_apply": blocked,
         "blocked_terms": blocked_terms,
@@ -4818,6 +4826,15 @@ def reliability_weight(level):
     return {"A": 30, "B": 20, "C": 5}.get(level, 0)
 
 
+def term_matches_do_not_apply(term, do_not_apply_text):
+    if not term or term not in do_not_apply_text:
+        return False
+    for prefix in ["不涉及", "不包含", "不是", "并非"]:
+        if f"{prefix}{term}" in do_not_apply_text:
+            return False
+    return True
+
+
 def knowledge_result_sort_key(item):
     return (
         1 if item["blocked_by_do_not_apply"] else 0,
@@ -4827,6 +4844,244 @@ def knowledge_result_sort_key(item):
         -reliability_weight(item["reliability_level"]),
         str(item["card_identity"] or ""),
     )
+
+
+def weibo_knowledge_validate_payload(payload_json="{}"):
+    endpoint = "weibo-knowledge-validate"
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_knowledge_validate_payload",
+            "Knowledge validator payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object with cardIdentities or cardIds and context fields.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if not isinstance(payload, dict):
+        error = weibo_error(
+            "invalid_knowledge_validate_payload",
+            "Knowledge validator payload must be a JSON object.",
+            f"Received {type(payload).__name__}.",
+            "Pass a JSON object with cardIdentities or cardIds and context fields.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    card_identities = normalize_context_list(payload.get("cardIdentities") or payload.get("card_identities"))
+    card_ids = [item for item in [positive_integer_value(value) for value in normalize_context_list(payload.get("cardIds") or payload.get("card_ids"))] if item]
+    if not card_identities and not card_ids:
+        error = weibo_error(
+            "invalid_knowledge_validate_payload",
+            "Knowledge validator requires card IDs or identities.",
+            "cardIdentities or cardIds must contain at least one card reference.",
+            "Pass the knowledge cards proposed for citation.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+
+    rows = load_knowledge_cards_for_validation(card_identities, card_ids)
+    context = knowledge_search_context(payload)
+    evidence_ids = normalize_context_list(payload.get("evidenceIds") or payload.get("evidence_ids"))
+    require_evidence = bool(payload.get("requireEvidence", True))
+    project_id = positive_integer_value(payload.get("projectId") or payload.get("project_id"))
+    evidence_check = validate_knowledge_evidence(project_id, evidence_ids, require_evidence)
+    results = [knowledge_card_validation_result(row, context, evidence_ids, evidence_check) for row in rows]
+    found_identities = {row.get("card_identity") for row in rows}
+    found_ids = {int(row.get("id")) for row in rows if row.get("id") is not None}
+    for identity in card_identities:
+        if identity not in found_identities:
+            results.append({
+                "card_identity": identity,
+                "passed": False,
+                "status": "not_found",
+                "failure_reasons": ["knowledge_card_not_found"],
+                "judge_questions": [],
+                "citation_role": "missing",
+                "hard_rule_allowed": False,
+            })
+    for card_id in card_ids:
+        if card_id not in found_ids:
+            results.append({
+                "card_id": card_id,
+                "passed": False,
+                "status": "not_found",
+                "failure_reasons": ["knowledge_card_not_found"],
+                "judge_questions": [],
+                "citation_role": "missing",
+                "hard_rule_allowed": False,
+            })
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": endpoint,
+        "database": database,
+        "results": results,
+        "validated": len(results),
+        "evidence_ids": evidence_ids,
+        "evidence_check": evidence_check,
+    }
+
+
+def load_knowledge_cards_for_validation(card_identities, card_ids):
+    reference_conditions = []
+    params = []
+    if card_identities:
+        reference_conditions.append("c.card_identity IN (" + ",".join(["%s"] * len(card_identities)) + ")")
+        params.extend(card_identities)
+    if card_ids:
+        reference_conditions.append("c.id IN (" + ",".join(["%s"] * len(card_ids)) + ")")
+        params.extend(card_ids)
+    reference_clause = " OR ".join(reference_conditions)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                  c.*,
+                  s.source_identity,
+                  s.title AS source_title,
+                  s.source_type,
+                  s.reliability_level,
+                  s.citation_url,
+                  s.publisher
+                FROM knowledge_cards c
+                JOIN knowledge_sources s ON s.id=c.source_id
+                WHERE ({reference_clause})
+                ORDER BY c.id
+                """,
+                params,
+            )
+            return cur.fetchall()
+
+
+def knowledge_card_validation_result(row, context, evidence_ids, evidence_check):
+    result = knowledge_card_search_result(row, context)
+    failure_reasons = []
+    status = "passed"
+    if result["card_status"] != "active":
+        failure_reasons.append("knowledge_card_inactive")
+        status = "inactive"
+    elif result["blocked_by_do_not_apply"]:
+        failure_reasons.append("blocked_by_do_not_apply")
+        status = "rejected"
+    elif result["applicability_match_score"] <= 0:
+        failure_reasons.append("applicable_context_not_matched")
+        status = "no_match"
+
+    if evidence_check["failure_reason"] and evidence_check["failure_reason"] not in failure_reasons:
+        failure_reasons.append(evidence_check["failure_reason"])
+        if status == "passed":
+            status = "needs_evidence"
+
+    passed = not failure_reasons
+    citation_role = result["citation_role"]
+    if not passed and citation_role == "supporting_reference":
+        citation_role = {
+            "inactive": "inactive",
+            "no_match": "not_applicable",
+            "needs_evidence": "needs_evidence",
+        }.get(status, "not_supporting")
+    return {
+        **result,
+        "passed": passed,
+        "status": status if not passed else "passed",
+        "failure_reasons": failure_reasons,
+        "evidence_ids": evidence_ids,
+        "evidence_check": evidence_check,
+        "citation_role": citation_role,
+        "hard_rule_allowed": result["hard_rule_allowed"] if passed else False,
+    }
+
+
+def validate_knowledge_evidence(project_id, evidence_ids, require_evidence):
+    if not require_evidence:
+        return {
+            "status": "not_required",
+            "project_id": project_id,
+            "checked": False,
+            "found": [],
+            "missing": [],
+            "failure_reason": None,
+        }
+    if not evidence_ids:
+        return {
+            "status": "insufficient",
+            "project_id": project_id,
+            "checked": bool(project_id),
+            "found": [],
+            "missing": [],
+            "failure_reason": "evidence_insufficient",
+        }
+    if not project_id:
+        return {
+            "status": "project_required",
+            "project_id": None,
+            "checked": False,
+            "found": [],
+            "missing": [],
+            "failure_reason": "evidence_project_required",
+        }
+
+    references = [parse_knowledge_evidence_reference(value) for value in evidence_ids]
+    found = []
+    missing = []
+    for kind in ["comment", "event", "action", "memory"]:
+        ids = [ref["id"] for ref in references if ref["kind"] == kind]
+        if not ids:
+            continue
+        existing = load_project_evidence_ids(project_id, kind, ids)
+        for ref in [item for item in references if item["kind"] == kind]:
+            if ref["id"] in existing:
+                found.append(ref["raw"])
+            else:
+                missing.append(ref["raw"])
+    missing.extend(ref["raw"] for ref in references if ref["kind"] == "unsupported")
+    return {
+        "status": "ok" if not missing else "missing",
+        "project_id": project_id,
+        "checked": True,
+        "found": found,
+        "missing": missing,
+        "failure_reason": None if not missing else "evidence_not_found",
+    }
+
+
+def parse_knowledge_evidence_reference(value):
+    raw = str(value).strip()
+    match = re.match(r"^(comment|event|action|memory)-([1-9]\d*)$", raw)
+    if match:
+        return {"raw": raw, "kind": match.group(1), "id": int(match.group(2))}
+    numeric = positive_integer_value(raw)
+    if numeric:
+        return {"raw": raw, "kind": "comment", "id": numeric}
+    return {"raw": raw, "kind": "unsupported", "id": None}
+
+
+def load_project_evidence_ids(project_id, kind, ids):
+    table_by_kind = {
+        "comment": "social_comments",
+        "event": "artist_public_opinion_events",
+        "action": "publicity_actions",
+        "memory": "bot_memory_items",
+    }
+    table = table_by_kind[kind]
+    unique_ids = sorted(set(ids))
+    placeholders = ",".join(["%s"] * len(unique_ids))
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id FROM {table} WHERE project_id=%s AND id IN ({placeholders})",
+                [project_id, *unique_ids],
+            )
+            return {int(row["id"]) for row in cur.fetchall()}
 
 
 def prepare_agent_step_attachment(payload, project_id, command):

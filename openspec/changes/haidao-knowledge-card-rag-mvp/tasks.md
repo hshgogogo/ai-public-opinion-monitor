@@ -33,8 +33,8 @@
 - [x] 4.5 实现禁用条件过滤或 blocked 标记。
 - [x] 4.6 先写 C 级来源测试，断言 C 级来源排序低于 A/B，且不能作为硬规则结果。
 - [x] 4.7 实现 C 级来源弱启发标记。
-- [ ] 4.8 先写 Judge/validator 测试，覆盖 applicable_scenario、do_not_apply_when、judge_questions 和 C 级边界。
-- [ ] 4.9 实现 worker 级知识卡适用性 validator，供 Strategy/Q&A/Judge 复用。
+- [x] 4.8 先写 Judge/validator 测试，覆盖 applicable_scenario、do_not_apply_when、judge_questions 和 C 级边界。
+- [x] 4.9 实现 worker 级知识卡适用性 validator，供 Strategy/Q&A/Judge 复用。
 
 ## 5. Strategy Agent 行动建议引用
 
