@@ -2547,6 +2547,47 @@ test(
 );
 
 test(
+  "does not use knowledge cards to fabricate Weibo facts when current evidence is missing",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const projectId = createProject("海岛舒服日志 Q&A 知识不可替代证据");
+    const barbieCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='case:barbie:earned-media-lifestyle-symbol'"
+    )[0].id;
+    queryRows(
+      `
+      INSERT INTO bot_memory_items(project_id, source_kind, source_id, memory_identity, title, summary, evidence_ids, memory_json, importance)
+      VALUES (%s,'preference',NULL,'preference:knowledge-only','团队偏好','团队希望先观察生活方式讨论。',JSON_ARRAY(),JSON_OBJECT('source_of_truth','user_feedback'),0.8)
+      `,
+      [projectId]
+    );
+
+    const botAnswer = runWorker([
+      "weibo-bot-message",
+      "--payload-json",
+      JSON.stringify({ projectId, question: "生活方式视觉符号可以怎么回应？能参考知识卡吗？" })
+    ]);
+
+    assert.equal(botAnswer.ok, true);
+    assert.equal(botAnswer.answer.error.error_type, "insufficient_evidence");
+    assert.deepEqual(botAnswer.answer.citations, []);
+    assert.deepEqual(botAnswer.answer.knowledge_references, []);
+    assert.deepEqual(botAnswer.answer.facts, []);
+    assert.doesNotMatch(botAnswer.answer.text, /Barbie|Shorty|knowledge-card|知识卡|生活方式视觉符号/i);
+    assert.equal(
+      queryRows(
+        "SELECT COUNT(*) AS count FROM bot_messages WHERE project_id=%s AND role='assistant' AND JSON_CONTAINS(cited_source_ids, JSON_QUOTE(%s))",
+        [projectId, `knowledge-card-${barbieCardId}`]
+      )[0].count,
+      0
+    );
+  }
+);
+
+test(
   "persists Weibo discovery, target selection, and detail fixture rows into MySQL",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
