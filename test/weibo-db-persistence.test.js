@@ -1125,6 +1125,56 @@ test(
 );
 
 test(
+  "writes applicable knowledge card citations into Weibo action recommendations while preserving real evidence",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["weibo-knowledge-seed", "--payload-json", "{}"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const commentId = createEvidenceComment(projectId, "knowledge-action-real-comment");
+    createKnowledgeActionEvent(projectId, "knowledge-action-event", [commentId]);
+    const barbieCardId = queryRows(
+      "SELECT id FROM knowledge_cards WHERE card_identity='case:barbie:earned-media-lifestyle-symbol'"
+    )[0].id;
+
+    const builtActions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(builtActions.ok, true);
+    assert.equal(builtActions.persisted_actions, 1);
+    assert.equal(builtActions.actions[0].evidence_ids.includes(commentId), true);
+    assert.equal(builtActions.actions[0].raw_json.knowledge_card_ids.includes(barbieCardId), true);
+    const barbieFit = builtActions.actions[0].raw_json.knowledge_fit.find((item) => item.card_id === barbieCardId);
+    assert.equal(Boolean(barbieFit), true);
+    assert.equal(barbieFit.citation_role, "supporting_reference");
+    assert.equal(barbieFit.hard_rule_allowed, true);
+    assert.match(builtActions.actions[0].reason, /知识卡/);
+
+    const persisted = queryRows(
+      `
+      SELECT
+        evidence_ids,
+        raw_json
+      FROM publicity_actions
+      WHERE project_id=%s AND source='agent_recommended'
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [projectId]
+    )[0];
+    const persistedEvidenceIds = JSON.parse(persisted.evidence_ids);
+    const persistedRawJson = JSON.parse(persisted.raw_json);
+    const persistedFit = persistedRawJson.raw_json.knowledge_fit.find((item) => item.card_id === barbieCardId);
+    assert.equal(persistedEvidenceIds.includes(commentId), true);
+    assert.equal(persistedRawJson.raw_json.knowledge_card_ids.includes(barbieCardId), true);
+    assert.equal(persistedFit.citation_role, "supporting_reference");
+  }
+);
+
+test(
   "persists event feedback into feedback ledger, event status history, and memory in one MySQL transaction",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -4079,6 +4129,27 @@ function createMemory(projectId, identity) {
     [projectId, `memory-${identity}`, identity]
   );
   return queryRows("SELECT id FROM bot_memory_items WHERE project_id=%s AND memory_identity=%s", [projectId, `memory-${identity}`])[0].id;
+}
+
+function createKnowledgeActionEvent(projectId, identity, evidenceIds) {
+  queryRows(
+    `
+    INSERT INTO artist_public_opinion_events(
+      project_id, platform, event_identity, event_type, title, trigger_summary,
+      related_artists, status, risk_level, event_score, evidence_ids,
+      timeline_json, impact_assessment, recommended_actions, first_seen_at, last_seen_at
+    )
+    VALUES (
+      %s, 'weibo', %s, 'observation_lead',
+      '生活方式视觉符号正向讨论', '评论正在围绕生活方式和视觉符号自然二创',
+      JSON_ARRAY('刘昊然'), 'observing', 'low', 7.5,
+      %s, JSON_ARRAY(),
+      '低争议生活方式讨论适合观察自然扩散', JSON_ARRAY(), NOW(), NOW()
+    )
+    `,
+    [projectId, identity, JSON.stringify(evidenceIds)]
+  );
+  return queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s AND event_identity=%s", [projectId, identity])[0].id;
 }
 
 function createSourceAccount(projectId, identity, sourceType = "unknown") {

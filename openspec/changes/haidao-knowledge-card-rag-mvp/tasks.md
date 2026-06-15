@@ -38,10 +38,10 @@
 
 ## 5. Strategy Agent 行动建议引用
 
-- [ ] 5.1 先写 action build citation 测试，断言建议引用 knowledge_card_id 且保留真实 Weibo evidence IDs。
-- [ ] 5.2 `weibo-actions-build` 读取知识卡检索和 validator 结果。
-- [ ] 5.3 生成 `agent_recommended` action 时在 `raw_json.knowledge_card_ids` 保存知识卡 ID。
-- [ ] 5.4 action reason 或 `raw_json.knowledge_fit` 保存适用性摘要。
+- [x] 5.1 先写 action build citation 测试，断言建议引用 knowledge_card_id 且保留真实 Weibo evidence IDs。
+- [x] 5.2 `weibo-actions-build` 读取知识卡检索和 validator 结果。
+- [x] 5.3 生成 `agent_recommended` action 时在 `raw_json.knowledge_card_ids` 保存知识卡 ID。
+- [x] 5.4 action reason 或 `raw_json.knowledge_fit` 保存适用性摘要。
 - [ ] 5.5 先写 blocked card 测试，断言禁用条件命中的知识卡不能成为支持引用。
 - [ ] 5.6 实现 blocked card 不写入 action supporting citations。
 - [ ] 5.7 先写 C 级来源 action 测试，断言只有 C 级来源命中时不得把它写成硬规则或主要依据。

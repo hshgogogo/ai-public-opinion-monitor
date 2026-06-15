@@ -3068,7 +3068,8 @@ def weibo_actions_build_payload(payload_json="{}"):
                 )
                 rows = cur.fetchall()
                 preference_memories = load_preference_memories(cur, project["id"])
-        actions = [action_from_event(row, now, preference_memories) for row in rows]
+                knowledge_rows = load_active_knowledge_card_rows(cur)
+        actions = [action_from_event(row, now, preference_memories, project["id"], knowledge_rows) for row in rows]
         persisted = persist_publicity_actions(project["id"], actions, {"by_external_id": {}, "by_display_name": {}, "all_ids": []}) if actions else 0
         result = {
             "ok": True,
@@ -3122,15 +3123,25 @@ def preference_memory_payload(row):
     }
 
 
-def action_from_event(row, now, preference_memories=None):
+def action_from_event(row, now, preference_memories=None, project_id=None, knowledge_rows=None):
     event = event_row_to_payload(row)
-    evidence_ids = [numeric_id(item) for item in event.get("evidence_ids", [])]
+    raw_evidence_ids = event.get("evidence_ids", [])
+    evidence_ids = [numeric_id(item) for item in raw_evidence_ids]
     if not evidence_ids:
         evidence_ids = [row["id"]]
     action_type = recommended_action_type(event)
     preference_constraint = action_preference_constraint(action_type, preference_memories or [])
     if preference_constraint:
         action_type = "monitor_and_prepare_material"
+    knowledge_fit = knowledge_fit_for_action(
+        project_id,
+        event,
+        action_type,
+        evidence_ids if raw_evidence_ids else [],
+        knowledge_rows or [],
+    )
+    raw_json = action_preference_raw_json(preference_constraint)
+    raw_json.update(action_knowledge_raw_json(knowledge_fit))
     return {
         "id": f"agent-event-{row['id']}",
         "source": "agent_recommended",
@@ -3139,7 +3150,7 @@ def action_from_event(row, now, preference_memories=None):
         "confirmation_status": "pending",
         "action_type": action_type,
         "content_summary": recommended_action_summary(event, action_type),
-        "reason": recommended_action_reason(event, preference_constraint),
+        "reason": recommended_action_reason(event, preference_constraint, knowledge_fit),
         "evidence_ids": evidence_ids,
         "priority": recommended_action_priority(event),
         "owner_suggestion": "宣发负责人",
@@ -3148,7 +3159,109 @@ def action_from_event(row, now, preference_memories=None):
         "confirmed_at": None,
         "effective_at": None,
         "recommended_check_after_at": now,
-        "raw_json": action_preference_raw_json(preference_constraint),
+        "raw_json": raw_json,
+    }
+
+
+def load_active_knowledge_card_rows(cur):
+    cur.execute(
+        """
+        SELECT
+          c.*,
+          s.source_identity,
+          s.title AS source_title,
+          s.source_type,
+          s.reliability_level,
+          s.citation_url,
+          s.publisher
+        FROM knowledge_cards c
+        JOIN knowledge_sources s ON s.id=c.source_id
+        WHERE c.status='active'
+        ORDER BY c.id
+        """
+    )
+    return cur.fetchall()
+
+
+def knowledge_fit_for_action(project_id, event, action_type, evidence_ids, knowledge_rows):
+    if not project_id or not evidence_ids or not knowledge_rows:
+        return []
+    evidence_values = [str(item) for item in evidence_ids]
+    evidence_check = validate_knowledge_evidence(project_id, evidence_values, True)
+    if evidence_check.get("failure_reason"):
+        return []
+    context = action_knowledge_context(event, action_type)
+    results = [
+        knowledge_card_validation_result(row, context, evidence_values, evidence_check)
+        for row in knowledge_rows
+    ]
+    passed = [item for item in results if item["passed"] and not item["blocked_by_do_not_apply"]]
+    passed.sort(key=knowledge_result_sort_key)
+    return passed[:3]
+
+
+def action_knowledge_context(event, action_type):
+    text = " ".join(
+        str(part)
+        for part in [
+            event.get("title"),
+            event.get("trigger_summary"),
+            event.get("impact_assessment"),
+            " ".join(event.get("recommended_actions") or []),
+            recommended_action_summary(event, action_type),
+        ]
+        if part
+    )
+    topics = extract_action_knowledge_topics(text)
+    return knowledge_search_context({
+        "platform": "weibo",
+        "actionType": action_type,
+        "query": " ".join([text, *topics]),
+        "topics": topics,
+    })
+
+
+def extract_action_knowledge_topics(text):
+    candidates = [
+        "生活方式",
+        "视觉符号",
+        "自然二创",
+        "二创",
+        "正向讨论",
+        "事实争议",
+        "责任归因",
+        "危机回应",
+        "官宣",
+        "可信度",
+        "搜索",
+        "转发",
+        "评论",
+    ]
+    return [term for term in candidates if term in text]
+
+
+def action_knowledge_raw_json(knowledge_fit):
+    if not knowledge_fit:
+        return {}
+    return {
+        "knowledge_card_ids": [item["card_id"] for item in knowledge_fit],
+        "knowledge_fit": [action_knowledge_fit_summary(item) for item in knowledge_fit],
+    }
+
+
+def action_knowledge_fit_summary(item):
+    return {
+        "card_id": item["card_id"],
+        "card_identity": item.get("card_identity"),
+        "source_id": item.get("source_id"),
+        "source_identity": item.get("source_identity"),
+        "reliability_level": item.get("reliability_level"),
+        "citation_role": item.get("citation_role"),
+        "hard_rule_allowed": bool(item.get("hard_rule_allowed")),
+        "match_reasons": item.get("match_reasons", [])[:8],
+        "applicable_scenario": item.get("applicable_scenario"),
+        "do_not_apply_when": item.get("do_not_apply_when"),
+        "judge_questions": item.get("judge_questions", []),
     }
 
 
@@ -3192,12 +3305,15 @@ def recommended_action_summary(event, action_type=None):
     return "持续观察该微博议题，并准备低风险生活方式或物料补充。"
 
 
-def recommended_action_reason(event, preference_constraint=None):
+def recommended_action_reason(event, preference_constraint=None, knowledge_fit=None):
     evidence_ids = event.get("evidence_ids") or []
     base = f"{event.get('title') or '微博事件'} 已形成 {len(evidence_ids)} 条证据，当前风险 {event.get('risk_level') or 'unknown'}，建议先进入人工确认队列。"
-    if not preference_constraint:
-        return base
-    return f"{base} 用户偏好记忆 #{preference_constraint['id']} 要求避免默认公开澄清，本建议改为继续观察并准备材料。"
+    if knowledge_fit:
+        ids = "、".join(f"#{item['card_id']}" for item in knowledge_fit)
+        base = f"{base} 参考知识卡 {ids} 的适用性摘要，但知识卡仅作为宣发参考，真实依据仍为微博证据。"
+    if preference_constraint:
+        base = f"{base} 用户偏好记忆 #{preference_constraint['id']} 要求避免默认公开澄清，本建议改为继续观察并准备材料。"
+    return base
 
 
 def recommended_action_priority(event):
