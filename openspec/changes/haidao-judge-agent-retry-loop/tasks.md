@@ -1,8 +1,8 @@
 ## 1. OpenSpec 与范围锁定
 
 - [x] 1.1 创建 `haidao-judge-agent-retry-loop` proposal、design、tasks 和 specs。
-- [x] 1.2 明确本 change 只做 worker-only Judge retry，不新增 public HTTP endpoint 或前端控件。
-- [x] 1.3 明确本 change 不引入 CrewAI runtime、FastAPI、React，也不调用真实 MediaCrawler/微博登录。
+- [x] 1.2 将本 change 从旧 worker-only 主线 rescope 到 FastAPI/CrewAI Harness quality gate。
+- [x] 1.3 明确本 change 复用 CrewAI proposal-only runtime contract，不重新实现真实 CrewAI runtime，也不调用真实 MediaCrawler/微博登录。
 - [x] 1.4 明确 Judge 不覆盖事实表、不决定确定性数值、不自动确认现实行动。
 - [x] 1.5 明确 Q&A、Report、Backtest 的 Judge 接入后置。
 - [x] 1.6 运行 `openspec validate haidao-judge-agent-retry-loop --strict`。
@@ -16,10 +16,10 @@
 - [ ] 2.5 先写边界测试，覆盖空泛建议、知识卡当事实、C 级知识卡当硬规则、确定性数值越权和因果过度表述。
 - [ ] 2.6 实现规则化边界检查；首版只做可确定检查，不调用 LLM Judge。
 
-## 3. Retry 编排
+## 3. FastAPI Harness Retry 编排
 
-- [ ] 3.1 先写 worker-only retry command 测试，覆盖失败两轮后第三轮通过。
-- [ ] 3.2 新增 `weibo-agent-loop-judge-run` worker 命令或等价 worker-only payload 路径。
+- [ ] 3.1 先写 FastAPI/service-level retry contract 测试，覆盖失败两轮后第三轮通过。
+- [ ] 3.2 新增 Harness-owned Judge service 或 FastAPI worker-facing endpoint；不得把新增主业务写回旧 `enterprise_worker.py`。
 - [ ] 3.3 retry 每轮 MUST 写入一条 `judge_reviews`，包含 retry count、required changes、evidence errors 和失败输出摘要。
 - [ ] 3.4 通过时 MUST 写入 passed review，且 loop 不进入 `needs_human`。
 - [ ] 3.5 先写 retry exhausted 测试，覆盖连续 3 次总尝试失败。
@@ -29,12 +29,12 @@
 
 ## 4. Step 集成边界
 
-- [ ] 4.1 先写 step output review 测试，覆盖 `weibo-comments-analyze` attachment 输出被 Judge 检查。
-- [ ] 4.2 为 comment analysis step 提供 Judge review 输入映射。
-- [ ] 4.3 先写事件 step review 测试，覆盖无事件证据或 formal event 证据不足被拒绝。
-- [ ] 4.4 为 event-building step 提供 Judge review 输入映射。
-- [ ] 4.5 先写 action step review 测试，覆盖无 evidence、禁用知识卡、空泛建议或因果过度表述被拒绝。
-- [ ] 4.6 为 action recommendation step 提供 Judge review 输入映射。
+- [ ] 4.1 先写 proposal/step output review 测试，覆盖 CrewAI proposal audit 或 `weibo-comments-analyze` attachment 输出被 Judge 检查。
+- [ ] 4.2 为 comment analysis proposal/step 提供 Judge review 输入映射。
+- [ ] 4.3 先写事件 proposal/step review 测试，覆盖无事件证据或 formal event 证据不足被拒绝。
+- [ ] 4.4 为 event-building proposal/step 提供 Judge review 输入映射。
+- [ ] 4.5 先写 action proposal/step review 测试，覆盖无 evidence、禁用知识卡、空泛建议或因果过度表述被拒绝。
+- [ ] 4.6 为 action recommendation proposal/step 提供 Judge review 输入映射。
 - [ ] 4.7 明确 `weibo-bot-message` 不在本 change 接入 Judge retry，保持 step attachment 既有行为。
 
 ## 5. 持久化与状态查询
@@ -46,14 +46,14 @@
 
 ## 6. 安全与兼容
 
-- [ ] 6.1 增加静态测试，确认本 change 不新增 public Judge HTTP endpoint。
+- [ ] 6.1 增加静态测试，确认本 change 不新增旧 Node public Judge endpoint，且 FastAPI Judge endpoint 不接受 prompt/runtime/cookie/db-url 等控制字段。
 - [ ] 6.2 增加测试，确认不读取或输出 `.env`、Cookie、token、浏览器登录态、`config/cookies/weibo.json` 或 worker stderr。
 - [ ] 6.3 未传 `agentLoopRunId` 时现有 worker 命令 standalone 行为保持不变。
-- [ ] 6.4 本 change 不调用真实 MediaCrawler、真实微博登录、CrewAI runtime 或新的付费 API。
+- [ ] 6.4 本 change 不调用真实 MediaCrawler、真实微博登录、真实 CrewAI 外部模型或新的付费 API。
 
 ## 7. 文档、验证与交付
 
-- [ ] 7.1 更新 README 或相关 docs，说明 Judge retry worker-only 能力、限制和人工处理状态。
+- [ ] 7.1 更新 README 或相关 docs，说明 Judge retry FastAPI Harness 能力、限制和人工处理状态。
 - [ ] 7.2 运行定向测试。
 - [ ] 7.3 运行 `npm test`。
 - [ ] 7.4 运行真实 MySQL persistence tests。

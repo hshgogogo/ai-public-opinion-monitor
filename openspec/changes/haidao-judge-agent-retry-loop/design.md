@@ -1,31 +1,43 @@
 ## Context
 
-`haidao-agent-harness-loop-foundation` 已经提供 `agent_loop_runs`、`agent_step_runs`、`judge_reviews` 和 `feedback_items`。`haidao-agent-loop-step-attachment` 已允许现有微博 worker 命令在显式 `agentLoopRunId` 下写入 step evidence。`haidao-knowledge-card-rag-mvp` 已让行动建议和 Q&A 能引用知识卡，并明确知识卡不能替代真实微博证据。
+`haidao-agent-harness-loop-foundation` 已经提供 `agent_loop_runs`、`agent_step_runs`、`judge_reviews` 和 `feedback_items`。`haidao-agent-loop-step-attachment` 已允许现有微博 worker 命令在显式 `agentLoopRunId` 下写入 step evidence。`haidao-knowledge-card-rag-mvp` 已让行动建议和 Q&A 能引用知识卡，并明确知识卡不能替代真实微博证据。`haidao-fastapi-sidecar-harness` 与 `haidao-crewai-runtime-adapter` 已经建立 FastAPI Harness 和 proposal-only CrewAI adapter。
 
-本 change 在这些基础上补齐 Judge retry 编排。它仍在现有 Node + Python worker + MySQL 架构内实现，不引入 FastAPI/CrewAI/React，不新增公开 HTTP endpoint。
+本 change 在这些基础上补齐 Judge retry 编排。根据 2026-06-16 架构调整，它必须在 FastAPI/CrewAI Harness 上实现或迁移，不再把新增 Judge 主业务写进旧 Node/Python worker。旧 worker 只保留为 legacy tool adapter 和既有 ledger helper。
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- 为微博分析、事件生成和行动建议 step 提供统一 Judge review。
+- 为微博分析、事件生成和行动建议 proposal/step 提供统一 Judge review。
 - 对缺失证据、不存在 evidence ID、空泛建议、数值指标越权、知识卡误用、因果过度表述等问题返回 failed review。
 - 失败时把 required changes、evidence errors、失败输出摘要和 retry count 写入 `judge_reviews`。
 - 最多执行 3 次总尝试；第 3 次仍失败时将 step/loop 标为 `needs_human` 并创建人工处理记录。
 - 通过 review 时记录 passed review，但 Judge 不覆盖事实表、事件表或行动表。
-- 提供 fixture/fake 路径，使本地和真实 MySQL 测试可验证完整 retry 语义。
+- 提供 FastAPI service-level fixture/fake runtime 路径，使本地和真实 MySQL 测试可验证完整 retry 语义。
 
 **Non-Goals:**
 
-- 不实现真实 CrewAI runtime。
+- 不重新实现 CrewAI runtime；复用 `haidao-crewai-runtime-adapter` 的 proposal-only runtime contract。
 - 不调用真实 MediaCrawler 或真实微博登录。
 - 不强制 DeepSeek live call；可用 fixture/fake output 测试。
-- 不新增前端控件或 public HTTP API。
+- 不新增前端控件；首轮如需 HTTP，只新增 FastAPI Harness 内部/worker-facing endpoint，不新增旧 Node public endpoint。
 - 不把 Q&A、Report 或 Backtest 接入 Judge retry；这些属于后续 change。
 - 不让 Judge 决定情感分数、事件分数、趋势窗口或 backtest signal 等确定性数值。
 - 不让 Judge 自动确认现实宣发动作。
 
 ## Decisions
+
+### 0. Judge retry 属于 FastAPI Harness 主线
+
+实现入口应优先放在 FastAPI service 层，例如：
+
+```text
+POST /api/weibo/agent-runs/{id}/judge/reviews
+```
+
+或等价内部 service function。输入只允许 project/run/stage、proposal audit id、step run id、attempt index、fixture/fake proposal output 等 Harness-scoped 字段。不得接受 prompt、runtime module、Cookie path、DB URL、任意文件路径或旧 worker 任意命令。
+
+Judge 读取 proposal 时优先基于 `agent_step_runs` 中 `crewai_proposal_audit` 记录和已存在 step evidence；legacy worker 输出只能通过 FastAPI allowlisted tool/adapter 转成 scoped evidence summary 后进入 Judge。Judge 的提交、审计、retry 和 handoff 写入均由 Harness-owned service 完成。
 
 ### 1. 先做规则化 Judge，再接 LLM Judge
 
@@ -41,14 +53,14 @@
 - 文案是否把知识卡、推断、建议写成当前微博事实。
 - 文案是否把 backtest/动作效果说成单因果结论。
 
-LLM Judge 或 CrewAI Judge 后续可以作为另一个 reviewer 接入，但首版必须本地可测、可复现。
+LLM Judge 或 CrewAI Judge 后续可以作为另一个 reviewer 接入，但首版必须本地可测、可复现，并且仍然通过 proposal-only runtime contract 进入 Harness。
 
-### 2. Judge retry 是 worker-only orchestration
+### 2. Judge retry 是 Harness-owned orchestration
 
-新增 worker-only 命令建议：
+新增 FastAPI service/endpoint 建议：
 
 ```text
-weibo-agent-loop-judge-run
+POST /api/weibo/agent-runs/{id}/judge/reviews
 ```
 
 payload 示例：
@@ -56,7 +68,7 @@ payload 示例：
 ```json
 {
   "projectId": 1,
-  "agentLoopRunId": 12,
+  "proposalAuditId": 56,
   "stepRunId": 34,
   "maxAttempts": 3,
   "fixtureOutputs": [
@@ -67,7 +79,7 @@ payload 示例：
 }
 ```
 
-实现可以先支持 fixture/fake output retry，用于验证状态机；下一步再把它包到真实 `weibo-comments-analyze` / `weibo-events-build` / `weibo-actions-build` 调用链中。`weibo-bot-message` 不在本 change 接入。
+实现可以先支持 service-level fixture/fake proposal output retry，用于验证状态机；下一步再把它包到真实 CrewAI proposal run、legacy adapter step output 和后续分析/事件/行动 proposal 流中。`weibo-bot-message` 不在本 change 接入。
 
 术语固定为：
 
@@ -75,6 +87,7 @@ payload 示例：
 - `retry_count` 表示写入当前 review 前已经失败的尝试次数。
 - 第 1 次 review 写 `retry_count=0`；第 2 次写 `retry_count=1`；第 3 次写 `retry_count=2`。
 - 调用方传入 `maxRetries` 时只能作为兼容别名解释为 `maxAttempts`，并 clamp 到 3。
+- 旧 `weibo-agent-loop-judge-review` 只能作为既有 ledger helper 保持兼容，不应扩展为新的 Judge retry 主入口。
 
 ### 3. 重试记录不覆盖事实表
 
@@ -91,7 +104,7 @@ payload 示例：
 
 如果最后通过，追加 `status = passed`、`passed = true` 的 review。Judge 不直接更新 `sentiment_results`、`artist_public_opinion_events` 或 `publicity_actions` 的事实内容；它只更新 step/loop 状态和 review/handoff 账本。
 
-本 change 的质量门是 post-write review：前序 worker 可能已经把候选分析、事件或行动建议写入业务表。Judge 失败时不得删除、覆盖或改写这些事实字段，但 MUST 把对应 step 标为未接受/failed 或 `needs_human`，让 Agent Loop、状态查询和后续工作台不能把该 step 当作 accepted output。
+本 change 的质量门是 proposal/post-write review：前序 worker 或 CrewAI proposal 可能已经产生候选分析、事件或行动建议。Judge 失败时不得删除、覆盖或改写事实字段，但 MUST 把对应 proposal/step 标为未接受/failed 或 `needs_human`，让 Agent Loop、状态查询和后续工作台不能把该 output 当作 accepted。
 
 ### 4. 第 3 次总尝试失败进入人工处理
 
@@ -154,9 +167,9 @@ Judge review、handoff、status payload 不得暴露：
 
 ## Verification Strategy
 
-- 静态测试：OpenSpec 任务和 worker 文本不得引入 public Judge endpoint、CrewAI runtime、真实微博/Cookie 调用。
+- 静态测试：OpenSpec 任务不得把 Judge 主业务放回旧 worker；FastAPI endpoint/service 不得引入真实微博/Cookie 调用或任意 runtime control。
 - 规则测试：无 evidence、错误 evidence ID、空泛建议、禁用知识卡、C 级硬规则、数值越权分别被 Judge 拒绝。
 - Retry 测试：失败两轮后第三轮通过，写入 2 条 failed review + 1 条 passed review，loop 最终不进入人工处理。
 - Exhaustion 测试：连续 3 次总尝试失败后 step/loop `needs_human`，创建 handoff。
-- 真实 MySQL 测试：migration 后运行 worker-only retry 命令，查询 `judge_reviews`、`agent_step_runs`、`agent_loop_runs`、`feedback_items`。
+- 真实 MySQL 测试：migration 后运行 FastAPI/service-level Judge retry，查询 `judge_reviews`、`agent_step_runs`、`agent_loop_runs`、`feedback_items`。
 - 常规验证：`npm test`、真实 MySQL `npm test`、`openspec validate haidao-judge-agent-retry-loop --strict`、`git diff --check`、`npm run agent:guard`。
