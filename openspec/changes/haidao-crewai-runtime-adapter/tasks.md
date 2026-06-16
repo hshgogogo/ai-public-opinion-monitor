@@ -7,12 +7,12 @@
 
 ## 2. Proposal Schema Foundation
 
-- [ ] 2.1 Write failing tests for valid proposal-only payloads.
-- [ ] 2.2 Write failing tests rejecting non-`proposal_only` write intents.
-- [ ] 2.3 Write failing tests rejecting facts/inferences/recommendations without evidence IDs.
-- [ ] 2.4 Implement minimal proposal schema/validator module.
-- [ ] 2.5 Write failing tests rejecting malformed JSON, missing required fields, invalid enum values, invalid confidence values, and raw model output leakage.
-- [ ] 2.6 Ensure validation errors use stable public `error_type=crewai_invalid_proposal` and do not expose raw model output.
+- [x] 2.1 Write failing tests for valid proposal-only payloads.
+- [x] 2.2 Write failing tests rejecting non-`proposal_only` write intents.
+- [x] 2.3 Write failing tests rejecting facts/inferences/recommendations without evidence IDs.
+- [x] 2.4 Implement minimal proposal schema/validator module.
+- [x] 2.5 Write failing tests rejecting malformed JSON, missing required fields, invalid enum values, invalid confidence values, and raw model output leakage.
+- [x] 2.6 Ensure validation errors use stable public `error_type=crewai_invalid_proposal` and do not expose raw model output.
 
 ## 3. Harness Tool Gateway
 
@@ -50,10 +50,10 @@
 
 ## 7. Verification And Review
 
-- [ ] 7.1 Run targeted CrewAI adapter tests.
-- [ ] 7.2 Run `npm test`.
-- [ ] 7.3 Run real MySQL test suite when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
-- [ ] 7.4 Run `openspec validate haidao-crewai-runtime-adapter --strict`.
-- [ ] 7.5 Run `git diff --check`.
-- [ ] 7.6 Run `npm run agent:guard`.
+- [x] 7.1 Run targeted CrewAI adapter tests.
+- [x] 7.2 Run `npm test`.
+- [x] 7.3 Run real MySQL test suite when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
+- [x] 7.4 Run `openspec validate haidao-crewai-runtime-adapter --strict`.
+- [x] 7.5 Run `git diff --check`.
+- [x] 7.6 Run `npm run agent:guard`.
 - [ ] 7.7 Complete subagent review, evidence report, commit, push, and PR update.
