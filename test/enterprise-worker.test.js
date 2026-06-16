@@ -892,6 +892,15 @@ test("knowledge worker commands do not auto-load dotenv at process import time",
   assert.match(payload.cause, /MYSQL_URL is not configured/);
 });
 
+test("knowledge card RAG remains worker-only without a public knowledge-card API", () => {
+  const server = readText("src/server.js");
+
+  assert.equal(server.includes("/api/knowledge"), false);
+  assert.equal(server.includes("weibo-knowledge-search"), false);
+  assert.equal(server.includes("weibo-knowledge-seed"), false);
+  assert.equal(server.includes("weibo-knowledge-validate"), false);
+});
+
 function readText(path) {
   return spawnSync("node", ["-e", `process.stdout.write(require("fs").readFileSync(${JSON.stringify(path)}, "utf8"))`], {
     cwd: process.cwd(),

@@ -281,20 +281,20 @@ def health_payload():
     if not weibo_auth:
         weibo_auth = {"platform": "weibo", "cookie_file": os.environ.get("WEIBO_COOKIE_FILE", "config/cookies/weibo.json"), "status": auth_status_from_cookie()}
     weibo_status = normalize_auth_status(weibo_auth.get("status"))
+    public_auth = [public_auth_state(row) for row in auth]
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
         "database": database,
-        "auth": auth,
+        "auth": public_auth,
         "weiboMvp": {
             "database": database,
             "mediacrawler": mediacrawler_health(),
             "cdp": cdp_health(),
             "auth": {
                 "platform": "weibo",
-                "cookie_file": weibo_auth.get("cookie_file"),
                 "status": weibo_status,
-                "error": auth_error(weibo_status),
+                "error": public_auth_error(weibo_status),
             },
         },
         "platforms": list(PLATFORM_LABELS.keys()),
@@ -447,7 +447,7 @@ def build_snapshot(project, items, database, strategy):
         "enterprise": {
             "mode": "real-data-only",
             "database": database,
-            "auth": auth_states(),
+            "auth": public_auth_states(),
             "allowedPlatforms": list(PLATFORM_LABELS.keys()),
             "message": "所有指标来自 MySQL 中的真实采集评论；无数据时不使用 mock。",
         },
@@ -541,6 +541,20 @@ def auth_states():
         with conn.cursor() as cur:
             cur.execute("SELECT platform, cookie_file, status, last_checked_at FROM platform_auth_states ORDER BY platform")
             return cur.fetchall()
+
+
+def public_auth_states():
+    return [public_auth_state(row) for row in auth_states()]
+
+
+def public_auth_state(row):
+    status = normalize_auth_status(row.get("status"))
+    return {
+        "platform": row.get("platform"),
+        "status": status,
+        "last_checked_at": iso_or_none(row.get("last_checked_at")),
+        "error": public_auth_error(status),
+    }
 
 
 def upsert_post(project_id, platform, post):
@@ -771,6 +785,21 @@ def auth_error(status):
     return weibo_error(error_type, message, cause, fix)
 
 
+def public_auth_error(status):
+    if status == "configured":
+        return None
+    mapping = {
+        "missing": ("auth_required", "Weibo auth cookie is missing.", "The local Weibo authentication state is not configured.", "Refresh the local Weibo authentication state before real collection."),
+        "invalid": ("auth_invalid", "Weibo auth cookie is invalid.", "The stored local authentication state cannot authenticate Weibo requests.", "Refresh the local Weibo authentication state from a valid browser session."),
+        "expired": ("auth_expired", "Weibo auth cookie is expired.", "The stored local authentication state has expired.", "Refresh the local Weibo authentication state from a valid browser session."),
+        "verification_required": ("platform_verification_required", "Weibo requires account verification.", "The current Weibo session is blocked by a verification challenge.", "Complete verification in the browser before retrying."),
+        "rate_limited": ("platform_rate_limited", "Weibo is rate limited.", "The account or IP is currently throttled by Weibo.", "Wait before retrying and reduce collection frequency."),
+        "unknown": ("auth_unknown", "Weibo auth state is unknown.", "The system could not determine whether authentication is usable.", "Run health again after checking the local authentication state."),
+    }
+    error_type, message, cause, fix = mapping.get(status, mapping["unknown"])
+    return weibo_error(error_type, message, cause, fix)
+
+
 def weibo_error(error_type, message, cause, fix, docs_anchor=None):
     payload = {
         "ok": False,
@@ -895,9 +924,9 @@ def weibo_workbench_payload(payload_json="{}"):
                 (project["id"], project["id"]),
             )
             backtest_count = cur.fetchone()["count"]
-    target_payloads = [target_row_to_payload(row) for row in targets]
+    target_payloads = [target_row_to_payload(row, public=True) for row in targets]
     event_payloads = [event_row_to_payload(row) for row in events]
-    action_payloads = [action_row_to_payload(row) for row in actions]
+    action_payloads = [action_row_to_payload(row, public=True) for row in actions]
     progress = {
         "target_count": len(target_payloads),
         "comment_count": int(comment_count or 0),
@@ -1787,7 +1816,7 @@ def weibo_discovery_payload(payload_json="{}"):
         "status": task_status,
         "database": database,
         "task": task_payload(task_id, "weibo", keyword, "search"),
-        "targets": persisted_targets,
+        "targets": [public_target_payload(target) for target in persisted_targets],
         "persisted_targets": len(persisted_targets),
         "failed_records": failed_records,
     }
@@ -1828,7 +1857,7 @@ def weibo_targets_payload(payload_json="{}"):
         "ok": True,
         "mode": "weibo-agent-mvp",
         "database": database,
-        "targets": [target_row_to_payload(row) for row in rows],
+        "targets": [target_row_to_payload(row, public=True) for row in rows],
     }
 
 
@@ -1871,7 +1900,7 @@ def weibo_target_state_payload(payload_json, selected_status):
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "target": target_row_to_payload(updated),
+        "target": target_row_to_payload(updated, public=True),
     }
 
 
@@ -1946,7 +1975,7 @@ def weibo_collect_target_payload(payload_json, target_id):
                 docs_anchor="weibo-target-selection",
             ),
             "target_selected_state": target["selected_status"],
-            "target": target_row_to_payload(target),
+            "target": target_row_to_payload(target, public=True),
         }
     locator = db.jloads(target.get("target_locator"), {})
     locator_check = validate_weibo_target_locator(locator)
@@ -2124,7 +2153,7 @@ def weibo_collect_target_payload(payload_json, target_id):
         "database": database,
         "status": detail["status"],
         "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
-        "target": target_row_to_payload(target),
+        "target": target_row_to_payload(target, public=True),
         "parsed_records": detail["parsed_records"],
         "failed_records": detail["failed_records"],
         "persisted_posts": persisted_posts,
@@ -2560,8 +2589,8 @@ def mediacrawler_cookie_header():
         return None, weibo_error(
             "auth_required",
             "Weibo auth cookie is missing.",
-            "WEIBO_COOKIE_FILE does not point to an existing cookie file.",
-            "Log in to Weibo, export cookies to WEIBO_COOKIE_FILE, and rerun the search task.",
+            "The local Weibo authentication state is not configured.",
+            "Refresh the local Weibo authentication state before retrying real collection.",
             docs_anchor="weibo-discovery",
         )
     try:
@@ -2571,7 +2600,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             f"Cookie file could not be parsed: {type(exc).__name__}.",
-            "Refresh WEIBO_COOKIE_FILE with a valid cookie list or Playwright storageState JSON.",
+            "Refresh the local Weibo authentication state from a valid browser session.",
             docs_anchor="weibo-discovery",
         )
     if isinstance(data, str):
@@ -2579,7 +2608,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             "Raw cookie header strings are not accepted because domains cannot be filtered safely.",
-            "Refresh WEIBO_COOKIE_FILE with a browser cookie list or Playwright storageState JSON.",
+            "Refresh the local Weibo authentication state from a browser-exported cookie list or storage state.",
             docs_anchor="weibo-discovery",
         )
     cookies = data.get("cookies") if isinstance(data, dict) else data
@@ -2588,7 +2617,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             "Cookie file must be a cookie list or a Playwright storageState JSON object.",
-            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            "Refresh the local Weibo authentication state from a valid browser session.",
             docs_anchor="weibo-discovery",
         )
     parts = []
@@ -2607,7 +2636,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             "Cookie file did not contain any usable cookie name/value pairs.",
-            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            "Refresh the local Weibo authentication state from a valid browser session.",
             docs_anchor="weibo-discovery",
         )
     return cookie_header, None
@@ -2797,8 +2826,8 @@ def find_discovered_target(project_id, target_id):
             return cur.fetchone()
 
 
-def target_row_to_payload(row):
-    return {
+def target_row_to_payload(row, public=False):
+    payload = {
         "id": row["id"],
         "targetId": str(row["id"]),
         "platform": row["platform"],
@@ -2813,15 +2842,26 @@ def target_row_to_payload(row):
         "keyword": row.get("keyword"),
         "rank": row.get("rank"),
         "hot_score": float(row.get("hot_score") or 0),
-        "target_locator": db.jloads(row.get("target_locator"), {}),
-        "content_fingerprint": row.get("content_fingerprint"),
-        "raw_json": db.jloads(row.get("raw_json"), {}),
-        "recommendation_metadata": db.jloads(row.get("recommendation_metadata"), {}),
         "selected_status": row.get("selected_status"),
         "source_type": row.get("source_type", "unknown"),
         "source_match_method": row.get("source_match_method", "unknown"),
         "source_match_confidence": float(row.get("source_match_confidence") or 0),
     }
+    if not public:
+        payload.update({
+            "target_locator": db.jloads(row.get("target_locator"), {}),
+            "content_fingerprint": row.get("content_fingerprint"),
+            "raw_json": db.jloads(row.get("raw_json"), {}),
+            "recommendation_metadata": db.jloads(row.get("recommendation_metadata"), {}),
+        })
+    return payload
+
+
+def public_target_payload(target):
+    payload = dict(target)
+    for key in ["target_locator", "content_fingerprint", "raw_json", "recommendation_metadata"]:
+        payload.pop(key, None)
+    return payload
 
 
 def collection_task_row_to_payload(row):
@@ -3252,6 +3292,7 @@ def action_knowledge_fit_summary(item):
     return {
         "card_id": item["card_id"],
         "card_identity": item.get("card_identity"),
+        "title": item.get("framework_or_case"),
         "source_id": item.get("source_id"),
         "source_identity": item.get("source_identity"),
         "reliability_level": item.get("reliability_level"),
@@ -3261,6 +3302,7 @@ def action_knowledge_fit_summary(item):
         "applicable_scenario": item.get("applicable_scenario"),
         "do_not_apply_when": item.get("do_not_apply_when"),
         "judge_questions": item.get("judge_questions", []),
+        "citation_url": item.get("citation_url"),
     }
 
 
@@ -3362,7 +3404,7 @@ def weibo_actions_pending_payload(payload_json="{}"):
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "actions": [action_row_to_payload(action) for action in actions],
+        "actions": [action_row_to_payload(action, public=True) for action in actions],
     }
 
 
@@ -3660,12 +3702,13 @@ def weibo_action_confirm_payload(payload_json, action_id):
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "action": action_row_to_payload(updated),
+        "action": action_row_to_payload(updated, public=True),
     }
 
 
-def action_row_to_payload(row):
-    return {
+def action_row_to_payload(row, public=False):
+    raw_json = db.jloads(row.get("raw_json"), {})
+    payload = {
         "id": row["id"],
         "platform": row["platform"],
         "related_event_id": row.get("related_event_id"),
@@ -3684,8 +3727,38 @@ def action_row_to_payload(row):
         "confirmed_at": iso_or_none(row.get("confirmed_at")),
         "effective_at": iso_or_none(row.get("effective_at")),
         "recommended_check_after_at": iso_or_none(row.get("recommended_check_after_at")),
-        "raw_json": db.jloads(row.get("raw_json"), {}),
     }
+    if public:
+        references = public_action_knowledge_references(raw_json)
+        if references:
+            payload["knowledgeReferences"] = references
+    else:
+        payload["raw_json"] = raw_json
+    return payload
+
+
+def public_action_knowledge_references(raw_json):
+    if not isinstance(raw_json, dict):
+        return []
+    public_source = raw_json.get("raw_json") if isinstance(raw_json.get("raw_json"), dict) else raw_json
+    fit = public_source.get("knowledge_fit")
+    if not isinstance(fit, list):
+        return []
+    references = []
+    for item in fit[:3]:
+        if not isinstance(item, dict) or not item.get("card_id"):
+            continue
+        references.append({
+            "card_id": item.get("card_id"),
+            "title": item.get("title") or item.get("framework_or_case") or item.get("card_identity"),
+            "reliability_level": item.get("reliability_level"),
+            "citation_role": "weak_inspiration" if item.get("citation_role") == "weak_inspiration" else "knowledge_reference",
+            "fact_boundary": "knowledge_reference_not_observed_weibo_fact",
+            "applicable_scenario": item.get("applicable_scenario"),
+            "do_not_apply_when": item.get("do_not_apply_when"),
+            "citation_url": item.get("citation_url"),
+        })
+    return references
 
 
 def source_account_row_to_payload(row):
@@ -8016,16 +8089,12 @@ def bot_knowledge_reference_summary(item):
         "id": f"knowledge-card-{item.get('card_id')}",
         "card_id": item.get("card_id"),
         "card_identity": item.get("card_identity"),
-        "source_id": item.get("source_id"),
-        "source_identity": item.get("source_identity"),
-        "source_title": item.get("source_title"),
+        "title": item.get("framework_or_case"),
         "reliability_level": item.get("reliability_level"),
         "citation_role": citation_role,
         "fact_boundary": "knowledge_reference_not_observed_weibo_fact",
-        "match_reasons": item.get("match_reasons", [])[:8],
         "applicable_scenario": item.get("applicable_scenario"),
         "do_not_apply_when": item.get("do_not_apply_when"),
-        "judge_questions": item.get("judge_questions", []),
         "citation_url": item.get("citation_url"),
     }
 

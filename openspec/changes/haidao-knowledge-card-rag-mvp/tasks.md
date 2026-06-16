@@ -59,15 +59,15 @@
 
 ## 7. Worker-only 范围与工作台准备
 
-- [ ] 7.1 保持本 change worker-only，不新增 public `GET /api/knowledge/cards`。
-- [ ] 7.2 如工作台 payload 后续包含知识引用，只显示 card id、标题、可信度、适用/禁用摘要和 citation URL。
-- [ ] 7.3 确认所有 worker/API 输出不暴露 `.env`、Cookie、token、浏览器登录态或内部采集日志。
+- [x] 7.1 保持本 change worker-only，不新增 public `GET /api/knowledge/cards`。
+- [x] 7.2 如工作台 payload 后续包含知识引用，只显示 card id、标题、可信度、适用/禁用摘要和 citation URL。
+- [x] 7.3 确认所有 worker/API 输出不暴露 `.env`、Cookie、token、浏览器登录态或内部采集日志。
 
 ## 8. 验证
 
-- [ ] 8.1 运行定向测试。
-- [ ] 8.2 运行 `npm test`。
-- [ ] 8.3 运行真实 MySQL persistence tests。
-- [ ] 8.4 运行 `openspec validate haidao-knowledge-card-rag-mvp --strict`。
-- [ ] 8.5 运行 `git diff --check`。
-- [ ] 8.6 运行 `npm run agent:guard`。
+- [x] 8.1 运行定向测试。
+- [x] 8.2 运行 `npm test`。
+- [x] 8.3 运行真实 MySQL persistence tests。
+- [x] 8.4 运行 `openspec validate haidao-knowledge-card-rag-mvp --strict`。
+- [x] 8.5 运行 `git diff --check`。
+- [x] 8.6 运行 `npm run agent:guard`。

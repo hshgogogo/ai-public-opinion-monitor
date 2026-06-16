@@ -1236,6 +1236,34 @@ test(
     assert.equal(weakActions.actions[0].raw_json.knowledge_fit[0].citation_role, "weak_inspiration");
     assert.equal(weakActions.actions[0].raw_json.knowledge_fit[0].hard_rule_allowed, false);
     assert.match(weakActions.actions[0].reason, /弱启发/);
+
+    const workbench = runWorker([
+      "weibo-workbench",
+      "--payload-json",
+      JSON.stringify({ projectId: weakProjectId })
+    ]);
+    assert.equal(workbench.ok, true);
+    assert.equal(workbench.pendingActions.length, 1);
+    const publicAction = workbench.pendingActions[0];
+    assert.equal(Object.hasOwn(publicAction, "raw_json"), false);
+    assert.deepEqual(publicAction.knowledgeReferences, [{
+      card_id: scctCardId,
+      title: "危机回应与责任感知适配",
+      reliability_level: "C",
+      citation_role: "weak_inspiration",
+      fact_boundary: "knowledge_reference_not_observed_weibo_fact",
+      applicable_scenario: "微博讨论出现责任归因、事实争议、误解扩散或需要判断回应强度时。",
+      do_not_apply_when: "当前只是普通剧情讨论、演员好感讨论或轻量玩梗，不涉及责任归因。",
+      citation_url: "https://en.wikipedia.org/wiki/Situational_crisis_communication_theory"
+    }]);
+    const publicActionText = JSON.stringify(publicAction);
+    for (const forbidden of ["source_id", "source_identity", "match_reasons", "judge_questions", "raw_json", "cookie_file", "token"]) {
+      assert.equal(publicActionText.includes(forbidden), false, `${forbidden} must not appear in workbench action payload`);
+    }
+    const publicWorkbenchText = JSON.stringify(workbench);
+    for (const forbidden of ["raw_json", "target_locator", "recommendation_metadata", "content_fingerprint", "cookie_file", "config/cookies", "WEIBO_COOKIE_FILE", "token"]) {
+      assert.equal(publicWorkbenchText.includes(forbidden), false, `${forbidden} must not appear in public workbench payload`);
+    }
   }
 );
 
@@ -2518,7 +2546,7 @@ test(
     assert.equal(Boolean(barbieReference), true);
     assert.equal(barbieReference.id, `knowledge-card-${barbieCardId}`);
     assert.equal(barbieReference.card_identity, "case:barbie:earned-media-lifestyle-symbol");
-    assert.equal(barbieReference.source_identity, "shortyawards:barbie-2024");
+    assert.equal(barbieReference.title, "影视项目的视觉符号与 earned media 扩散");
     assert.equal(barbieReference.reliability_level, "B");
     assert.equal(barbieReference.citation_role, "knowledge_reference");
     assert.equal(barbieReference.fact_boundary, "knowledge_reference_not_observed_weibo_fact");
@@ -2529,6 +2557,30 @@ test(
     for (const reference of botAnswer.answer.knowledge_references) {
       assert.equal(reference.fact_boundary, "knowledge_reference_not_observed_weibo_fact");
       assert.equal(reference.id.startsWith("knowledge-card-"), true);
+      assert.deepEqual(Object.keys(reference).sort(), [
+        "applicable_scenario",
+        "card_id",
+        "card_identity",
+        "citation_role",
+        "citation_url",
+        "do_not_apply_when",
+        "fact_boundary",
+        "id",
+        "reliability_level",
+        "title"
+      ]);
+      for (const forbiddenKey of [
+        "source_id",
+        "source_identity",
+        "source_title",
+        "source_type",
+        "match_reasons",
+        "judge_questions",
+        "raw_json",
+        "publisher"
+      ]) {
+        assert.equal(Object.hasOwn(reference, forbiddenKey), false);
+      }
     }
     assert.match(botAnswer.answer.text, /事实|微博证据/);
     assert.match(botAnswer.answer.text, /知识参考|知识卡/);
@@ -2701,6 +2753,18 @@ test(
     assert.equal(discovery.task.keyword, "海岛舒服日志");
     assert.equal(discovery.persisted_targets, 10);
     assert.equal(discovery.targets.length, 10);
+    assertPublicTargetPayload(discovery.targets[0], "discovery target");
+    assertPublicPayloadText(discovery, "discovery payload");
+
+    const listedTargets = runWorker([
+      "weibo-targets",
+      "--payload-json",
+      JSON.stringify({ projectId })
+    ]);
+    assert.equal(listedTargets.ok, true);
+    assert.equal(listedTargets.targets.length, 10);
+    assertPublicTargetPayload(listedTargets.targets[0], "targets list item");
+    assertPublicPayloadText(listedTargets, "targets list payload");
 
     const workbenchAfterDiscovery = runWorker(["weibo-workbench", "--payload-json", JSON.stringify({ projectId })]);
     assert.equal(workbenchAfterDiscovery.mode, "weibo-agent-mvp");
@@ -2712,6 +2776,14 @@ test(
     assert.equal(Object.hasOwn(workbenchAfterDiscovery.setup.latestTask, "output_path"), false);
     assert.equal(Object.hasOwn(workbenchAfterDiscovery.setup.latestTask, "raw_files"), false);
     assert.equal(workbenchAfterDiscovery.setup.latestTask.raw_file_count, 1);
+    const publicTarget = workbenchAfterDiscovery.recommendedTargets[0];
+    for (const forbiddenKey of ["raw_json", "target_locator", "recommendation_metadata", "content_fingerprint"]) {
+      assert.equal(Object.hasOwn(publicTarget, forbiddenKey), false, `${forbiddenKey} must not appear on public workbench targets`);
+    }
+    const publicWorkbenchAfterDiscoveryText = JSON.stringify(workbenchAfterDiscovery);
+    for (const forbidden of ["raw_json", "target_locator", "recommendation_metadata", "content_fingerprint", "cookie_file", "config/cookies", "WEIBO_COOKIE_FILE", "token"]) {
+      assert.equal(publicWorkbenchAfterDiscoveryText.includes(forbidden), false, `${forbidden} must not appear in public workbench payload`);
+    }
     queryRows(
       "INSERT INTO collection_tasks(project_id, platform, keyword, status, requested_limit, crawler_engine, crawler_type, error_type, error_message, output_path, raw_files, parsed_records, failed_records, collected_posts, collected_comments, finished_at) VALUES (%s,'weibo',%s,'failed',10,'mediacrawler','search','mediacrawler_runtime_failed','simulated latest failure','storage/mediacrawler/latest-failed',JSON_ARRAY(),0,0,0,0,NOW())",
       [projectId, "海岛舒服日志"]
@@ -2753,6 +2825,8 @@ test(
     assert.equal(selected.ok, true);
     assert.equal(selected.target.external_id, "1001");
     assert.equal(selected.target.selected_status, "selected");
+    assertPublicTargetPayload(selected.target, "selected target");
+    assertPublicPayloadText(selected, "selected target payload");
     assert.equal(queryRows("SELECT COUNT(*) AS count FROM bot_memory_items WHERE source_kind='target'")[0].count, 1);
 
     const ignored = runWorker([
@@ -2762,6 +2836,8 @@ test(
     ]);
     assert.equal(ignored.ok, true);
     assert.equal(ignored.target.selected_status, "ignored");
+    assertPublicTargetPayload(ignored.target, "ignored target");
+    assertPublicPayloadText(ignored, "ignored target payload");
 
     const rediscovery = runWorker([
       "weibo-discovery",
@@ -2791,6 +2867,8 @@ test(
     ]);
     assert.equal(blockedCollection.ok, false);
     assert.equal(blockedCollection.error_type, "target_not_selected");
+    assertPublicTargetPayload(blockedCollection.target, "blocked collection target");
+    assertPublicPayloadText(blockedCollection, "blocked collection payload");
 
     const detail = runWorker([
       "weibo-collect-target",
@@ -2805,6 +2883,8 @@ test(
     assert.equal(detail.persisted_posts, 2);
     assert.equal(detail.persisted_comments, 4);
     assert.equal(detail.failed_records, 2);
+    assertPublicTargetPayload(detail.target, "detail collection target");
+    assertPublicPayloadText(detail, "detail collection payload");
 
     const detailTaskRows = queryRows(
       "SELECT status, crawler_type, target_id, parsed_records, failed_records, collected_posts, collected_comments FROM collection_tasks WHERE id=%s",
@@ -2989,6 +3069,7 @@ test(
     assert.equal(recommended.confirmation_status, "pending");
     assert.equal(recommended.related_event_id > 0, true);
     assert.equal(recommended.evidence_ids.length > 0, true);
+    assert.equal(Object.hasOwn(recommended, "raw_json"), false);
     queryRows("UPDATE publicity_actions SET content_summary='人工保留的建议摘要' WHERE id=%s", [recommended.id]);
     const rejectedRecommendation = runWorker([
       "weibo-action-confirm",
@@ -3466,6 +3547,7 @@ test(
 
     assert.equal(blocked.ok, false);
     assert.equal(blocked.error_type, "auth_required");
+    assertPublicPayloadText(blocked, "auth-required discovery error");
     const taskRows = queryRows("SELECT status, error_type FROM collection_tasks WHERE id=%s", [blocked.task.id]);
     assert.deepEqual(taskRows[0], { status: "failed", error_type: "auth_required" });
   }
@@ -3499,6 +3581,7 @@ test(
     assert.equal(blocked.ok, false);
     assert.equal(blocked.error_type, "auth_invalid");
     assert.equal(blocked.cause.includes("Raw cookie header strings are not accepted"), true);
+    assertPublicPayloadText(blocked, "auth-invalid discovery error");
     const taskRows = queryRows("SELECT status, error_type FROM collection_tasks WHERE id=%s", [blocked.task.id]);
     assert.deepEqual(taskRows[0], { status: "failed", error_type: "auth_invalid" });
   }
@@ -4538,6 +4621,20 @@ function enumValues(columnTypeText) {
     values.push(match[1].replaceAll("''", "'"));
   }
   return values;
+}
+
+function assertPublicTargetPayload(target, context) {
+  assert.equal(Boolean(target), true, `${context} should exist`);
+  for (const forbiddenKey of ["raw_json", "target_locator", "recommendation_metadata", "content_fingerprint"]) {
+    assert.equal(Object.hasOwn(target, forbiddenKey), false, `${forbiddenKey} must not appear on ${context}`);
+  }
+}
+
+function assertPublicPayloadText(payload, context) {
+  const text = JSON.stringify(payload);
+  for (const forbidden of ["raw_json", "target_locator", "recommendation_metadata", "content_fingerprint", "cookie_file", "config/cookies", "WEIBO_COOKIE_FILE", "token"]) {
+    assert.equal(text.includes(forbidden), false, `${forbidden} must not appear in ${context}`);
+  }
 }
 
 function runPythonSnippet(code, envOverrides = {}) {
