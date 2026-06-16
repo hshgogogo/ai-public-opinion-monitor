@@ -56,4 +56,4 @@
 - [x] 7.4 Run `openspec validate haidao-crewai-runtime-adapter --strict`.
 - [x] 7.5 Run `git diff --check`.
 - [x] 7.6 Run `npm run agent:guard`.
-- [ ] 7.7 Complete subagent review, evidence report, commit, push, and PR update.
+- [x] 7.7 Complete subagent review, evidence report, commit, push, and PR update.
