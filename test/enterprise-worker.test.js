@@ -481,6 +481,45 @@ test("Judge helper passes step output with at least one evidence ID", () => {
   assert.deepEqual(payload.review.evidence_errors, []);
 });
 
+test("Agent Loop status helper exposes Judge retry summary and manual handoffs", () => {
+  const source = readText("workers/enterprise_worker.py");
+  assert.match(source, /def agent_loop_status_summary\(/);
+
+  const result = spawnSync(python, [
+    "-c",
+    [
+      "import json, os, sys",
+      "os.environ['YUQING_SKIP_ENV_FILE'] = '1'",
+      "from workers.enterprise_worker import agent_loop_status_summary",
+      "status = {",
+      "  'judgeReviews': [",
+      "    {'id': 10, 'status': 'failed', 'retry_count': 0},",
+      "    {'id': 11, 'status': 'needs_human', 'retry_count': 2},",
+      "  ],",
+      "  'feedbackItems': [",
+      "    {'id': 77, 'feedback_type': 'manual_handoff', 'source_type': 'judge_review', 'source_id': 11},",
+      "    {'id': 78, 'feedback_type': 'manual_handoff_note', 'source_type': 'judge_review', 'source_id': 11},",
+      "  ]",
+      "}",
+      "sys.stdout.write(json.dumps(agent_loop_status_summary(status), ensure_ascii=False))"
+    ].join("\n")
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      MYSQL_URL: "",
+      YUQING_SKIP_ENV_FILE: "1"
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.retryCount, 2);
+  assert.equal(payload.manualHandoffs.length, 1);
+  assert.equal(payload.manualHandoffs[0].source_id, 11);
+});
+
 test("Feedback memory loop exposes worker/API command and no-DB safety contract", () => {
   const worker = readText("workers/enterprise_worker.py");
   const server = readText("src/server.js");

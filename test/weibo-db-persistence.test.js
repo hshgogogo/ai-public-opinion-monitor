@@ -721,6 +721,25 @@ print(json.dumps({
         created_by: "agent_harness"
       }
     ]);
+
+    const status = runWorker([
+      "weibo-agent-loop-status",
+      "--payload-json",
+      JSON.stringify({ projectId, loopRunId: result.loop_id })
+    ]);
+    assert.equal(status.ok, true, status);
+    assert.equal(status.run.status, "needs_human", status);
+    assert.equal(status.retryCount, 2, status);
+    assert.equal(status.judgeReviews.length, 6, status);
+    assert.equal(status.judgeReviews.at(-1).retry_count, 2, status);
+    assert.equal(status.judgeReviews.at(-1).status, "needs_human", status);
+    assert.deepEqual(status.manualHandoffs, [
+      {
+        ...status.feedbackItems[0],
+      }
+    ]);
+    assert.equal(status.manualHandoffs[0].source_type, "judge_review", status);
+    assert.equal(status.manualHandoffs[0].source_id, result.exhausted.review.id, status);
   }
 );
 

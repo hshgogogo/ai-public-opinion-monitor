@@ -240,7 +240,11 @@ if (command === "weibo-agent-loop-status") {
     judgeReviews: [
       { id: 8, status: "needs_human", retry_count: 2 }
     ],
+    retryCount: 2,
     feedbackItems: [
+      { id: 9, source_type: "loop", source_id: Number(request.loopRunId), feedback_type: "manual_handoff", status: "open" }
+    ],
+    manualHandoffs: [
       { id: 9, source_type: "loop", source_id: Number(request.loopRunId), feedback_type: "manual_handoff", status: "open" }
     ]
   });

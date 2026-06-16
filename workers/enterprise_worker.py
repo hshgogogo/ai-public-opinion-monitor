@@ -6633,11 +6633,30 @@ def load_agent_loop_status(project_id, loop_run_id):
                 (project_id, loop_run_id, loop_run_id, project_id, loop_run_id, project_id),
             )
             feedback = cur.fetchall()
-    return {
+    return agent_loop_status_summary({
         "run": agent_loop_run_to_payload(run),
         "steps": [agent_step_run_to_payload(row) for row in steps],
         "judgeReviews": [judge_review_to_payload(row) for row in reviews],
         "feedbackItems": [feedback_item_to_payload(row) for row in feedback],
+    })
+
+
+def agent_loop_status_summary(status):
+    judge_reviews = status.get("judgeReviews") or []
+    feedback_items = status.get("feedbackItems") or []
+    retry_count = 0
+    for review in judge_reviews:
+        count = review.get("retry_count", review.get("retryCount", 0))
+        if isinstance(count, int) and count > retry_count:
+            retry_count = count
+    manual_handoffs = [
+        item for item in feedback_items
+        if item.get("feedback_type") == "manual_handoff" or item.get("feedbackType") == "manual_handoff"
+    ]
+    return {
+        **status,
+        "retryCount": retry_count,
+        "manualHandoffs": manual_handoffs,
     }
 
 
