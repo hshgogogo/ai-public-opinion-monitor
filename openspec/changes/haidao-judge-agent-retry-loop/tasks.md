@@ -48,7 +48,7 @@
 
 - [x] 6.1 增加静态测试，确认本 change 不新增旧 Node public Judge endpoint，且 FastAPI Judge endpoint 不接受 prompt/runtime/cookie/db-url 等控制字段。
 - [x] 6.2 增加测试，确认不读取或输出 `.env`、Cookie、token、浏览器登录态、`config/cookies/weibo.json` 或 worker stderr。
-- [ ] 6.3 未传 `agentLoopRunId` 时现有 worker 命令 standalone 行为保持不变。
+- [x] 6.3 未传 `agentLoopRunId` 时现有 worker 命令 standalone 行为保持不变。
 - [x] 6.4 本 change 不调用真实 MediaCrawler、真实微博登录、真实 CrewAI 外部模型或新的付费 API。
 
 ## 7. 文档、验证与交付

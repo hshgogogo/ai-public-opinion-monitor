@@ -824,6 +824,66 @@ test("Agent Harness foundation docs preserve compatibility boundaries", () => {
   }
 });
 
+test("Agent Loop step attachment preserves standalone worker commands unless exact agentLoopRunId is present", () => {
+  const result = spawnSync(python, [
+    "-c",
+    [
+      "import json, sys",
+      "from workers import enterprise_worker as worker",
+      "calls = []",
+      "project = {'id': 7, 'project_name': 'Standalone'}",
+      "def fake_project_from_payload(payload):",
+      "    calls.append(['project_from_payload', sorted(payload.keys())])",
+      "    return project",
+      "def fake_require_project_from_payload(payload):",
+      "    calls.append(['require_project_from_payload', sorted(payload.keys())])",
+      "    return project, None",
+      "def fake_load_agent_loop_run(project_id, loop_run_id):",
+      "    calls.append(['load_agent_loop_run', project_id, loop_run_id])",
+      "    return {'id': loop_run_id, 'project_id': project_id}",
+      "worker.project_from_payload = fake_project_from_payload",
+      "worker.require_project_from_payload = fake_require_project_from_payload",
+      "worker.load_agent_loop_run = fake_load_agent_loop_run",
+      "cases = []",
+      "for payload in [{'projectId': 7}, {'projectId': 7, 'loopRunId': 42}, {'projectId': 7, 'agent_loop_run_id': 42}]:",
+      "    before = len(calls)",
+      "    resolved_project, attachment, error = worker.project_and_agent_step_attachment(payload, 'weibo-comments-analyze')",
+      "    cases.append({'payload_keys': sorted(payload.keys()), 'project_id': resolved_project['id'], 'attachment': attachment, 'error': error, 'calls': calls[before:]})",
+      "before = len(calls)",
+      "resolved_project, attachment, error = worker.project_and_agent_step_attachment({'projectId': 7, 'agentLoopRunId': 42}, 'weibo-comments-analyze')",
+      "cases.append({'payload_keys': ['agentLoopRunId', 'projectId'], 'project_id': resolved_project['id'], 'attachment': attachment, 'error': error, 'calls': calls[before:]})",
+      "sys.stdout.write(json.dumps(cases, ensure_ascii=False))"
+    ].join("\n")
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PYTHONPATH: process.cwd(),
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const cases = JSON.parse(result.stdout);
+  assert.equal(cases.length, 4);
+
+  for (const item of cases.slice(0, 3)) {
+    assert.equal(item.project_id, 7);
+    assert.equal(item.attachment, null, item.payload_keys.join(","));
+    assert.equal(item.error, null, item.payload_keys.join(","));
+    assert.deepEqual(item.calls.map((call) => call[0]), ["project_from_payload"], item.payload_keys.join(","));
+  }
+
+  const exact = cases[3];
+  assert.equal(exact.error, null);
+  assert.equal(exact.attachment.loop_run_id, 42);
+  assert.equal(exact.attachment.step_name, "comment_analysis");
+  assert.deepEqual(exact.calls.map((call) => call[0]), ["require_project_from_payload", "load_agent_loop_run"]);
+});
+
 test("Agent Harness handoff command requires a status-visible source association", () => {
   const result = spawnSync(python, [
     "workers/enterprise_worker.py",
