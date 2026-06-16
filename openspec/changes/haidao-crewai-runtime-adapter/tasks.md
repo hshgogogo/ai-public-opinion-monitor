@@ -16,12 +16,12 @@
 
 ## 3. Harness Tool Gateway
 
-- [ ] 3.1 Write failing tests proving only allowlisted tools can be called.
-- [ ] 3.2 Implement Harness tool gateway with explicit tool registry.
-- [ ] 3.3 Write failing tests proving tool payloads cannot include `.env`, Cookie path, DB URL, browser state, or arbitrary file paths.
-- [ ] 3.4 Implement sanitized tool input/output boundary.
-- [ ] 3.5 Add evidence summary tool using existing MySQL ledger or fixture/fake repository.
-- [ ] 3.6 Write failing tests proving `submit_proposal` or proposal recorder calls are not CrewAI-exposed tools.
+- [x] 3.1 Write failing tests proving only allowlisted tools can be called.
+- [x] 3.2 Implement Harness tool gateway with explicit tool registry.
+- [x] 3.3 Write failing tests proving tool payloads cannot include `.env`, Cookie path, DB URL, browser state, or arbitrary file paths.
+- [x] 3.4 Implement sanitized tool input/output boundary.
+- [x] 3.5 Add evidence summary tool using existing MySQL ledger or fixture/fake repository.
+- [x] 3.6 Write failing tests proving `submit_proposal` or proposal recorder calls are not CrewAI-exposed tools.
 
 ## 4. CrewAI Runtime Adapter
 
