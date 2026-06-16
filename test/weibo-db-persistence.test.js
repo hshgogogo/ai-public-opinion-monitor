@@ -596,6 +596,7 @@ test(
     resetTestDatabase();
     assert.equal(runWorker(["migrate"]).ok, true);
     const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const commentId = createEvidenceComment(projectId, "judge-review-passing-comment");
 
     const result = runPythonSnippet(`
 import json
@@ -640,7 +641,7 @@ passing_response = client.post(
         "fixtureOutputs": [
             {"output": {"summary": "missing evidence"}},
             {"output": {"summary": "still missing"}},
-            {"output": {"summary": "bounded", "evidence_ids": ["comment-123"]}},
+            {"output": {"summary": "bounded", "evidence_ids": [f"comment-{os.environ['COMMENT_ID']}"]}},
         ],
     },
 )
@@ -667,7 +668,7 @@ print(json.dumps({
     "exhausted": exhausted_response.json(),
     "exhausted_status": exhausted_response.status_code,
 }, ensure_ascii=False, default=str))
-`, { PROJECT_ID: String(projectId) });
+`, { PROJECT_ID: String(projectId), COMMENT_ID: String(commentId) });
 
     assert.equal(result.passing_status, 200, result.passing);
     assert.equal(result.passing.ok, true, result.passing);
@@ -740,6 +741,139 @@ print(json.dumps({
     ]);
     assert.equal(status.manualHandoffs[0].source_type, "judge_review", status);
     assert.equal(status.manualHandoffs[0].source_id, result.exhausted.review.id, status);
+  }
+);
+
+test(
+  "FastAPI Judge review endpoint resolves owned evidence IDs and rejects cross-project analysis IDs",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("Judge evidence cross-project fixture");
+    const targetId = createTarget(projectId, "judge-evidence-target");
+    const commentId = createEvidenceComment(projectId, "judge-evidence-comment");
+    const postId = queryRows("SELECT post_id FROM social_comments WHERE id=%s AND project_id=%s", [commentId, projectId])[0].post_id;
+    const analysisId = createSentimentResult(commentId, "judge-evidence-analysis");
+    const eventId = createEvent(projectId, "judge-evidence-event");
+    const actionId = createAction(projectId, "judge-evidence-action");
+    const memoryId = createMemory(projectId, "judge-evidence-memory");
+    const knowledgeCardId = createKnowledgeCard("judge:evidence:knowledge-card");
+    const otherCommentId = createEvidenceComment(otherProjectId, "judge-evidence-other-comment");
+    const otherAnalysisId = createSentimentResult(otherCommentId, "judge-evidence-other-analysis");
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+project_id = int(os.environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="strategy",
+    input_json={"source": "judge-evidence-resolver-test"},
+)
+proposal_audit = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="CrewAI Proposal Harness",
+    step_name="crewai_proposal_audit",
+    status="succeeded",
+    output_json={"proposal": {"summary": "candidate"}},
+    evidence_ids=[],
+)
+strategy_step = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="strategy_review",
+    status="succeeded",
+    output_json={"draft": "candidate"},
+    evidence_ids=[],
+)
+client = TestClient(create_app())
+passing_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "proposalAuditId": proposal_audit["id"],
+        "stepRunId": strategy_step["id"],
+        "maxAttempts": 1,
+        "fixtureOutputs": [{
+            "output": {
+                "summary": "all evidence belongs to this project",
+                "evidence_ids": [
+                    f"target-{os.environ['TARGET_ID']}",
+                    f"post-{os.environ['POST_ID']}",
+                    f"comment-{os.environ['COMMENT_ID']}",
+                    f"analysis-{os.environ['ANALYSIS_ID']}",
+                    f"event-{os.environ['EVENT_ID']}",
+                    f"action-{os.environ['ACTION_ID']}",
+                    f"memory-{os.environ['MEMORY_ID']}",
+                ],
+                "knowledge_references": [f"knowledge-card-{os.environ['KNOWLEDGE_CARD_ID']}"],
+            }
+        }],
+    },
+)
+cross_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "proposalAuditId": proposal_audit["id"],
+        "stepRunId": strategy_step["id"],
+        "maxAttempts": 1,
+        "fixtureOutputs": [{
+            "output": {
+                "summary": "analysis belongs to another project",
+                "evidence_ids": [f"analysis-{os.environ['OTHER_ANALYSIS_ID']}"],
+            }
+        }],
+    },
+)
+print(json.dumps({
+    "loop_id": loop["id"],
+    "passing": passing_response.json(),
+    "passing_status": passing_response.status_code,
+    "cross": cross_response.json(),
+    "cross_status": cross_response.status_code,
+}, ensure_ascii=False, default=str))
+`, {
+      PROJECT_ID: String(projectId),
+      TARGET_ID: String(targetId),
+      POST_ID: String(postId),
+      COMMENT_ID: String(commentId),
+      ANALYSIS_ID: String(analysisId),
+      EVENT_ID: String(eventId),
+      ACTION_ID: String(actionId),
+      MEMORY_ID: String(memoryId),
+      KNOWLEDGE_CARD_ID: String(knowledgeCardId),
+      OTHER_ANALYSIS_ID: String(otherAnalysisId)
+    });
+
+    assert.equal(result.passing_status, 200, result.passing);
+    assert.equal(result.passing.review.status, "passed", result.passing);
+    assert.deepEqual(result.passing.review.evidence_errors, [], result.passing);
+    assert.equal(result.passing.review.feedback_json.knowledge_references[0], `knowledge-card-${knowledgeCardId}`, result.passing);
+    assert.equal(result.cross_status, 200, result.cross);
+    assert.equal(result.cross.review.status, "failed", result.cross);
+    assert.equal(result.cross.review.passed, false, result.cross);
+    assert.deepEqual(result.cross.review.evidence_errors, [{
+      error_type: "evidence_not_found",
+      evidence_id: `analysis-${otherAnalysisId}`,
+      message: "Evidence ID does not exist in the requested project."
+    }], result.cross);
+    assert.deepEqual(queryRows(
+      "SELECT status, passed, JSON_LENGTH(evidence_errors) AS evidence_error_count FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s ORDER BY id",
+      [result.loop_id, projectId]
+    ), [
+      { status: "passed", passed: 1, evidence_error_count: 0 },
+      { status: "failed", passed: 0, evidence_error_count: 1 }
+    ]);
   }
 );
 
@@ -5024,6 +5158,20 @@ function createProject(name) {
   return queryRows("SELECT id FROM monitor_projects WHERE project_name=%s ORDER BY id DESC LIMIT 1", [name])[0].id;
 }
 
+function createTarget(projectId, identity) {
+  queryRows(
+    `
+    INSERT INTO discovered_targets(
+      project_id, platform, target_type, external_id, url, title, summary, keyword,
+      target_locator, raw_json, selected_status
+    )
+    VALUES (%s,'weibo','post',%s,%s,'测试目标','测试目标摘要','海岛舒服日志',JSON_OBJECT('identity', %s),JSON_OBJECT('identity', %s),'selected')
+    `,
+    [projectId, `target-${identity}`, `https://weibo.com/${identity}`, identity, identity]
+  );
+  return queryRows("SELECT id FROM discovered_targets WHERE project_id=%s AND external_id=%s", [projectId, `target-${identity}`])[0].id;
+}
+
 function createEvidenceComment(projectId, identity) {
   queryRows(
     `
@@ -5094,6 +5242,34 @@ function createMemory(projectId, identity) {
     [projectId, `memory-${identity}`, identity]
   );
   return queryRows("SELECT id FROM bot_memory_items WHERE project_id=%s AND memory_identity=%s", [projectId, `memory-${identity}`])[0].id;
+}
+
+function createKnowledgeCard(identity) {
+  queryRows(
+    `
+    INSERT INTO knowledge_sources(
+      source_identity, title, source_type, reliability_level, citation_url, raw_json
+    )
+    VALUES (%s,'测试知识来源','industry_report','A',%s,JSON_OBJECT('identity', %s))
+    `,
+    [`source-${identity}`, `https://example.test/${identity}`, identity]
+  );
+  const sourceId = queryRows("SELECT id FROM knowledge_sources WHERE source_identity=%s", [`source-${identity}`])[0].id;
+  queryRows(
+    `
+    INSERT INTO knowledge_cards(
+      card_identity, source_id, framework_or_case, applicable_scenario, do_not_apply_when,
+      recommended_actions, risk_warnings, evidence_required, judge_questions, tags, status, raw_json
+    )
+    VALUES (
+      %s,%s,'测试框架','适用于有真实微博证据时。','缺少当前微博证据时不可使用。',
+      JSON_ARRAY('保留事实边界'),JSON_ARRAY('不要替代真实证据'),JSON_ARRAY('真实微博证据'),
+      JSON_ARRAY('是否有真实 evidence_ids？'),JSON_ARRAY('judge-test'),'active',JSON_OBJECT('identity', %s)
+    )
+    `,
+    [`card-${identity}`, sourceId, identity]
+  );
+  return queryRows("SELECT id FROM knowledge_cards WHERE card_identity=%s", [`card-${identity}`])[0].id;
 }
 
 function createKnowledgeActionEvent(projectId, identity, evidenceIds, overrides = {}) {

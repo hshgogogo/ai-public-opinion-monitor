@@ -756,8 +756,20 @@ class ReviewRepository:
     def mark_needs_human(self, run_id, project_id, step_run_id, review):
         return {"feedback": {"id": 1, "source_type": "judge_review", "source_id": review["id"]}}
 
+class EvidenceRepository:
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        return {"comment-123"}.intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        return set()
+
 source_repository = SourceRepository()
-service = JudgeReviewService(run_repository=RunRepository(), source_repository=source_repository, review_repository=ReviewRepository())
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=source_repository,
+    review_repository=ReviewRepository(),
+    evidence_repository=EvidenceRepository(),
+)
 assert service.has_agent_run(10, 2) is True
 assert service.has_agent_run(10, 3) is False
 
@@ -843,11 +855,19 @@ class ReviewRepository:
         self.needs_human_calls.append((run_id, project_id, step_run_id, review["id"]))
         return {"feedback": {"id": len(self.needs_human_calls), "source_type": "judge_review", "source_id": review["id"]}}
 
+class EvidenceRepository:
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        return {"comment-123"}.intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        return set()
+
 passing_repo = ReviewRepository()
 passing_service = JudgeReviewService(
     run_repository=RunRepository(),
     source_repository=SourceRepository(),
     review_repository=passing_repo,
+    evidence_repository=EvidenceRepository(),
 )
 passing = passing_service.create_review(10, {
     "projectId": 2,
@@ -873,6 +893,7 @@ exhausted_service = JudgeReviewService(
     run_repository=RunRepository(),
     source_repository=SourceRepository(),
     review_repository=exhausted_repo,
+    evidence_repository=EvidenceRepository(),
 )
 exhausted = exhausted_service.create_review(10, {
     "projectId": 2,
@@ -896,6 +917,7 @@ default_source_service = JudgeReviewService(
     run_repository=RunRepository(),
     source_repository=SourceRepository(),
     review_repository=default_source_repo,
+    evidence_repository=EvidenceRepository(),
 )
 default_source = default_source_service.create_review(10, {
     "projectId": 2,
@@ -910,6 +932,249 @@ default_source = default_source_service.create_review(10, {
 assert default_source["review"]["status"] == "needs_human", default_source
 assert default_source["stepRunId"] == 58, default_source
 assert default_source_repo.needs_human_calls == [(10, 2, 58, 3)], default_source_repo.needs_human_calls
+`);
+});
+
+test("JudgeReviewService rejects malformed and unowned Judge evidence IDs before passed review persistence", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return True
+
+class SourceRepository:
+    def has_sources(self, run_id, project_id, proposal_audit_id, step_run_id=None):
+        return True
+
+class EvidenceRepository:
+    def __init__(self):
+        self.existing_calls = []
+        self.knowledge_calls = []
+
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        self.existing_calls.append((project_id, list(evidence_ids)))
+        existing = {
+            2: {
+                "target-1",
+                "post-2",
+                "comment-3",
+                "analysis-4",
+                "event-5",
+                "action-6",
+                "memory-7",
+            }
+        }
+        return set(existing.get(project_id, set())).intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        self.knowledge_calls.append((project_id, list(knowledge_ids)))
+        return set()
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append(persisted)
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        return {"feedback": {"id": 1, "source_type": "judge_review", "source_id": review["id"]}}
+
+evidence_repository = EvidenceRepository()
+review_repository = ReviewRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(),
+    review_repository=review_repository,
+    evidence_repository=evidence_repository,
+)
+
+result = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 56,
+    "stepRunId": 34,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "bad evidence should fail",
+            "evidence_ids": [
+                "target-",
+                "comment:3",
+                "sentiment-4",
+                "analysis-abc",
+                "knowledge-card-8",
+                "comment-999",
+            ],
+        }
+    }],
+})
+
+assert result["ok"] is True, result
+assert result["review"]["status"] == "failed", result
+assert result["review"]["passed"] is False, result
+assert review_repository.records[0]["status"] == "failed", review_repository.records
+assert review_repository.records[0]["passed"] is False, review_repository.records
+errors = result["review"]["evidence_errors"]
+bad_ids = {item["evidence_id"] for item in errors}
+assert bad_ids == {
+    "target-",
+    "comment:3",
+    "sentiment-4",
+    "analysis-abc",
+    "knowledge-card-8",
+    "comment-999",
+}, errors
+assert all(item["error_type"] in {
+    "invalid_evidence_id_format",
+    "unsupported_evidence_prefix",
+    "knowledge_card_in_evidence_ids",
+    "evidence_not_found",
+} for item in errors), errors
+assert evidence_repository.existing_calls == [(2, ["comment-999"])], evidence_repository.existing_calls
+assert evidence_repository.knowledge_calls == [], evidence_repository.knowledge_calls
+`);
+});
+
+test("JudgeReviewService accepts same-project Judge evidence IDs and validates knowledge references separately", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return True
+
+class SourceRepository:
+    def has_sources(self, run_id, project_id, proposal_audit_id, step_run_id=None):
+        return True
+
+class EvidenceRepository:
+    def __init__(self):
+        self.existing_calls = []
+        self.knowledge_calls = []
+
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        self.existing_calls.append((project_id, list(evidence_ids)))
+        existing = {
+            2: {
+                "target-1",
+                "post-2",
+                "comment-3",
+                "analysis-4",
+                "event-5",
+                "action-6",
+                "memory-7",
+            },
+            3: {"comment-3"},
+        }
+        return set(existing.get(project_id, set())).intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        self.knowledge_calls.append((project_id, list(knowledge_ids)))
+        existing = {2: {"knowledge-card-8"}}
+        return set(existing.get(project_id, set())).intersection(knowledge_ids)
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append(persisted)
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        raise AssertionError("valid evidence should not need human handoff")
+
+evidence_repository = EvidenceRepository()
+review_repository = ReviewRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(),
+    review_repository=review_repository,
+    evidence_repository=evidence_repository,
+)
+
+accepted = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 56,
+    "stepRunId": 34,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "all evidence belongs to project 2",
+            "evidence_ids": [
+                "target-1",
+                "post-2",
+                "comment-3",
+                "analysis-4",
+                "event-5",
+                "action-6",
+                "memory-7",
+            ],
+            "knowledge_references": ["knowledge-card-8"],
+        }
+    }],
+})
+assert accepted["review"]["status"] == "passed", accepted
+assert accepted["review"]["passed"] is True, accepted
+assert accepted["review"]["evidence_errors"] == [], accepted
+assert accepted["review"]["feedback_json"]["evidence_ids"] == [
+    "target-1",
+    "post-2",
+    "comment-3",
+    "analysis-4",
+    "event-5",
+    "action-6",
+    "memory-7",
+], accepted
+assert accepted["review"]["feedback_json"]["knowledge_references"] == ["knowledge-card-8"], accepted
+assert evidence_repository.existing_calls == [(2, [
+    "target-1",
+    "post-2",
+    "comment-3",
+    "analysis-4",
+    "event-5",
+    "action-6",
+    "memory-7",
+])], evidence_repository.existing_calls
+assert evidence_repository.knowledge_calls == [(2, ["knowledge-card-8"])], evidence_repository.knowledge_calls
+
+knowledge_only = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 57,
+    "stepRunId": 35,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "knowledge cards cannot replace real evidence",
+            "evidence_ids": [],
+            "knowledge_references": ["knowledge-card-8"],
+        }
+    }],
+})
+assert knowledge_only["review"]["status"] == "failed", knowledge_only
+assert knowledge_only["review"]["passed"] is False, knowledge_only
+assert any(item["error_type"] == "missing_evidence_ids" for item in knowledge_only["review"]["evidence_errors"]), knowledge_only
+
+missing_knowledge = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 58,
+    "stepRunId": 36,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "knowledge references are validated independently",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": ["knowledge-card-999", "comment-3"],
+        }
+    }],
+})
+assert missing_knowledge["review"]["status"] == "failed", missing_knowledge
+bad_refs = {item["evidence_id"] for item in missing_knowledge["review"]["evidence_errors"]}
+assert bad_refs == {"knowledge-card-999", "comment-3"}, missing_knowledge
 `);
 });
 

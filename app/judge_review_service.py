@@ -1,5 +1,10 @@
 from app.crewai_proposal_service import MySQLAgentRunRepository
-from workers.agents.judge_agent import rule_judge_step_output
+from workers.agents.judge_agent import (
+    parse_judge_evidence_id,
+    rule_judge_step_output,
+    validate_judge_evidence_ids,
+    validate_knowledge_references,
+)
 
 
 class MySQLJudgeReviewSourceRepository:
@@ -34,6 +39,73 @@ class MySQLJudgeReviewSourceRepository:
                     return cur.fetchone() is not None
         except Exception:
             return False
+
+
+class MySQLJudgeEvidenceRepository:
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        existing = set()
+        try:
+            from workers import db
+
+            with db.connect() as conn:
+                with conn.cursor() as cur:
+                    for evidence_id in evidence_ids:
+                        parsed = parse_judge_evidence_id(evidence_id)
+                        if parsed.get("error"):
+                            continue
+                        if parsed["prefix"] == "analysis":
+                            cur.execute(
+                                """
+                                SELECT sr.id
+                                FROM sentiment_results sr
+                                JOIN social_comments c ON c.id=sr.comment_id
+                                WHERE sr.id=%s AND c.project_id=%s
+                                LIMIT 1
+                                """,
+                                (parsed["id"], project_id),
+                            )
+                        else:
+                            table = JUDGE_EVIDENCE_TABLES[parsed["prefix"]]
+                            cur.execute(
+                                f"SELECT id FROM {table} WHERE id=%s AND project_id=%s LIMIT 1",
+                                (parsed["id"], project_id),
+                            )
+                        if cur.fetchone():
+                            existing.add(parsed["raw"])
+        except Exception:
+            return existing
+        return existing
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_references):
+        existing = set()
+        try:
+            from workers import db
+
+            with db.connect() as conn:
+                with conn.cursor() as cur:
+                    for reference in knowledge_references:
+                        parsed = parse_knowledge_card_id(reference)
+                        if parsed is None:
+                            continue
+                        cur.execute(
+                            "SELECT id FROM knowledge_cards WHERE id=%s AND status='active' LIMIT 1",
+                            (parsed,),
+                        )
+                        if cur.fetchone():
+                            existing.add(f"knowledge-card-{parsed}")
+        except Exception:
+            return existing
+        return existing
+
+
+JUDGE_EVIDENCE_TABLES = {
+    "target": "discovered_targets",
+    "post": "social_posts",
+    "comment": "social_comments",
+    "event": "artist_public_opinion_events",
+    "action": "publicity_actions",
+    "memory": "bot_memory_items",
+}
 
 
 class MySQLJudgeReviewRepository:
@@ -124,10 +196,11 @@ class MySQLJudgeReviewRepository:
 
 
 class JudgeReviewService:
-    def __init__(self, run_repository=None, source_repository=None, review_repository=None):
+    def __init__(self, run_repository=None, source_repository=None, review_repository=None, evidence_repository=None):
         self.run_repository = run_repository or MySQLAgentRunRepository()
         self.source_repository = source_repository or MySQLJudgeReviewSourceRepository()
         self.review_repository = review_repository or MySQLJudgeReviewRepository()
+        self.evidence_repository = evidence_repository or MySQLJudgeEvidenceRepository()
         self.fact_write_count = 0
 
     def is_mysql_available(self):
@@ -166,6 +239,11 @@ class JudgeReviewService:
         for index, item in enumerate(fixture_outputs[:max_attempts]):
             output = item.get("output") if isinstance(item, dict) else {}
             final_review = rule_judge_step_output(output if isinstance(output, dict) else {}, retry_count=index)
+            final_review = resolve_judge_evidence(
+                final_review,
+                payload["projectId"],
+                self.evidence_repository,
+            )
             final_review = with_failed_output_summary(final_review, output if isinstance(output, dict) else {})
             persisted_review = self.review_repository.record_review(
                 run_id,
@@ -219,3 +297,71 @@ def with_failed_output_summary(review, output):
     feedback_json["failed_output_summary"] = summarize_failed_output(output)
     prepared["feedback_json"] = feedback_json
     return prepared
+
+
+def resolve_judge_evidence(review, project_id, evidence_repository):
+    prepared = dict(review)
+    feedback_json = dict(prepared.get("feedback_json") or {})
+    evidence_ids = feedback_json.get("evidence_ids") or []
+    knowledge_references = feedback_json.get("knowledge_references") or []
+    evidence_errors = list(prepared.get("evidence_errors") or [])
+    required_changes = list(prepared.get("required_changes") or [])
+
+    existing_evidence_ids = load_existing_judge_evidence_ids(evidence_repository, project_id, evidence_ids)
+    _, missing_evidence_errors = validate_judge_evidence_ids(evidence_ids, existing_evidence_ids)
+    if missing_evidence_errors:
+        evidence_errors.extend(missing_evidence_errors)
+        required_changes.append("Use only evidence IDs that exist in the current project.")
+
+    existing_knowledge_references = load_existing_knowledge_references(
+        evidence_repository,
+        project_id,
+        knowledge_references,
+    )
+    _, knowledge_errors = validate_knowledge_references(knowledge_references, existing_knowledge_references)
+    if knowledge_errors:
+        evidence_errors.extend(knowledge_errors)
+        required_changes.append("Use only active knowledge-card references in output.knowledge_references.")
+
+    prepared["evidence_errors"] = evidence_errors
+    prepared["required_changes"] = unique_strings(required_changes)
+    prepared["passed"] = not evidence_errors
+    prepared["status"] = "passed" if prepared["passed"] else "failed"
+    if prepared["status"] == "failed" and int(prepared.get("retry_count") or 0) >= 2:
+        prepared["status"] = "needs_human"
+    prepared["feedback_json"] = feedback_json
+    return prepared
+
+
+def load_existing_judge_evidence_ids(evidence_repository, project_id, evidence_ids):
+    if not evidence_ids or not hasattr(evidence_repository, "existing_evidence_ids"):
+        return set()
+    return set(evidence_repository.existing_evidence_ids(project_id, evidence_ids) or [])
+
+
+def load_existing_knowledge_references(evidence_repository, project_id, knowledge_references):
+    if not knowledge_references or not hasattr(evidence_repository, "existing_knowledge_card_ids"):
+        return set()
+    return set(evidence_repository.existing_knowledge_card_ids(project_id, knowledge_references) or [])
+
+
+def parse_knowledge_card_id(reference):
+    text = str(reference).strip()
+    prefix = "knowledge-card-"
+    if not text.startswith(prefix):
+        return None
+    suffix = text[len(prefix):]
+    if not suffix.isdigit() or suffix.startswith("0"):
+        return None
+    return int(suffix)
+
+
+def unique_strings(values):
+    seen = set()
+    unique = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
