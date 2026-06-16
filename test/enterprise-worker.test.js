@@ -429,6 +429,58 @@ test("Agent Harness worker ledger commands return standard errors for malformed 
   }
 });
 
+test("Judge helper rejects step output with no evidence IDs", () => {
+  const payload = runJudgeHelper({
+    output: {
+      summary: "只给了结论，没有证据。"
+    }
+  });
+
+  assert.equal(payload.review.status, "failed");
+  assert.equal(payload.review.passed, false);
+  assert.match(payload.review.required_changes.join("\n"), /evidence/i);
+  assert.deepEqual(payload.review.evidence_errors, [
+    {
+      error_type: "missing_evidence_ids",
+      message: "Step output must include at least one evidence ID."
+    }
+  ]);
+});
+
+test("Judge helper marks third failed attempt as needs_human", () => {
+  const payload = runJudgeHelper({
+    retryCount: 2,
+    output: {
+      summary: "第三次仍然没有证据。"
+    }
+  });
+
+  assert.equal(payload.review.status, "needs_human");
+  assert.equal(payload.review.passed, false);
+  assert.equal(payload.review.retry_count, 2);
+  assert.match(payload.review.required_changes.join("\n"), /evidence/i);
+  assert.deepEqual(payload.review.evidence_errors, [
+    {
+      error_type: "missing_evidence_ids",
+      message: "Step output must include at least one evidence ID."
+    }
+  ]);
+});
+
+test("Judge helper passes step output with at least one evidence ID", () => {
+  const payload = runJudgeHelper({
+    output: {
+      summary: "评论区对剧情节奏有明确反馈。",
+      evidence_ids: ["comment-1"]
+    }
+  });
+
+  assert.equal(payload.review.status, "passed");
+  assert.equal(payload.review.passed, true);
+  assert.deepEqual(payload.review.required_changes, []);
+  assert.deepEqual(payload.review.evidence_errors, []);
+});
+
 test("Feedback memory loop exposes worker/API command and no-DB safety contract", () => {
   const worker = readText("workers/enterprise_worker.py");
   const server = readText("src/server.js");
@@ -906,6 +958,42 @@ function readText(path) {
     cwd: process.cwd(),
     encoding: "utf8"
   }).stdout;
+}
+
+function runJudgeHelper(payload) {
+  const tmp = mkdtempSync(join(tmpdir(), "judge-helper-"));
+  try {
+    writeFileSync(join(tmp, ".env"), "JUDGE_HELPER_DOTENV_SENTINEL=dotenv_was_read\n", "utf8");
+    const env = {
+      ...process.env,
+      MYSQL_URL: "",
+      PYTHONPATH: process.env.PYTHONPATH ? `${process.cwd()}:${process.env.PYTHONPATH}` : process.cwd()
+    };
+    delete env.YUQING_SKIP_ENV_FILE;
+    delete env.JUDGE_HELPER_DOTENV_SENTINEL;
+    const pythonForTmpCwd = python.startsWith("/") ? python : join(process.cwd(), python);
+    const result = spawnSync(pythonForTmpCwd, [
+      "-c",
+      [
+        "import json, os, sys",
+        "from workers.agents.judge_agent import rule_judge_step_output",
+        "payload = json.loads(sys.stdin.read() or '{}')",
+        "review = rule_judge_step_output(payload.get('output'), retry_count=payload.get('retryCount', payload.get('retry_count', 0)))",
+        "sys.stdout.write(json.dumps({'review': review, 'dotenv_sentinel': os.environ.get('JUDGE_HELPER_DOTENV_SENTINEL')}, ensure_ascii=False))"
+      ].join("\n")
+    ], {
+      cwd: tmp,
+      encoding: "utf8",
+      input: JSON.stringify(payload),
+      env
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.dotenv_sentinel, null);
+    return parsed;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 function enumValuesFromModify(sql, columnName) {

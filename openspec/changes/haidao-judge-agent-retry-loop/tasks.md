@@ -9,8 +9,8 @@
 
 ## 2. Judge 规则与证据校验
 
-- [ ] 2.1 先写 Judge 规则测试，覆盖无 evidence IDs 被拒绝。
-- [ ] 2.2 实现 Judge helper，输出 `passed/failed/needs_human`、required changes 和 evidence errors。
+- [x] 2.1 先写 Judge 规则测试，覆盖无 evidence IDs 被拒绝。
+- [x] 2.2 实现 Judge helper，输出 `passed/failed/needs_human`、required changes 和 evidence errors。
 - [ ] 2.3 先写 evidence ID 校验测试，覆盖不存在、跨 project 和无法识别前缀的 evidence ID。
 - [ ] 2.4 实现 evidence ID resolver，支持 target/post/comment/analysis/event/action/memory；另行校验 `knowledge_references` 中的 knowledge-card。
 - [ ] 2.5 先写边界测试，覆盖空泛建议、知识卡当事实、C 级知识卡当硬规则、确定性数值越权和因果过度表述。
