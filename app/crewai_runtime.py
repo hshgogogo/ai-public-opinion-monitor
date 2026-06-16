@@ -148,6 +148,8 @@ def load_crewai_runtime(module_name="crewai"):
     status = crewai_dependency_status(module_name=module_name)
     if status.get("ok") is False:
         return status
+    if module_name == "crewai":
+        return runtime_not_configured_error()
     return {
         "ok": True,
         "runtime": status["runtime"],
@@ -160,6 +162,15 @@ def dependency_unavailable_error():
         "CrewAI runtime dependency is unavailable.",
         "The optional CrewAI package could not be loaded in this environment.",
         "Install the pinned CrewAI dependency or inject a fake runtime for tests.",
+    )
+
+
+def runtime_not_configured_error():
+    return proposal_error(
+        "crewai_dependency_unavailable",
+        "CrewAI runtime is not configured.",
+        "The third-party CrewAI package root is not a project proposal runtime.",
+        "Configure an app-owned process-isolated runtime module or inject a fake runtime for tests.",
     )
 
 

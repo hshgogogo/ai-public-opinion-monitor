@@ -311,6 +311,570 @@ assert unknown_payload["error_type"] == "worker_exploded", unknown_payload
 `);
 });
 
+test("FastAPI sidecar creates CrewAI proposals through an injected proposal service and returns proposalAuditId without fact writes", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class FakeProposalService:
+    def __init__(self):
+        self.calls = []
+        self.runtime_call_count = 0
+        self.fact_write_count = 0
+        self.audit_records = []
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+    def create_proposal(self, run_id, payload):
+        self.calls.append((run_id, payload))
+        self.runtime_call_count += 1
+        self.audit_records.append({"id": "audit-accepted-1", "status": "accepted"})
+        return {
+            "ok": True,
+            "proposalAuditId": "audit-accepted-1",
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": 2,
+                "agent_loop_run_id": run_id,
+                "agent_name": "Strategy Agent",
+                "stage": "strategy",
+                "facts": [{"text": "Scoped context was inspected.", "evidence_ids": ["comment:123"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None,
+            },
+        }
+
+service = FakeProposalService()
+client = TestClient(create_app(crewai_proposal_service=service))
+
+response = client.post("/api/weibo/agent-runs/10/crewai/proposals", json={
+    "projectId": "2",
+    "stage": "strategy",
+    "evidenceIds": ["comment:123"],
+    "knowledgeQuery": "heated discussion",
+})
+payload = response.json()
+
+assert response.status_code == 200, payload
+assert payload["ok"] is True, payload
+assert payload["proposalAuditId"] == "audit-accepted-1", payload
+assert payload["proposal"]["agent_loop_run_id"] == 10, payload
+assert "raw_model_output_ref" in payload["proposal"], payload
+assert service.runtime_call_count == 1, service.runtime_call_count
+assert service.fact_write_count == 0, service.fact_write_count
+assert service.audit_records == [{"id": "audit-accepted-1", "status": "accepted"}], service.audit_records
+assert service.calls == [(10, {
+    "projectId": 2,
+    "stage": "strategy",
+    "evidenceIds": ["comment:123"],
+    "knowledgeQuery": "heated discussion",
+})], service.calls
+
+serialized = json.dumps(payload, ensure_ascii=False)
+for forbidden in [
+    "forbidden",
+    "hidden prompt text",
+    "\\"raw_model_output\\":",
+    "traceback",
+    "stderr",
+    "mysql://",
+    ".env",
+    "config/cookies/weibo.json",
+]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI sidecar rejects unknown CrewAI proposal public fields before service/runtime execution", () => {
+  runPython(`
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CountingProposalService:
+    def __init__(self):
+        self.calls = 0
+        self.runtime_call_count = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return True
+
+    def create_proposal(self, run_id, payload):
+        self.calls += 1
+        self.runtime_call_count += 1
+        return {"ok": True, "proposalAuditId": "unexpected"}
+
+service = CountingProposalService()
+client = TestClient(create_app(crewai_proposal_service=service))
+
+response = client.post("/api/weibo/agent-runs/10/crewai/proposals", json={
+    "projectId": 2,
+    "stage": "strategy",
+    "runtime": {"module": "forbidden"},
+})
+payload = response.json()
+assert response.status_code == 400, payload
+assert payload["error_type"] == "invalid_crewai_proposal_payload", payload
+assert service.calls == 0, service.calls
+assert service.runtime_call_count == 0, service.runtime_call_count
+
+response = client.post("/api/weibo/agent-runs/10/crewai/proposals", json={
+    "projectId": 2,
+    "stage": "strategy",
+    "prompt": "hidden prompt text",
+})
+payload = response.json()
+assert response.status_code == 400, payload
+assert payload["error_type"] == "invalid_crewai_proposal_payload", payload
+assert service.calls == 0, service.calls
+assert service.runtime_call_count == 0, service.runtime_call_count
+serialized = __import__("json").dumps(payload, ensure_ascii=False)
+for forbidden in ["prompt", "hidden prompt text", "runtime", "callable", "traceback", "stderr"]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI sidecar rejects dangerous values inside allowed CrewAI proposal fields before service/runtime execution", () => {
+  runPython(`
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CountingProposalService:
+    def __init__(self):
+        self.calls = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return True
+
+    def create_proposal(self, run_id, payload):
+        self.calls += 1
+        return {"ok": True, "proposalAuditId": "unexpected"}
+
+service = CountingProposalService()
+client = TestClient(create_app(crewai_proposal_service=service))
+
+cases = [
+    {"projectId": 2, "stage": "read .env", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "mysql://root:secret", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "mariadb://root:secret@localhost/db", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "mysql+pymysql://root:secret@localhost/db", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "Bearer fake-secret-value", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "api_key=hidden", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "/etc/passwd", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "../config/cookies/weibo.json", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "database_url=hidden", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "db_url=hidden", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "dsn=hidden", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "raw_model_output: hidden", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "secret diagnostic", "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "evidenceIds": ["config/cookies/weibo.json"], "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "evidenceIds": ["comment:1", "post:../../etc/passwd"], "error_type": "invalid_crewai_proposal_payload"},
+    {"projectId": 2, "stage": "strategy", "knowledgeQuery": "traceback token prompt", "error_type": "invalid_crewai_proposal_payload"},
+]
+
+for case in cases:
+    body = {key: value for key, value in case.items() if key != "error_type"}
+    response = client.post("/api/weibo/agent-runs/10/crewai/proposals", json=body)
+    payload = response.json()
+    assert response.status_code == 400, payload
+    assert payload["error_type"] == case["error_type"], payload
+
+assert service.calls == 0, service.calls
+`);
+});
+
+test("FastAPI sidecar rejects CrewAI proposal requests before runtime on mysql_unavailable and run-not-found", () => {
+  runPython(`
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class MysqlUnavailableService:
+    def __init__(self):
+        self.runtime_call_count = 0
+
+    def is_mysql_available(self):
+        return False
+
+    def has_agent_run(self, run_id, project_id):
+        return True
+
+    def create_proposal(self, run_id, payload):
+        self.runtime_call_count += 1
+        raise AssertionError("runtime should not be called when mysql is unavailable")
+
+class MissingRunService:
+    def __init__(self):
+        self.runtime_call_count = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return False
+
+    def create_proposal(self, run_id, payload):
+        self.runtime_call_count += 1
+        raise AssertionError("runtime should not be called when run is missing")
+
+mysql_service = MysqlUnavailableService()
+mysql_client = TestClient(create_app(crewai_proposal_service=mysql_service))
+mysql_unavailable = mysql_client.post("/api/weibo/agent-runs/10/crewai/proposals", json={"projectId": 2, "stage": "strategy"})
+mysql_unavailable_payload = mysql_unavailable.json()
+assert mysql_unavailable.status_code == 503, mysql_unavailable_payload
+assert mysql_unavailable_payload["error_type"] == "mysql_unavailable", mysql_unavailable_payload
+assert mysql_service.runtime_call_count == 0, mysql_service.runtime_call_count
+
+missing_service = MissingRunService()
+missing_client = TestClient(create_app(crewai_proposal_service=missing_service))
+run_not_found = missing_client.post("/api/weibo/agent-runs/999/crewai/proposals", json={"projectId": 2, "stage": "strategy"})
+run_not_found_payload = run_not_found.json()
+assert run_not_found.status_code == 404, run_not_found_payload
+assert run_not_found_payload["error_type"] == "agent_loop_not_found", run_not_found_payload
+assert missing_service.runtime_call_count == 0, missing_service.runtime_call_count
+`);
+});
+
+test("CrewAIProposalService records accepted rejected and runtime_failed proposal audits without fact writes and keeps raw_model_output_ref", () => {
+  runPython(`
+import json
+from app.crewai_proposal_service import CrewAIProposalService, InMemoryAgentRunRepository, InMemoryProposalAuditRepository
+from app.crewai_proposal import proposal_error
+
+class FakeAuditRepository(InMemoryProposalAuditRepository):
+    pass
+
+class EvidenceRepository:
+    def __init__(self):
+        self.project_evidence = {
+            (2, "comment"): {123},
+            (2, "event"): {7},
+        }
+
+    def find_existing(self, project_id, kind, ids):
+        return self.project_evidence.get((project_id, kind), set()).intersection(ids)
+
+class AcceptedRuntime:
+    def __init__(self):
+        self.calls = []
+
+    def run_proposal(self, request):
+        self.calls.append(request)
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "Scoped context was inspected.", "evidence_ids": ["comment:123"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": "audit://raw-output/1",
+            },
+        }
+
+class RejectedRuntime:
+    def run_proposal(self, request):
+        return proposal_error(
+            "crewai_evidence_rejected",
+            "Evidence was rejected.",
+            "Cross-project evidence is not allowed.",
+            "Retry with evidence IDs from the same project.",
+        )
+
+class RuntimeFailedRuntime:
+    def run_proposal(self, request):
+        return {
+            **proposal_error(
+                "crewai_runtime_failed",
+                "CrewAI runtime failed.",
+                "private runtime details",
+                "Retry with a healthy runtime.",
+            ),
+            "traceback": "hidden traceback",
+            "stderr": "hidden stderr",
+            "prompt": "hidden prompt",
+        }
+
+run_repository = InMemoryAgentRunRepository(runs={(2, 10)})
+
+accepted_audit = FakeAuditRepository()
+accepted_runtime = AcceptedRuntime()
+accepted_service = CrewAIProposalService(
+    runtime_adapter=accepted_runtime,
+    audit_repository=accepted_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+accepted = accepted_service.create_proposal(10, {
+    "projectId": 2,
+    "stage": "strategy",
+    "evidenceIds": ["comment:123"],
+    "knowledgeQuery": "heated discussion",
+})
+assert accepted["ok"] is True, accepted
+assert accepted["proposalAuditId"] == "audit-1", accepted
+assert accepted["proposal"]["raw_model_output_ref"] == "audit://raw-output/1", accepted
+assert accepted_runtime.calls == [{
+    "project_id": 2,
+    "agent_loop_run_id": 10,
+    "stage": "strategy",
+    "evidence_ids": ["comment:123"],
+    "knowledge_query": "heated discussion",
+}], accepted_runtime.calls
+assert accepted_audit.fact_write_count == 0, accepted_audit.fact_write_count
+assert accepted_audit.records[0]["status"] == "accepted", accepted_audit.records
+
+rejected_audit = FakeAuditRepository()
+rejected_service = CrewAIProposalService(
+    runtime_adapter=RejectedRuntime(),
+    audit_repository=rejected_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+rejected = rejected_service.create_proposal(10, {"projectId": 2, "stage": "strategy"})
+assert rejected["ok"] is False, rejected
+assert rejected["error_type"] == "crewai_evidence_rejected", rejected
+assert rejected["proposalAuditId"] == "audit-1", rejected
+assert rejected_audit.records[0]["status"] == "rejected", rejected_audit.records
+
+runtime_failed_audit = FakeAuditRepository()
+runtime_failed_service = CrewAIProposalService(
+    runtime_adapter=RuntimeFailedRuntime(),
+    audit_repository=runtime_failed_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+runtime_failed = runtime_failed_service.create_proposal(10, {"projectId": 2, "stage": "strategy"})
+assert runtime_failed["ok"] is False, runtime_failed
+assert runtime_failed["error_type"] == "crewai_runtime_failed", runtime_failed
+assert runtime_failed["proposalAuditId"] == "audit-1", runtime_failed
+assert runtime_failed_audit.records[0]["status"] == "runtime_error", runtime_failed_audit.records
+
+serialized = json.dumps([accepted, rejected, runtime_failed], ensure_ascii=False)
+for forbidden in [
+    "hidden traceback",
+    "hidden stderr",
+    "hidden prompt",
+    "traceback",
+    "stderr",
+    "prompt",
+    "mysql://",
+    ".env",
+    "config/cookies/weibo.json",
+]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("CrewAIProposalService rejects scope mismatch and missing or cross-project evidence before accepted audit", () => {
+  runPython(`
+from app.crewai_proposal_service import CrewAIProposalService, InMemoryAgentRunRepository, InMemoryProposalAuditRepository
+
+class RecordingAuditRepository(InMemoryProposalAuditRepository):
+    pass
+
+class EvidenceRepository:
+    def __init__(self):
+        self.project_evidence = {
+            (2, "comment"): {123},
+            (2, "event"): {7},
+            (3, "comment"): {999},
+        }
+
+    def find_existing(self, project_id, kind, ids):
+        return self.project_evidence.get((project_id, kind), set()).intersection(ids)
+
+class WrongScopeRuntime:
+    def run_proposal(self, request):
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": 999,
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "wrong project", "evidence_ids": ["comment:123"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None,
+            },
+        }
+
+class MissingEvidenceRuntime:
+    def run_proposal(self, request):
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "missing evidence", "evidence_ids": ["comment:999"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None,
+            },
+        }
+
+class CrossProjectEvidenceRuntime:
+    def run_proposal(self, request):
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "cross project evidence", "evidence_ids": ["comment:999"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None,
+            },
+        }
+
+class InvalidAcceptedShapeRuntime:
+    def run_proposal(self, request):
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "tries direct write", "evidence_ids": ["comment:123"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "database_write",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None,
+            },
+        }
+
+class RuntimeShouldNotBeCalled:
+    def __init__(self):
+        self.calls = 0
+
+    def run_proposal(self, request):
+        self.calls += 1
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "would have accepted valid output", "evidence_ids": ["comment:123"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None,
+            },
+        }
+
+run_repository = InMemoryAgentRunRepository(runs={(2, 10)})
+
+request_scope_audit = RecordingAuditRepository()
+request_scope_runtime = RuntimeShouldNotBeCalled()
+request_scope_service = CrewAIProposalService(
+    runtime_adapter=request_scope_runtime,
+    audit_repository=request_scope_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+request_scope_result = request_scope_service.create_proposal(10, {
+    "projectId": 2,
+    "stage": "strategy",
+    "evidenceIds": ["comment:999"],
+})
+assert request_scope_result["ok"] is False, request_scope_result
+assert request_scope_result["error_type"] == "crewai_evidence_rejected", request_scope_result
+assert request_scope_result["proposalAuditId"] == "audit-1", request_scope_result
+assert request_scope_runtime.calls == 0, request_scope_runtime.calls
+assert request_scope_audit.records[0]["status"] == "rejected", request_scope_audit.records
+
+wrong_scope_audit = RecordingAuditRepository()
+wrong_scope = CrewAIProposalService(
+    runtime_adapter=WrongScopeRuntime(),
+    audit_repository=wrong_scope_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+wrong_scope_result = wrong_scope.create_proposal(10, {"projectId": 2, "stage": "strategy"})
+assert wrong_scope_result["ok"] is False, wrong_scope_result
+assert wrong_scope_result["error_type"] == "crewai_evidence_rejected", wrong_scope_result
+assert wrong_scope_result["proposalAuditId"] == "audit-1", wrong_scope_result
+assert wrong_scope_audit.records[0]["status"] == "rejected", wrong_scope_audit.records
+
+missing_audit = RecordingAuditRepository()
+missing_service = CrewAIProposalService(
+    runtime_adapter=MissingEvidenceRuntime(),
+    audit_repository=missing_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+missing_result = missing_service.create_proposal(10, {"projectId": 2, "stage": "strategy"})
+assert missing_result["ok"] is False, missing_result
+assert missing_result["error_type"] == "crewai_evidence_rejected", missing_result
+assert missing_result["proposalAuditId"] == "audit-1", missing_result
+assert missing_audit.records[0]["status"] == "rejected", missing_audit.records
+
+cross_audit = RecordingAuditRepository()
+cross_service = CrewAIProposalService(
+    runtime_adapter=CrossProjectEvidenceRuntime(),
+    audit_repository=cross_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+cross_result = cross_service.create_proposal(10, {"projectId": 2, "stage": "strategy"})
+assert cross_result["ok"] is False, cross_result
+assert cross_result["error_type"] == "crewai_evidence_rejected", cross_result
+assert cross_result["proposalAuditId"] == "audit-1", cross_result
+assert cross_audit.records[0]["status"] == "rejected", cross_audit.records
+
+invalid_audit = RecordingAuditRepository()
+invalid_service = CrewAIProposalService(
+    runtime_adapter=InvalidAcceptedShapeRuntime(),
+    audit_repository=invalid_audit,
+    run_repository=run_repository,
+    evidence_repository=EvidenceRepository(),
+)
+invalid_result = invalid_service.create_proposal(10, {"projectId": 2, "stage": "strategy"})
+assert invalid_result["ok"] is False, invalid_result
+assert invalid_result["error_type"] == "crewai_write_intent_not_allowed", invalid_result
+assert invalid_result["proposalAuditId"] == "audit-1", invalid_result
+assert invalid_audit.records[0]["status"] == "rejected", invalid_audit.records
+`);
+});
+
 test("FastAPI sidecar default Agent Loop status reports stable MySQL unavailable errors", () => {
   runPython(`
 from app.main import create_app

@@ -289,3 +289,22 @@ for forbidden in ["traceback", ".env", "mysql://", "DEEPSEEK_API_KEY", "config/c
     assert forbidden not in serialized, serialized
 `);
 });
+
+test("CrewAI default dependency path does not treat the third-party package root as a project runtime", () => {
+  runPython(`
+import json
+import sys
+import types
+from app.crewai_runtime import load_crewai_runtime
+
+sys.modules["crewai"] = types.SimpleNamespace(run=lambda request, tools: {"unsafe": True})
+
+loaded = load_crewai_runtime(module_name="crewai")
+
+assert loaded["ok"] is False, loaded
+assert loaded["error_type"] == "crewai_dependency_unavailable", loaded
+serialized = json.dumps(loaded, ensure_ascii=False)
+for forbidden in ["traceback", ".env", "mysql://", "DEEPSEEK_API_KEY", "config/cookies/weibo.json", "unsafe"]:
+    assert forbidden not in serialized, serialized
+`);
+});

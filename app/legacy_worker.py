@@ -11,11 +11,14 @@ ALLOWED_LEGACY_COMMANDS = {
 
 SENSITIVE_KEY_PARTS = (
     "stderr",
+    "traceback",
     "cookie",
     "database_url",
     "db_url",
     "dsn",
     "mysql_url",
+    "prompt",
+    "raw_model_output",
     "token",
     "secret",
     "password",
@@ -30,10 +33,13 @@ SENSITIVE_VALUE_MARKERS = (
     "config/cookies",
     "weibo.json",
     "stderr",
+    "traceback",
     "sub=",
     "secret",
     "bearer ",
     "api_key",
+    "prompt text",
+    "raw model output",
     "mariadb://",
     "mysql://",
     "mysql+pymysql://",
@@ -118,6 +124,8 @@ def _sanitize(value):
 
 def _is_sensitive_key(key):
     lowered = key.lower()
+    if lowered == "raw_model_output_ref":
+        return False
     return any(part in lowered for part in SENSITIVE_KEY_PARTS)
 
 

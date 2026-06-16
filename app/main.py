@@ -1,10 +1,13 @@
 import os
+import re
 
 os.environ.setdefault("YUQING_SKIP_ENV_FILE", "1")
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .crewai_proposal_service import CrewAIProposalService, agent_run_not_found_error
+from .crewai_tools import _sensitive_value as crewai_sensitive_value
 from .legacy_worker import (
     ALLOWED_LEGACY_COMMANDS,
     LegacyWorkerAdapter,
@@ -15,10 +18,34 @@ from .legacy_worker import (
 
 
 PUBLIC_AGENT_LOOP_MODES = {"manual", "scheduled", "after_collection"}
+PUBLIC_CREWAI_PROPOSAL_FIELDS = {"projectId", "stage", "evidenceIds", "knowledgeQuery"}
+CREWAI_DANGEROUS_MARKERS = (
+    ".env",
+    "api_key",
+    "bearer ",
+    "database_url",
+    "db_url",
+    "dsn",
+    "mariadb://",
+    "mysql://",
+    "mysql+pymysql://",
+    "config/cookies",
+    "weibo.json",
+    "cookie",
+    "raw_model_output",
+    "secret",
+    "token",
+    "prompt",
+    "traceback",
+    "stderr",
+    "raw model output",
+)
+CREWAI_EVIDENCE_ID_PATTERN = re.compile(r"^(comment|post|target|event|action|memory|sentiment):[1-9][0-9]*$")
 
 
-def create_app(legacy_adapter=None):
+def create_app(legacy_adapter=None, crewai_proposal_service=None):
     adapter = legacy_adapter or LegacyWorkerAdapter()
+    proposal_service = crewai_proposal_service or CrewAIProposalService()
     api = FastAPI(title="Yuqing FastAPI Sidecar", version="0.1.0")
 
     @api.get("/health")
@@ -66,6 +93,36 @@ def create_app(legacy_adapter=None):
 
         result = sanitize_for_public(adapter.get_agent_run(parsed_id, worker_payload))
         return JSONResponse(agent_loop_status_response(result), status_code=status_for(result))
+
+    @api.post("/api/weibo/agent-runs/{run_id}/crewai/proposals")
+    async def create_crewai_proposal(run_id: str, request: Request):
+        parsed_id = positive_integer(run_id)
+        if parsed_id is None:
+            return json_error(agent_loop_error(
+                "invalid_agent_run_id",
+                "Agent Loop run id is invalid.",
+                "The path id must be a positive integer.",
+                "Retry with an agentLoopRunId returned by POST /api/weibo/agent-loop/run.",
+            ), 400)
+
+        payload, error = await read_json_object(request, "invalid_crewai_proposal_payload", "CrewAI proposal payload")
+        if error:
+            return json_error(error, 400)
+
+        validation_error = validate_crewai_proposal_request_payload(payload)
+        if validation_error:
+            return json_error(validation_error, 400)
+
+        project_id = optional_positive_integer(payload.get("projectId"))
+        if not proposal_service.is_mysql_available():
+            return json_error(mysql_unavailable_error(), 503)
+
+        if not proposal_service.has_agent_run(parsed_id, project_id):
+            return json_error(agent_run_not_found_error(parsed_id, project_id), 404)
+
+        service_payload = build_crewai_proposal_service_payload(payload)
+        result = sanitize_for_public(proposal_service.create_proposal(parsed_id, service_payload))
+        return JSONResponse(result, status_code=status_for(result))
 
     @api.post("/api/tools/legacy-worker/{command}")
     async def legacy_worker_tool(command: str, request: Request):
@@ -230,6 +287,81 @@ def build_agent_loop_worker_payload(payload):
     return worker_payload
 
 
+def validate_crewai_proposal_request_payload(payload):
+    unknown_fields = set(payload.keys()) - PUBLIC_CREWAI_PROPOSAL_FIELDS
+    if unknown_fields:
+        return agent_loop_error(
+            "invalid_crewai_proposal_payload",
+            "CrewAI proposal payload contains unsupported public fields.",
+            "Unsupported public fields were provided.",
+            "Only pass projectId, stage, evidenceIds, and knowledgeQuery.",
+        )
+
+    project_id = optional_positive_integer(payload.get("projectId"))
+    if project_id is None:
+        return agent_loop_error(
+            "invalid_project_id",
+            "CrewAI proposal requires a valid projectId.",
+            "The public payload projectId must be a positive integer.",
+            "Pass a positive integer projectId from the existing Agent Loop run.",
+        )
+
+    stage = payload.get("stage")
+    if not isinstance(stage, str) or not stage.strip():
+        return agent_loop_error(
+            "invalid_crewai_proposal_payload",
+            "CrewAI proposal requires a stage.",
+            "The public payload stage must be a non-empty string.",
+            "Pass the current Agent Loop stage for this proposal request.",
+        )
+    if contains_dangerous_crewai_value(stage):
+        return dangerous_crewai_value_error("stage")
+
+    evidence_ids = payload.get("evidenceIds")
+    if evidence_ids is not None:
+        if not isinstance(evidence_ids, list) or not evidence_ids or not all(isinstance(item, str) and item.strip() for item in evidence_ids):
+            return agent_loop_error(
+                "invalid_crewai_proposal_payload",
+                "CrewAI proposal evidenceIds are invalid.",
+                "The public payload evidenceIds must be a non-empty array of strings when provided.",
+                "Pass Harness-scoped evidence IDs only, or omit the field.",
+            )
+        for item in evidence_ids:
+            if contains_dangerous_crewai_value(item) or not CREWAI_EVIDENCE_ID_PATTERN.match(item.strip()):
+                return agent_loop_error(
+                    "invalid_crewai_proposal_payload",
+                    "CrewAI proposal evidenceIds are invalid.",
+                    "Evidence IDs must use the public Harness evidence grammar and must not contain dangerous markers.",
+                    "Pass evidence IDs like comment:123, event:7, action:9, memory:4, target:2, post:5, or sentiment:3.",
+                )
+
+    knowledge_query = payload.get("knowledgeQuery")
+    if knowledge_query is not None and (not isinstance(knowledge_query, str) or not knowledge_query.strip()):
+        return agent_loop_error(
+            "invalid_crewai_proposal_payload",
+            "CrewAI proposal knowledgeQuery is invalid.",
+            "The public payload knowledgeQuery must be a non-empty string when provided.",
+            "Pass a non-empty knowledge query or omit the field.",
+        )
+    if knowledge_query is not None and contains_dangerous_crewai_value(knowledge_query):
+        return dangerous_crewai_value_error("knowledgeQuery")
+    return None
+
+
+def build_crewai_proposal_service_payload(payload):
+    service_payload = {
+        "projectId": optional_positive_integer(payload.get("projectId")),
+        "stage": payload.get("stage", "").strip(),
+    }
+    evidence_ids = payload.get("evidenceIds")
+    if evidence_ids is not None:
+        service_payload["evidenceIds"] = evidence_ids
+    knowledge_query = payload.get("knowledgeQuery")
+    if isinstance(knowledge_query, str) and knowledge_query.strip():
+        service_payload["knowledgeQuery"] = knowledge_query.strip()
+    return service_payload
+
+
 def agent_loop_run_response(payload):
     if payload.get("ok") is False:
         return payload
@@ -239,6 +371,21 @@ def agent_loop_run_response(payload):
         "agentLoopRunId": payload.get("agentLoopRunId", run.get("id")),
         "status": payload.get("status", run.get("status")),
     }
+
+
+def dangerous_crewai_value_error(field_name):
+    return agent_loop_error(
+        "invalid_crewai_proposal_payload",
+        "CrewAI proposal payload contains dangerous public values.",
+        f"The public field {field_name} contains a blocked marker or unsafe content.",
+        "Remove blocked diagnostic, credential, storage, database, and raw output content.",
+    )
+
+
+def contains_dangerous_crewai_value(value):
+    text = str(value)
+    lowered = text.lower()
+    return crewai_sensitive_value(text) or any(marker in lowered for marker in CREWAI_DANGEROUS_MARKERS)
 
 
 def agent_loop_status_response(payload):
@@ -299,8 +446,15 @@ def status_for(payload):
     if error_type == "agent_loop_not_found":
         return 404
     if error_type in {
+        "crewai_evidence_rejected",
+        "crewai_evidence_required",
+        "crewai_invalid_proposal",
+        "crewai_tool_not_allowed",
+        "crewai_tool_payload_rejected",
+        "crewai_write_intent_not_allowed",
         "invalid_agent_loop_payload",
         "invalid_agent_loop_mode",
+        "invalid_crewai_proposal_payload",
         "invalid_project_id",
         "invalid_agent_run_id",
         "invalid_legacy_worker_payload",

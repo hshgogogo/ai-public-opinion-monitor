@@ -144,6 +144,452 @@ print(json.dumps({"loop": loop, "step": step, "review": review, "handoff": hando
 );
 
 test(
+  "FastAPI CrewAI proposal endpoint persists proposal audits into Agent Harness ledger",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    assert.equal(runWorker([
+      "weibo-discovery",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        keyword: "海岛舒服日志",
+        limit: 10,
+        fixturePath: "test/fixtures/weibo-search.jsonl"
+      })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-target-select",
+      "--payload-json",
+      JSON.stringify({ projectId, targetId: "1001" })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-collect-target",
+      "--target-id",
+      "1001",
+      "--payload-json",
+      JSON.stringify({ projectId, fixturePath: "test/fixtures/weibo-detail.jsonl" })
+    ]).ok, true);
+    assert.equal(runWorker([
+      "weibo-build-events-fixture",
+      "--fixture",
+      "test/fixtures/weibo-event-evidence.jsonl",
+      "--persist-project-id",
+      String(projectId)
+    ]).ok, true);
+    const commentId = queryRows("SELECT id FROM social_comments WHERE project_id=%s ORDER BY id LIMIT 1", [projectId])[0].id;
+    const eventId = queryRows("SELECT id FROM artist_public_opinion_events WHERE project_id=%s ORDER BY id LIMIT 1", [projectId])[0].id;
+    const factCountsBefore = queryRows(
+      `
+      SELECT
+        (SELECT COUNT(*) FROM artist_public_opinion_events WHERE project_id=%s) AS events,
+        (SELECT COUNT(*) FROM publicity_actions WHERE project_id=%s) AS actions,
+        (SELECT COUNT(*) FROM bot_memory_items WHERE project_id=%s) AS memory_items
+      `,
+      [projectId, projectId, projectId]
+    )[0];
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.crewai_proposal_service import CrewAIProposalService
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+class FakeProposalRuntime:
+    def __init__(self):
+        self.calls = []
+
+    def run_proposal(self, request):
+        self.calls.append(request)
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "真实账本审计已写入。", "evidence_ids": [f"comment:{os.environ['COMMENT_ID']}"]}],
+                "inferences": [{"text": "讨论热度需要继续观察。", "confidence": "medium", "evidence_ids": [f"comment:{os.environ['COMMENT_ID']}"]}],
+                "recommendations": [{"text": "准备带证据的回应预案。", "risk_notes": ["不要过度归因。"], "evidence_ids": [f"event:{os.environ['EVENT_ID']}"]}],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [5],
+                "raw_model_output_ref": "audit://raw-output/real-db-test"
+            },
+        }
+
+project_id = int(os.environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="strategy",
+    input_json={"source": "crewai-proposal-test"},
+)
+runtime = FakeProposalRuntime()
+service = CrewAIProposalService(runtime_adapter=runtime)
+client = TestClient(create_app(crewai_proposal_service=service))
+response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/crewai/proposals",
+    json={
+        "projectId": project_id,
+        "stage": "strategy",
+        "evidenceIds": [f"comment:{os.environ['COMMENT_ID']}", f"event:{os.environ['EVENT_ID']}"],
+        "knowledgeQuery": "宣发回应",
+    },
+)
+print(json.dumps({
+    "status_code": response.status_code,
+    "payload": response.json(),
+    "runtime_calls": runtime.calls,
+    "loop_id": loop["id"],
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId), COMMENT_ID: String(commentId), EVENT_ID: String(eventId) });
+
+    assert.equal(result.status_code, 200, result.payload);
+    assert.equal(result.payload.ok, true, result.payload);
+    assert.equal(typeof result.payload.proposalAuditId, "number", result.payload);
+    assert.deepEqual(result.runtime_calls, [{
+      project_id: projectId,
+      agent_loop_run_id: result.loop_id,
+      stage: "strategy",
+      evidence_ids: [`comment:${commentId}`, `event:${eventId}`],
+      knowledge_query: "宣发回应"
+    }]);
+
+    const auditRow = queryRows(
+      "SELECT agent_name, step_name, status, JSON_LENGTH(evidence_ids) AS evidence_count, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.proposal.raw_model_output_ref')) AS raw_ref, JSON_UNQUOTE(JSON_EXTRACT(input_json, '$.knowledge_query')) AS knowledge_query FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+      [result.payload.proposalAuditId, result.loop_id, projectId]
+    )[0];
+    assert.deepEqual(auditRow, {
+      agent_name: "Strategy Agent",
+      step_name: "crewai_proposal_audit",
+      status: "succeeded",
+      evidence_count: 2,
+      raw_ref: "audit://raw-output/real-db-test",
+      knowledge_query: "宣发回应"
+    });
+    assert.deepEqual(queryRows(
+      `
+      SELECT
+        (SELECT COUNT(*) FROM artist_public_opinion_events WHERE project_id=%s) AS events,
+        (SELECT COUNT(*) FROM publicity_actions WHERE project_id=%s) AS actions,
+        (SELECT COUNT(*) FROM bot_memory_items WHERE project_id=%s) AS memory_items
+      `,
+      [projectId, projectId, projectId]
+    )[0], factCountsBefore);
+  }
+);
+
+test(
+  "FastAPI CrewAI proposal endpoint records rejected and runtime_error proposal audits into agent_step_runs",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.crewai_proposal_service import CrewAIProposalService
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+class RejectedRuntime:
+    def __init__(self):
+        self.calls = []
+
+    def run_proposal(self, request):
+        self.calls.append(request)
+        return {
+            "ok": False,
+            "error_type": "crewai_evidence_rejected",
+            "message": "Evidence was rejected.",
+            "cause": "Cross-project evidence is not allowed.",
+            "fix": "Retry with evidence IDs from the same project.",
+        }
+
+class RuntimeFailedRuntime:
+    def __init__(self):
+        self.calls = []
+
+    def run_proposal(self, request):
+        self.calls.append(request)
+        return {
+            "ok": False,
+            "error_type": "crewai_runtime_failed",
+            "message": "CrewAI runtime failed.",
+            "cause": "private runtime details",
+            "fix": "Retry with a healthy runtime.",
+            "traceback": "hidden traceback",
+            "stderr": "hidden stderr",
+        }
+
+project_id = int(os.environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="strategy",
+    input_json={"source": "crewai-proposal-test"},
+)
+
+rejected_runtime = RejectedRuntime()
+rejected_service = CrewAIProposalService(runtime_adapter=rejected_runtime)
+client = TestClient(create_app(crewai_proposal_service=rejected_service))
+rejected_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/crewai/proposals",
+    json={
+        "projectId": project_id,
+        "stage": "strategy",
+        "evidenceIds": ["comment:123"],
+        "knowledgeQuery": "宣发回应",
+    },
+)
+
+runtime_failed_runtime = RuntimeFailedRuntime()
+runtime_failed_service = CrewAIProposalService(runtime_adapter=runtime_failed_runtime)
+runtime_failed_client = TestClient(create_app(crewai_proposal_service=runtime_failed_service))
+runtime_failed_response = runtime_failed_client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/crewai/proposals",
+    json={
+        "projectId": project_id,
+        "stage": "strategy",
+        "evidenceIds": ["comment:123"],
+        "knowledgeQuery": "宣发回应",
+    },
+)
+
+print(json.dumps({
+    "rejected": rejected_response.json(),
+    "runtime_failed": runtime_failed_response.json(),
+    "loop_id": loop["id"],
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId) });
+
+    assert.equal(result.rejected.ok, false, result.rejected);
+    assert.equal(result.rejected.error_type, "crewai_evidence_rejected", result.rejected);
+    assert.equal(result.runtime_failed.ok, false, result.runtime_failed);
+    assert.equal(result.runtime_failed.error_type, "crewai_runtime_failed", result.runtime_failed);
+
+    const rejectedRow = queryRows(
+      "SELECT agent_name, step_name, status, error_type, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.error_type')) AS output_error_type FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+      [result.rejected.proposalAuditId, result.loop_id, projectId]
+    )[0];
+    assert.deepEqual(rejectedRow, {
+      agent_name: "CrewAI Proposal Harness",
+      step_name: "crewai_proposal_audit",
+      status: "partial",
+      error_type: "crewai_evidence_rejected",
+      output_error_type: "crewai_evidence_rejected"
+    });
+
+    const runtimeFailedRow = queryRows(
+      "SELECT agent_name, step_name, status, error_type, JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.error_type')) AS output_error_type FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+      [result.runtime_failed.proposalAuditId, result.loop_id, projectId]
+    )[0];
+    assert.deepEqual(runtimeFailedRow, {
+      agent_name: "CrewAI Proposal Harness",
+      step_name: "crewai_proposal_audit",
+      status: "failed",
+      error_type: "crewai_runtime_failed",
+      output_error_type: "crewai_runtime_failed"
+    });
+  }
+);
+
+test(
+  "FastAPI CrewAI proposal endpoint validates sentiment evidence ownership through comments",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("CrewAI sentiment cross-project evidence");
+    const commentId = createEvidenceComment(projectId, "crewai-sentiment-same-project");
+    const otherCommentId = createEvidenceComment(otherProjectId, "crewai-sentiment-cross-project");
+    const sentimentId = createSentimentResult(commentId, "crewai-sentiment-same-project");
+    const otherSentimentId = createSentimentResult(otherCommentId, "crewai-sentiment-cross-project");
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.crewai_proposal_service import CrewAIProposalService
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+class SentimentRuntime:
+    def __init__(self, sentiment_id):
+        self.sentiment_id = sentiment_id
+
+    def run_proposal(self, request):
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "comment_analysis",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Issue Analysis Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "情绪分析证据已限定在项目评论内。", "evidence_ids": [f"sentiment:{self.sentiment_id}"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None
+            },
+        }
+
+project_id = int(os.environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="analysis",
+    input_json={"source": "crewai-sentiment-evidence-test"},
+)
+
+accepted_client = TestClient(create_app(crewai_proposal_service=CrewAIProposalService(
+    runtime_adapter=SentimentRuntime(int(os.environ["SENTIMENT_ID"]))
+)))
+accepted_response = accepted_client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/crewai/proposals",
+    json={
+        "projectId": project_id,
+        "stage": "analysis",
+        "evidenceIds": [f"sentiment:{os.environ['SENTIMENT_ID']}"],
+    },
+)
+
+cross_client = TestClient(create_app(crewai_proposal_service=CrewAIProposalService(
+    runtime_adapter=SentimentRuntime(int(os.environ["OTHER_SENTIMENT_ID"]))
+)))
+cross_response = cross_client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/crewai/proposals",
+    json={
+        "projectId": project_id,
+        "stage": "analysis",
+        "evidenceIds": [f"sentiment:{os.environ['OTHER_SENTIMENT_ID']}"],
+    },
+)
+
+print(json.dumps({
+    "accepted": accepted_response.json(),
+    "cross": cross_response.json(),
+    "loop_id": loop["id"],
+}, ensure_ascii=False, default=str))
+`, {
+      PROJECT_ID: String(projectId),
+      SENTIMENT_ID: String(sentimentId),
+      OTHER_SENTIMENT_ID: String(otherSentimentId)
+    });
+
+    assert.equal(result.accepted.ok, true, result.accepted);
+    assert.equal(result.accepted.proposalAuditId > 0, true, result.accepted);
+    assert.equal(result.cross.ok, false, result.cross);
+    assert.equal(result.cross.error_type, "crewai_evidence_rejected", result.cross);
+
+    assert.deepEqual(queryRows(
+      "SELECT status, JSON_CONTAINS(evidence_ids, JSON_QUOTE(%s)) AS has_sentiment FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+      [`sentiment:${sentimentId}`, result.accepted.proposalAuditId, result.loop_id, projectId]
+    )[0], {
+      status: "succeeded",
+      has_sentiment: 1
+    });
+    assert.deepEqual(queryRows(
+      "SELECT status, error_type FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+      [result.cross.proposalAuditId, result.loop_id, projectId]
+    )[0], {
+      status: "partial",
+      error_type: "crewai_evidence_rejected"
+    });
+  }
+);
+
+test(
+  "FastAPI CrewAI proposal endpoint rejects request evidence before runtime execution",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("CrewAI request evidence cross-project");
+    const otherCommentId = createEvidenceComment(otherProjectId, "crewai-request-evidence-cross-project");
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.crewai_proposal_service import CrewAIProposalService
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+class RuntimeShouldNotRun:
+    def __init__(self):
+        self.calls = 0
+
+    def run_proposal(self, request):
+        self.calls += 1
+        return {
+            "ok": True,
+            "proposal": {
+                "proposal_type": "strategy_action",
+                "project_id": request["project_id"],
+                "agent_loop_run_id": request["agent_loop_run_id"],
+                "agent_name": "Strategy Agent",
+                "stage": request["stage"],
+                "facts": [{"text": "should not run", "evidence_ids": ["comment:1"]}],
+                "inferences": [],
+                "recommendations": [],
+                "write_intent": "proposal_only",
+                "knowledge_card_ids": [],
+                "raw_model_output_ref": None
+            },
+        }
+
+project_id = int(os.environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="strategy",
+    input_json={"source": "crewai-request-evidence-preflight-test"},
+)
+runtime = RuntimeShouldNotRun()
+client = TestClient(create_app(crewai_proposal_service=CrewAIProposalService(runtime_adapter=runtime)))
+response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/crewai/proposals",
+    json={
+        "projectId": project_id,
+        "stage": "strategy",
+        "evidenceIds": [f"comment:{os.environ['OTHER_COMMENT_ID']}"],
+    },
+)
+print(json.dumps({
+    "payload": response.json(),
+    "runtime_calls": runtime.calls,
+    "loop_id": loop["id"],
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId), OTHER_COMMENT_ID: String(otherCommentId) });
+
+    assert.equal(result.payload.ok, false, result.payload);
+    assert.equal(result.payload.error_type, "crewai_evidence_rejected", result.payload);
+    assert.equal(result.runtime_calls, 0, result);
+    assert.deepEqual(queryRows(
+      "SELECT status, error_type, JSON_CONTAINS(evidence_ids, JSON_QUOTE(%s)) AS has_cross_project_evidence FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+      [`comment:${otherCommentId}`, result.payload.proposalAuditId, result.loop_id, projectId]
+    )[0], {
+      status: "partial",
+      error_type: "crewai_evidence_rejected",
+      has_cross_project_evidence: 0
+    });
+  }
+);
+
+test(
   "protects Agent Harness terminal loop state and rejects passed Judge reviews with evidence errors",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
@@ -4441,6 +4887,19 @@ function createEvidenceComment(projectId, identity) {
     [postId, projectId, `comment-${identity}`, identity]
   );
   return queryRows("SELECT id FROM social_comments WHERE project_id=%s AND external_id=%s", [projectId, `comment-${identity}`])[0].id;
+}
+
+function createSentimentResult(commentId, identity) {
+  queryRows(
+    `
+    INSERT INTO sentiment_results(
+      comment_id, model, sentiment, score, confidence, topics, risks, evidence, analysis_json
+    )
+    VALUES (%s,'test-model','positive',0.65,0.8,JSON_ARRAY('口碑'),JSON_ARRAY(),%s,JSON_OBJECT('identity', %s))
+    `,
+    [commentId, `sentiment evidence ${identity}`, identity]
+  );
+  return queryRows("SELECT id FROM sentiment_results WHERE comment_id=%s AND model='test-model' ORDER BY id DESC LIMIT 1", [commentId])[0].id;
 }
 
 function createEvent(projectId, identity) {

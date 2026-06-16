@@ -33,26 +33,26 @@
 
 ## 5. FastAPI Integration
 
-- [ ] 5.1 Write FastAPI tests for creating a CrewAI proposal from an existing Agent Loop run.
-- [ ] 5.2 Implement minimal internal/public FastAPI endpoint or service wrapper.
-- [ ] 5.3 Write MySQL unavailable and run-not-found tests.
-- [ ] 5.4 Ensure endpoint never reads real Cookie, `.env`, browser state, or raw worker stderr.
-- [ ] 5.5 Ensure old FastAPI sidecar and Node tests still pass.
+- [x] 5.1 Write FastAPI tests for creating a CrewAI proposal from an existing Agent Loop run.
+- [x] 5.2 Implement minimal internal/public FastAPI endpoint or service wrapper.
+- [x] 5.3 Write MySQL unavailable and run-not-found tests.
+- [x] 5.4 Ensure endpoint never reads real Cookie, `.env`, browser state, or raw worker stderr.
+- [x] 5.5 Ensure old FastAPI sidecar and Node tests still pass.
 
 ## 6. Evidence And Persistence Boundary
 
-- [ ] 6.1 Write tests proving accepted proposal audit records are mandatory and do not mutate event/action/memory fact tables.
-- [ ] 6.2 Write tests proving rejected proposals are recorded with reason and evidence errors.
-- [ ] 6.3 Write tests proving runtime errors are recorded as error proposal audit records.
-- [ ] 6.4 Write tests proving invalid submit attempts do not create accepted proposal records.
-- [ ] 6.5 Implement proposal audit persistence if existing ledger supports it, or create a non-destructive migration proposal if needed.
+- [x] 6.1 Write tests proving accepted proposal audit records are mandatory and do not mutate event/action/memory fact tables.
+- [x] 6.2 Write tests proving rejected proposals are recorded with reason and evidence errors.
+- [x] 6.3 Write tests proving runtime errors are recorded as error proposal audit records.
+- [x] 6.4 Write tests proving invalid submit attempts do not create accepted proposal records.
+- [x] 6.5 Implement proposal audit persistence if existing ledger supports it, or create a non-destructive migration proposal if needed.
 - [ ] 6.6 Run real MySQL tests when available.
 
 ## 7. Verification And Review
 
 - [x] 7.1 Run targeted CrewAI adapter tests.
 - [x] 7.2 Run `npm test`.
-- [x] 7.3 Run real MySQL test suite when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
+- [ ] 7.3 Run real MySQL test suite when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
 - [x] 7.4 Run `openspec validate haidao-crewai-runtime-adapter --strict`.
 - [x] 7.5 Run `git diff --check`.
 - [x] 7.6 Run `npm run agent:guard`.
