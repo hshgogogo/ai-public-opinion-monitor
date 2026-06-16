@@ -425,19 +425,31 @@ def validate_judge_review_request_payload(payload):
             "Pass a positive integer projectId from the existing Agent Loop run.",
         )
 
-    proposal_audit_id = optional_positive_integer(payload.get("proposalAuditId"))
-    if proposal_audit_id is None:
+    proposal_audit_id = None
+    if "proposalAuditId" in payload:
+        proposal_audit_id = optional_positive_integer(payload.get("proposalAuditId"))
+    if "proposalAuditId" in payload and proposal_audit_id is None:
         return invalid_judge_review_payload_error(
             "Judge review requires a valid proposalAuditId.",
             "The public payload proposalAuditId must be a positive integer.",
             "Pass a proposalAuditId returned by the CrewAI proposal Harness.",
         )
 
-    if "stepRunId" in payload and optional_positive_integer(payload.get("stepRunId")) is None:
+    step_run_id = None
+    if "stepRunId" in payload:
+        step_run_id = optional_positive_integer(payload.get("stepRunId"))
+    if "stepRunId" in payload and step_run_id is None:
         return invalid_judge_review_payload_error(
             "Judge review stepRunId is invalid.",
             "The public payload stepRunId must be a positive integer when provided.",
             "Pass a positive integer stepRunId or omit it.",
+        )
+
+    if proposal_audit_id is None and step_run_id is None:
+        return invalid_judge_review_payload_error(
+            "Judge review requires a proposalAuditId or stepRunId.",
+            "The public payload did not include a CrewAI proposal audit id or an allowlisted Agent Loop step id.",
+            "Pass proposalAuditId with fixtureOutputs, or pass stepRunId for an allowlisted step-output review.",
         )
 
     if "maxAttempts" in payload and optional_positive_integer(payload.get("maxAttempts")) is None:
@@ -455,11 +467,25 @@ def validate_judge_review_request_payload(payload):
         )
 
     fixture_outputs = payload.get("fixtureOutputs")
+    if fixture_outputs is None:
+        if step_run_id is None:
+            return invalid_judge_review_payload_error(
+                "Judge review fixtureOutputs or stepRunId are required.",
+                "This request did not include fake outputs or an allowlisted Agent Loop step id to review.",
+                "Pass fixtureOutputs as a non-empty array, or pass stepRunId for an allowlisted step-output review.",
+            )
+        return None
+    if proposal_audit_id is None:
+        return invalid_judge_review_payload_error(
+            "Judge review fixtureOutputs require a proposalAuditId.",
+            "Service-level fake outputs must remain scoped to a CrewAI proposal audit source.",
+            "Pass a proposalAuditId with fixtureOutputs, or omit fixtureOutputs when reviewing an allowlisted stepRunId.",
+        )
     if not isinstance(fixture_outputs, list) or not fixture_outputs:
         return invalid_judge_review_payload_error(
-            "Judge review fixtureOutputs are required for this fake-output slice.",
-            "This slice only supports service-level fake outputs and does not read proposal audit output yet.",
-            "Pass fixtureOutputs as a non-empty array, or wait for the proposal audit lookup slice.",
+            "Judge review fixtureOutputs are invalid.",
+            "When provided, fixtureOutputs must be a non-empty array.",
+            "Pass fixtureOutputs as a non-empty array, or omit it when reviewing an allowlisted stepRunId.",
         )
     if not all(is_plain_object(item) for item in fixture_outputs):
         return invalid_judge_review_payload_error(
@@ -479,9 +505,11 @@ def build_judge_review_service_payload(payload):
 
     service_payload = {
         "projectId": optional_positive_integer(payload.get("projectId")),
-        "proposalAuditId": optional_positive_integer(payload.get("proposalAuditId")),
         "maxAttempts": max_attempts,
     }
+    proposal_audit_id = optional_positive_integer(payload.get("proposalAuditId"))
+    if proposal_audit_id is not None:
+        service_payload["proposalAuditId"] = proposal_audit_id
     step_run_id = optional_positive_integer(payload.get("stepRunId"))
     if step_run_id is not None:
         service_payload["stepRunId"] = step_run_id

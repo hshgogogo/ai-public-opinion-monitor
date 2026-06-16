@@ -624,6 +624,81 @@ for forbidden in ["raw_model_output", "prompt", "traceback", "stderr", "mysql://
 `);
 });
 
+test("FastAPI sidecar passes Judge review stepRunId without fake fixture outputs", () => {
+  runPython(`
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class FakeJudgeReviewService:
+    def __init__(self):
+        self.calls = []
+        self.review_call_count = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+    def create_review(self, run_id, payload):
+        self.calls.append((run_id, payload))
+        self.review_call_count += 1
+        return {
+            "ok": True,
+            "review": {
+                "id": "judge-review-step-1",
+                "status": "passed",
+                "passed": True,
+                "retry_count": 0,
+                "required_changes": [],
+                "evidence_errors": [],
+                "feedback_json": {"judge": "rule_judge"},
+            },
+            "retryCount": 0,
+            "proposalAuditId": None,
+            "stepRunId": 34,
+        }
+
+service = FakeJudgeReviewService()
+client = TestClient(create_app(judge_review_service=service))
+
+response = client.post("/api/weibo/agent-runs/10/judge/reviews", json={
+    "projectId": "2",
+    "stepRunId": "34",
+    "maxAttempts": 5,
+})
+payload = response.json()
+
+assert response.status_code == 200, payload
+assert payload["ok"] is True, payload
+assert payload["review"]["status"] == "passed", payload
+assert service.review_call_count == 1, service.review_call_count
+assert service.calls == [(10, {
+    "projectId": 2,
+    "stepRunId": 34,
+    "maxAttempts": 3,
+})], service.calls
+
+missing_source = client.post("/api/weibo/agent-runs/10/judge/reviews", json={
+    "projectId": "2",
+    "proposalAuditId": "56",
+})
+missing_payload = missing_source.json()
+assert missing_source.status_code == 400, missing_payload
+assert missing_payload["error_type"] == "invalid_judge_review_payload", missing_payload
+
+unscoped_fixture = client.post("/api/weibo/agent-runs/10/judge/reviews", json={
+    "projectId": "2",
+    "stepRunId": "34",
+    "fixtureOutputs": [{"output": {"evidence_ids": ["comment-123"]}}],
+})
+unscoped_payload = unscoped_fixture.json()
+assert unscoped_fixture.status_code == 400, unscoped_payload
+assert unscoped_payload["error_type"] == "invalid_judge_review_payload", unscoped_payload
+assert service.review_call_count == 1, service.review_call_count
+`);
+});
+
 test("FastAPI sidecar rejects unsafe Judge review payloads before service execution", () => {
   runPython(`
 import json
@@ -724,6 +799,153 @@ missing_payload = run_not_found.json()
 assert run_not_found.status_code == 404, missing_payload
 assert missing_payload["error_type"] == "agent_loop_not_found", missing_payload
 assert missing_service.review_call_count == 0, missing_service.review_call_count
+`);
+});
+
+test("JudgeReviewService maps weibo-comments-analyze step output into Rule Judge input", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+class SourceRepository:
+    def __init__(self, evidence_ids=None, command="weibo-comments-analyze"):
+        self.calls = []
+        self.output_calls = []
+        self.evidence_ids = evidence_ids if evidence_ids is not None else ["comment-123"]
+        self.command = command
+
+    def has_sources(self, run_id, project_id, proposal_audit_id=None, step_run_id=None):
+        self.calls.append((run_id, project_id, proposal_audit_id, step_run_id))
+        return run_id == 10 and project_id == 2 and proposal_audit_id is None and step_run_id == 34
+
+    def step_output_for_review(self, run_id, project_id, step_run_id):
+        self.output_calls.append((run_id, project_id, step_run_id))
+        return {
+            "ok": True,
+            "step": {
+                "id": step_run_id,
+                "step_name": "comment_analysis",
+                "status": "succeeded",
+                "output_json": {
+                    "command": self.command,
+                    "analyzed_comments": 2,
+                    "persisted_sentiments": 2,
+                    "deepseek": {"status": "disabled"},
+                },
+                "evidence_ids": self.evidence_ids,
+            },
+        }
+
+class EvidenceRepository:
+    def __init__(self):
+        self.calls = []
+
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        self.calls.append((project_id, list(evidence_ids)))
+        return {"comment-123", "event-7", "action-8"}.intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        return set()
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append({
+            "proposal_audit_id": proposal_audit_id,
+            "step_run_id": step_run_id,
+            "review": persisted,
+            "output": output,
+        })
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        raise AssertionError("single step-output review should not create handoff")
+
+source_repository = SourceRepository()
+review_repository = ReviewRepository()
+evidence_repository = EvidenceRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=source_repository,
+    review_repository=review_repository,
+    evidence_repository=evidence_repository,
+)
+
+accepted = service.create_review(10, {
+    "projectId": 2,
+    "stepRunId": 34,
+    "maxAttempts": 3,
+})
+assert accepted["ok"] is True, accepted
+assert accepted["proposalAuditId"] is None, accepted
+assert accepted["stepRunId"] == 34, accepted
+assert accepted["review"]["status"] == "passed", accepted
+assert accepted["review"]["retry_count"] == 0, accepted
+assert source_repository.calls == [(10, 2, None, 34)], source_repository.calls
+assert source_repository.output_calls == [(10, 2, 34)], source_repository.output_calls
+assert evidence_repository.calls == [(2, ["comment-123"])], evidence_repository.calls
+assert len(review_repository.records) == 1, review_repository.records
+recorded = review_repository.records[0]
+assert recorded["proposal_audit_id"] is None, recorded
+assert recorded["step_run_id"] == 34, recorded
+assert recorded["output"]["command"] == "weibo-comments-analyze", recorded
+assert recorded["output"]["evidence_ids"] == ["comment-123"], recorded
+assert recorded["output"]["summary"] == "weibo-comments-analyze persisted 2 sentiment result(s) from 2 analyzed comment(s).", recorded
+assert "deepseek" not in recorded["output"], recorded
+
+missing_evidence_source = SourceRepository(evidence_ids=[])
+missing_evidence_reviews = ReviewRepository()
+missing_evidence = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=missing_evidence_source,
+    review_repository=missing_evidence_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 34,
+    "maxAttempts": 3,
+})
+assert missing_evidence["review"]["status"] == "failed", missing_evidence
+assert missing_evidence["review"]["passed"] is False, missing_evidence
+assert any(item["error_type"] == "missing_evidence_ids" for item in missing_evidence["review"]["evidence_errors"]), missing_evidence
+assert len(missing_evidence_reviews.records) == 1, missing_evidence_reviews.records
+
+unsupported_evidence_reviews = ReviewRepository()
+unsupported_evidence = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=["event-7", "action-8"]),
+    review_repository=unsupported_evidence_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 34,
+    "maxAttempts": 3,
+})
+assert unsupported_evidence["review"]["status"] == "failed", unsupported_evidence
+assert unsupported_evidence["review"]["passed"] is False, unsupported_evidence
+unsupported_errors = unsupported_evidence["review"]["evidence_errors"]
+assert {item["evidence_id"] for item in unsupported_errors} == {"event-7", "action-8"}, unsupported_evidence
+assert all(item["error_type"] == "unsupported_comment_analysis_evidence_prefix" for item in unsupported_errors), unsupported_evidence
+assert len(unsupported_evidence_reviews.records) == 1, unsupported_evidence_reviews.records
+
+wrong_command = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(command="weibo-events-build"),
+    review_repository=ReviewRepository(),
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 34,
+    "maxAttempts": 3,
+})
+assert wrong_command["ok"] is False, wrong_command
+assert wrong_command["error_type"] == "judge_review_source_not_found", wrong_command
 `);
 });
 

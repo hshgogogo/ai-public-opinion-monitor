@@ -29,8 +29,8 @@
 
 ## 4. Step 集成边界
 
-- [ ] 4.1 先写 proposal/step output review 测试，覆盖 CrewAI proposal audit 或 `weibo-comments-analyze` attachment 输出被 Judge 检查。
-- [ ] 4.2 为 comment analysis proposal/step 提供 Judge review 输入映射。
+- [x] 4.1 先写 proposal/step output review 测试，覆盖 CrewAI proposal audit 或 `weibo-comments-analyze` attachment 输出被 Judge 检查。
+- [x] 4.2 为 comment analysis proposal/step 提供 Judge review 输入映射。
 - [ ] 4.3 先写事件 proposal/step review 测试，覆盖无事件证据或 formal event 证据不足被拒绝。
 - [ ] 4.4 为 event-building proposal/step 提供 Judge review 输入映射。
 - [ ] 4.5 先写 action proposal/step review 测试，覆盖无 evidence、禁用知识卡、空泛建议或因果过度表述被拒绝。

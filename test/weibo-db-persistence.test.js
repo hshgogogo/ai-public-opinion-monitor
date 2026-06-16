@@ -745,6 +745,169 @@ print(json.dumps({
 );
 
 test(
+  "FastAPI Judge review endpoint maps comment analysis step output without fixtureOutputs",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("Judge step output cross-project fixture");
+    const commentId = createEvidenceComment(projectId, "judge-step-output-comment-analysis");
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+project_id = int(os.environ["PROJECT_ID"])
+other_project_id = int(os.environ["OTHER_PROJECT_ID"])
+comment_id = int(os.environ["COMMENT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="comment_analysis",
+    input_json={"source": "judge-step-output-review-test"},
+)
+analysis_step = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Issue Analysis Agent",
+    step_name="comment_analysis",
+    status="succeeded",
+    output_json={
+        "command": "weibo-comments-analyze",
+        "analyzed_comments": 1,
+        "persisted_sentiments": 1,
+        "deepseek": {"status": "disabled"},
+    },
+    evidence_ids=[f"comment-{comment_id}"],
+)
+same_project_other_loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="comment_analysis",
+    input_json={"source": "judge-step-output-other-run"},
+)
+same_project_other_step = worker.record_agent_step_run(
+    loop_run_id=same_project_other_loop["id"],
+    project_id=project_id,
+    agent_name="Issue Analysis Agent",
+    step_name="comment_analysis",
+    status="succeeded",
+    output_json={
+        "command": "weibo-comments-analyze",
+        "analyzed_comments": 1,
+        "persisted_sentiments": 1,
+    },
+    evidence_ids=[f"comment-{comment_id}"],
+)
+other_project_loop = worker.create_agent_loop_run(
+    project_id=other_project_id,
+    trigger_mode="manual",
+    current_step="comment_analysis",
+    input_json={"source": "judge-step-output-other-project"},
+)
+other_project_step = worker.record_agent_step_run(
+    loop_run_id=other_project_loop["id"],
+    project_id=other_project_id,
+    agent_name="Issue Analysis Agent",
+    step_name="comment_analysis",
+    status="succeeded",
+    output_json={
+        "command": "weibo-comments-analyze",
+        "analyzed_comments": 1,
+        "persisted_sentiments": 1,
+    },
+    evidence_ids=[f"comment-{comment_id}"],
+)
+client = TestClient(create_app())
+response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": analysis_step["id"],
+        "maxAttempts": 3,
+    },
+)
+wrong_run_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": same_project_other_step["id"],
+        "maxAttempts": 3,
+    },
+)
+cross_project_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": other_project_step["id"],
+        "maxAttempts": 3,
+    },
+)
+print(json.dumps({
+    "loop_id": loop["id"],
+    "step_id": analysis_step["id"],
+    "response_status": response.status_code,
+    "response": response.json(),
+    "wrong_run_status": wrong_run_response.status_code,
+    "wrong_run": wrong_run_response.json(),
+    "cross_project_status": cross_project_response.status_code,
+    "cross_project": cross_project_response.json(),
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId), OTHER_PROJECT_ID: String(otherProjectId), COMMENT_ID: String(commentId) });
+
+    assert.equal(result.response_status, 200, result.response);
+    assert.equal(result.response.ok, true, result.response);
+    assert.equal(result.response.proposalAuditId, null, result.response);
+    assert.equal(result.response.stepRunId, result.step_id, result.response);
+    assert.equal(result.response.review.status, "passed", result.response);
+    assert.equal(result.response.review.retry_count, 0, result.response);
+    assert.deepEqual(result.response.review.evidence_errors, [], result.response);
+
+    assert.deepEqual(queryRows(
+      `
+      SELECT
+        step_run_id,
+        status,
+        passed,
+        retry_count,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.proposal_audit_id')) AS proposal_audit_id,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.evidence_ids[0]')) AS evidence_id,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.summary')) AS summary,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.deepseek.status')) AS deepseek_status
+      FROM judge_reviews
+      WHERE loop_run_id=%s AND project_id=%s
+      ORDER BY id
+      `,
+      [result.loop_id, projectId]
+    ), [
+      {
+        step_run_id: result.step_id,
+        status: "passed",
+        passed: 1,
+        retry_count: 0,
+        proposal_audit_id: null,
+        evidence_id: `comment-${commentId}`,
+        summary: "weibo-comments-analyze persisted 1 sentiment result(s) from 1 analyzed comment(s).",
+        deepseek_status: null
+      }
+    ]);
+
+    assert.equal(result.wrong_run_status, 404, result.wrong_run);
+    assert.equal(result.wrong_run.error_type, "judge_review_source_not_found", result.wrong_run);
+    assert.equal(result.cross_project_status, 404, result.cross_project);
+    assert.equal(result.cross_project.error_type, "judge_review_source_not_found", result.cross_project);
+    assert.deepEqual(queryRows(
+      "SELECT COUNT(*) AS count FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s",
+      [result.loop_id, projectId]
+    )[0], { count: 1 });
+  }
+);
+
+test(
   "FastAPI Judge review endpoint resolves owned evidence IDs and rejects cross-project analysis IDs",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
