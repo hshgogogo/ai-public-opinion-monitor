@@ -20,11 +20,11 @@
 
 - [x] 3.1 先写 FastAPI/service-level retry contract 测试，覆盖失败两轮后第三轮通过。
 - [x] 3.2 新增 Harness-owned Judge service 或 FastAPI worker-facing endpoint；不得把新增主业务写回旧 `enterprise_worker.py`。
-- [ ] 3.3 retry 每轮 MUST 写入一条 `judge_reviews`，包含 retry count、required changes、evidence errors 和失败输出摘要。
-- [ ] 3.4 通过时 MUST 写入 passed review，且 loop 不进入 `needs_human`。
-- [ ] 3.5 先写 retry exhausted 测试，覆盖连续 3 次总尝试失败。
-- [ ] 3.6 第 3 次总尝试失败后 MUST 将 step/loop 标记为 `needs_human` 并写入 `feedback_items` manual handoff。
-- [ ] 3.7 manual handoff 写入 MUST 校验 source 属于当前 project，不得使用弱校验路径。
+- [x] 3.3 retry 每轮 MUST 写入一条 `judge_reviews`，包含 retry count、required changes、evidence errors 和失败输出摘要。
+- [x] 3.4 通过时 MUST 写入 passed review，且 loop 不进入 `needs_human`。
+- [x] 3.5 先写 retry exhausted 测试，覆盖连续 3 次总尝试失败。
+- [x] 3.6 第 3 次总尝试失败后 MUST 将 step/loop 标记为 `needs_human` 并写入 `feedback_items` manual handoff。
+- [x] 3.7 manual handoff 写入 MUST 校验 source 属于当前 project，不得使用弱校验路径。
 - [x] 3.8 请求超过 3 次总尝试时 MUST clamp 到 3，且不得无限循环。
 
 ## 4. Step 集成边界
@@ -39,15 +39,15 @@
 
 ## 5. 持久化与状态查询
 
-- [ ] 5.1 先写真实 MySQL persistence 测试，验证 passed/failed/needs_human reviews 入库。
+- [x] 5.1 先写真实 MySQL persistence 测试，验证 passed/failed/needs_human reviews 入库。
 - [ ] 5.2 验证 `weibo-agent-loop-status` 返回 Judge reviews、retry count 和 manual handoff。
-- [ ] 5.3 验证失败输出摘要只保存白名单字段，不返回 raw secret/internal fields。
+- [x] 5.3 验证失败输出摘要只保存白名单字段，不返回 raw secret/internal fields。
 - [ ] 5.4 如果现有 schema 不足，先写 migration 测试，再新增 MySQL-safe migration；若现有 `feedback_json` 足够，则不新增 migration。
 
 ## 6. 安全与兼容
 
 - [x] 6.1 增加静态测试，确认本 change 不新增旧 Node public Judge endpoint，且 FastAPI Judge endpoint 不接受 prompt/runtime/cookie/db-url 等控制字段。
-- [ ] 6.2 增加测试，确认不读取或输出 `.env`、Cookie、token、浏览器登录态、`config/cookies/weibo.json` 或 worker stderr。
+- [x] 6.2 增加测试，确认不读取或输出 `.env`、Cookie、token、浏览器登录态、`config/cookies/weibo.json` 或 worker stderr。
 - [ ] 6.3 未传 `agentLoopRunId` 时现有 worker 命令 standalone 行为保持不变。
 - [x] 6.4 本 change 不调用真实 MediaCrawler、真实微博登录、真实 CrewAI 外部模型或新的付费 API。
 

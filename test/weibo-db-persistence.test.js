@@ -590,6 +590,141 @@ print(json.dumps({
 );
 
 test(
+  "FastAPI Judge review endpoint persists retry reviews and manual handoff",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+project_id = int(os.environ["PROJECT_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="strategy",
+    input_json={"source": "judge-review-persistence-test"},
+)
+proposal_audit = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="CrewAI Proposal Harness",
+    step_name="crewai_proposal_audit",
+    status="succeeded",
+    output_json={"proposal": {"summary": "candidate"}},
+    evidence_ids=[],
+)
+strategy_step = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="strategy_review",
+    status="succeeded",
+    output_json={"draft": "candidate"},
+    evidence_ids=[],
+)
+client = TestClient(create_app())
+passing_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "proposalAuditId": proposal_audit["id"],
+        "stepRunId": strategy_step["id"],
+        "maxAttempts": 3,
+        "fixtureOutputs": [
+            {"output": {"summary": "missing evidence"}},
+            {"output": {"summary": "still missing"}},
+            {"output": {"summary": "bounded", "evidence_ids": ["comment-123"]}},
+        ],
+    },
+)
+exhausted_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "proposalAuditId": proposal_audit["id"],
+        "stepRunId": strategy_step["id"],
+        "maxAttempts": 3,
+        "fixtureOutputs": [
+            {"output": {"summary": "missing evidence"}},
+            {"output": {"summary": "still missing"}},
+            {"output": {"summary": "still missing again"}},
+        ],
+    },
+)
+print(json.dumps({
+    "loop_id": loop["id"],
+    "proposal_audit_id": proposal_audit["id"],
+    "strategy_step_id": strategy_step["id"],
+    "passing": passing_response.json(),
+    "passing_status": passing_response.status_code,
+    "exhausted": exhausted_response.json(),
+    "exhausted_status": exhausted_response.status_code,
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId) });
+
+    assert.equal(result.passing_status, 200, result.passing);
+    assert.equal(result.passing.ok, true, result.passing);
+    assert.equal(result.passing.review.status, "passed", result.passing);
+    assert.equal(result.passing.retryCount, 2, result.passing);
+    assert.equal(result.exhausted_status, 200, result.exhausted);
+    assert.equal(result.exhausted.ok, true, result.exhausted);
+    assert.equal(result.exhausted.review.status, "needs_human", result.exhausted);
+    assert.equal(result.exhausted.manualHandoff.source_type, "judge_review", result.exhausted);
+
+    assert.deepEqual(queryRows(
+      `
+      SELECT status, retry_count, JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.summary')) AS failed_summary
+      FROM judge_reviews
+      WHERE loop_run_id=%s AND project_id=%s
+      ORDER BY id
+      `,
+      [result.loop_id, projectId]
+    ), [
+      { status: "failed", retry_count: 0, failed_summary: "missing evidence" },
+      { status: "failed", retry_count: 1, failed_summary: "still missing" },
+      { status: "passed", retry_count: 2, failed_summary: "bounded" },
+      { status: "failed", retry_count: 0, failed_summary: "missing evidence" },
+      { status: "failed", retry_count: 1, failed_summary: "still missing" },
+      { status: "needs_human", retry_count: 2, failed_summary: "still missing again" },
+    ]);
+    assert.deepEqual(queryRows(
+      "SELECT status, current_step, error_type FROM agent_loop_runs WHERE id=%s AND project_id=%s",
+      [result.loop_id, projectId]
+    )[0], {
+      status: "needs_human",
+      current_step: "judge_review",
+      error_type: "judge_retry_exhausted"
+    });
+    assert.deepEqual(queryRows(
+      "SELECT status, error_type FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+      [result.strategy_step_id, result.loop_id, projectId]
+    )[0], {
+      status: "needs_human",
+      error_type: "judge_retry_exhausted"
+    });
+    assert.deepEqual(queryRows(
+      "SELECT source_type, source_id, feedback_type, status, created_by FROM feedback_items WHERE project_id=%s ORDER BY id",
+      [projectId]
+    ), [
+      {
+        source_type: "judge_review",
+        source_id: result.exhausted.review.id,
+        feedback_type: "manual_handoff",
+        status: "open",
+        created_by: "agent_harness"
+      }
+    ]);
+  }
+);
+
+test(
   "protects Agent Harness terminal loop state and rejects passed Judge reviews with evidence errors",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

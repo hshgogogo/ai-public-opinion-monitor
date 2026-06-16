@@ -744,8 +744,20 @@ class SourceRepository:
         self.calls.append((run_id, project_id, proposal_audit_id, step_run_id))
         return self.valid
 
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append(persisted)
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        return {"feedback": {"id": 1, "source_type": "judge_review", "source_id": review["id"]}}
+
 source_repository = SourceRepository()
-service = JudgeReviewService(run_repository=RunRepository(), source_repository=source_repository)
+service = JudgeReviewService(run_repository=RunRepository(), source_repository=source_repository, review_repository=ReviewRepository())
 assert service.has_agent_run(10, 2) is True
 assert service.has_agent_run(10, 3) is False
 
@@ -786,7 +798,7 @@ assert exhausted["review"]["status"] == "needs_human", exhausted
 assert exhausted["review"]["passed"] is False, exhausted
 assert exhausted["retryCount"] == 2, exhausted
 
-missing_source_service = JudgeReviewService(run_repository=RunRepository(), source_repository=SourceRepository(valid=False))
+missing_source_service = JudgeReviewService(run_repository=RunRepository(), source_repository=SourceRepository(valid=False), review_repository=ReviewRepository())
 missing_source = missing_source_service.create_review(10, {
     "projectId": 2,
     "proposalAuditId": 999,
@@ -795,6 +807,120 @@ missing_source = missing_source_service.create_review(10, {
 })
 assert missing_source["ok"] is False, missing_source
 assert missing_source["error_type"] == "judge_review_source_not_found", missing_source
+`);
+});
+
+test("JudgeReviewService persists each fake retry attempt and handoff on exhaustion", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return True
+
+class SourceRepository:
+    def has_sources(self, run_id, project_id, proposal_audit_id, step_run_id=None):
+        return True
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+        self.needs_human_calls = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append({
+            "run_id": run_id,
+            "project_id": project_id,
+            "proposal_audit_id": proposal_audit_id,
+            "step_run_id": step_run_id,
+            "review": persisted,
+            "output": output,
+        })
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        self.needs_human_calls.append((run_id, project_id, step_run_id, review["id"]))
+        return {"feedback": {"id": len(self.needs_human_calls), "source_type": "judge_review", "source_id": review["id"]}}
+
+passing_repo = ReviewRepository()
+passing_service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(),
+    review_repository=passing_repo,
+)
+passing = passing_service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 56,
+    "stepRunId": 34,
+    "maxAttempts": 3,
+    "fixtureOutputs": [
+        {"output": {"summary": "missing evidence"}},
+        {"output": {"summary": "still missing"}},
+        {"output": {"summary": "bounded", "evidence_ids": ["comment-123"]}},
+    ],
+})
+assert passing["ok"] is True, passing
+assert passing["review"]["id"] == 3, passing
+assert passing["review"]["status"] == "passed", passing
+assert [item["review"]["status"] for item in passing_repo.records] == ["failed", "failed", "passed"], passing_repo.records
+assert [item["review"]["retry_count"] for item in passing_repo.records] == [0, 1, 2], passing_repo.records
+assert passing_repo.records[0]["review"]["feedback_json"]["failed_output_summary"]["summary"] == "missing evidence", passing_repo.records
+assert passing_repo.needs_human_calls == [], passing_repo.needs_human_calls
+
+exhausted_repo = ReviewRepository()
+exhausted_service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(),
+    review_repository=exhausted_repo,
+)
+exhausted = exhausted_service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 57,
+    "stepRunId": 35,
+    "maxAttempts": 5,
+    "fixtureOutputs": [
+        {"output": {"summary": "missing evidence"}},
+        {"output": {"summary": "still missing"}},
+        {"output": {"summary": "still missing again"}},
+        {"output": {"summary": "must not run", "evidence_ids": ["comment-999"]}},
+    ],
+})
+assert exhausted["review"]["status"] == "needs_human", exhausted
+assert [item["review"]["status"] for item in exhausted_repo.records] == ["failed", "failed", "needs_human"], exhausted_repo.records
+assert exhausted_repo.needs_human_calls == [(10, 2, 35, 3)], exhausted_repo.needs_human_calls
+assert exhausted["manualHandoff"]["source_id"] == 3, exhausted
+
+default_source_repo = ReviewRepository()
+default_source_service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(),
+    review_repository=default_source_repo,
+)
+default_source = default_source_service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 58,
+    "maxAttempts": 3,
+    "fixtureOutputs": [
+        {"output": {"summary": "missing evidence"}},
+        {"output": {"summary": "still missing"}},
+        {"output": {"summary": "still missing again"}},
+    ],
+})
+assert default_source["review"]["status"] == "needs_human", default_source
+assert default_source["stepRunId"] == 58, default_source
+assert default_source_repo.needs_human_calls == [(10, 2, 58, 3)], default_source_repo.needs_human_calls
+`);
+});
+
+test("JudgeReviewService MySQL handoff path uses an explicit transaction", () => {
+  runPython(`
+from pathlib import Path
+
+source = Path("app/judge_review_service.py").read_text(encoding="utf-8")
+method = source[source.index("    def mark_needs_human("):source.index("\\n\\nclass JudgeReviewService")]
+for required in ["conn.begin()", "conn.commit()", "conn.rollback()"]:
+    assert required in method, method
 `);
 });
 
