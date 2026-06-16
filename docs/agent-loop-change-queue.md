@@ -19,6 +19,18 @@
 - 其他付费 API、大规模外部调用、生产数据库破坏性迁移、PR merge 和生产发布必须人工确认。
 - Agent 自进化首版只能生成待审草案，不能直接改生产代码、migration、规则、skill 或外部平台内容。
 
+## 架构路线调整（2026-06-16）
+
+用户已明确：目标后端架构是 FastAPI + CrewAI 的 Agent Harness，而不是继续在旧 Node + Python worker 中堆叠新的 Agent 业务能力。
+
+因此队列调整如下：
+
+- 暂停继续扩展旧 `enterprise_worker.py` 中的 Judge retry 业务主线；已存在的 Node/Python worker 仅作为 legacy tools 和数据采集/持久化适配层。
+- 提前启动 `haidao-fastapi-sidecar-harness`，先建立新后端 sidecar、health/status、tool adapter 和与旧 Node 的并行运行方式。
+- 随后启动 `haidao-crewai-runtime-adapter`，让 CrewAI Flow/Agent 只生成结构化 proposal；Harness 负责校验、证据约束和写库。
+- `haidao-judge-agent-retry-loop` 改为在 FastAPI/CrewAI runtime 之上实现或迁移，不再作为当前旧 worker 的新增主业务。
+- React 工作台、Report/Backtest、自进化规则仍保留，但依赖新 Harness API 稳定后再推进。
+
 ## 执行顺序
 
 | 顺序 | Change ID | Outcome | 本地验证方式 | 依赖 | 风险 | 状态 |
@@ -28,11 +40,11 @@
 | 3 | haidao-agent-loop-step-attachment | 让已存在的分析、事件、行动、问答 worker 可选挂载 `agentLoopRunId` 并写 step evidence | worker tests, real MySQL persistence tests | 1 | 中 | done |
 | 4 | haidao-feedback-memory-loop | 用户反馈、人工确认/驳回、偏好写回影响后续建议 | feedback API tests, memory persistence tests, action/event state tests | 1, 3 | 中 | done |
 | 5 | haidao-knowledge-card-rag-mvp | 建立结构化营销知识卡、检索和建议引用，不把知识写死在代码里 | migration/tests, card validation tests, suggestion citation tests | 1 | 中 | done |
-| 6 | haidao-judge-agent-retry-loop | Judge Agent 对分析、事件、建议做 pass/fail 复核，最多 3 次总尝试后进入人工处理 | judge schema tests, retry tests, failed-output persistence tests | 1, 3, 5 | 中 | active |
-| 7 | haidao-report-backtest-agent-loop | Report Agent 和 Backtest Agent 进入 loop，日报/回测结果带证据、归因限制和 Judge 状态 | report tests, backtest tests, no-causal-overclaim tests | 1, 3, 6 | 中 | planned |
-| 8 | haidao-agent-workbench-react-shell | 在不推翻旧前端的前提下，引入 React/Vite 工作台 shell 展示 loop 状态、评论、分析、事件、建议、日报和问答 | frontend tests, browser QA, no console errors | 2, 3, 6, 7 | 中 | planned |
-| 9 | haidao-fastapi-sidecar-harness | 新增 FastAPI sidecar 承载新 Agent Harness API，与旧 Node 服务并行 | FastAPI tests, Node proxy/compat tests, health checks | 2, 3 | 中 | planned |
-| 10 | haidao-crewai-runtime-adapter | 引入 CrewAI Flow/Agent adapter，但 Agent 只产出 proposal，由 Harness 校验后写库 | unit tests with fake CrewAI tools, failure/fallback tests | 1, 6, 9 | 高 | planned |
+| 6 | haidao-fastapi-sidecar-harness | 新增 FastAPI sidecar 承载新 Agent Harness API，与旧 Node 服务并行 | FastAPI tests, Node proxy/compat tests, health checks | 1, 2, 3, 5 | 中 | active |
+| 7 | haidao-crewai-runtime-adapter | 引入 CrewAI Flow/Agent adapter，但 Agent 只产出 proposal，由 Harness 校验后写库 | unit tests with fake CrewAI tools, failure/fallback tests | 1, 5, 6 | 高 | planned |
+| 8 | haidao-judge-agent-retry-loop | 在 FastAPI/CrewAI Harness 上实现 Judge Agent pass/fail 复核，最多 3 次总尝试后进入人工处理 | judge schema tests, retry tests, failed-output persistence tests | 1, 3, 5, 6, 7 | 中 | paused-rescope |
+| 9 | haidao-report-backtest-agent-loop | Report Agent 和 Backtest Agent 进入新 Harness loop，日报/回测结果带证据、归因限制和 Judge 状态 | report tests, backtest tests, no-causal-overclaim tests | 6, 7, 8 | 中 | planned |
+| 10 | haidao-agent-workbench-react-shell | 在不推翻旧前端的前提下，引入 React/Vite 工作台 shell 展示 loop 状态、评论、分析、事件、建议、日报和问答 | frontend tests, browser QA, no console errors | 2, 6, 8, 9 | 中 | planned |
 | 11 | haidao-rule-proposal-self-evolution | 用户反馈/Judge 失败生成待审 rule proposal 或知识卡草案 | rule proposal tests, approval-state tests | 4, 5, 6 | 中 | planned |
 | 12 | haidao-final-acceptance-weibo-agent | 按 `docs/final-acceptance.md` 真实使用工作台并监控日志，发现 P0/P1/P2 回流修复 | browser QA, logs, DB checks, PR acceptance report | 1-11 | 中 | planned |
 
@@ -168,17 +180,18 @@ Done rubric 摘要:
 ## Change: haidao-judge-agent-retry-loop
 
 Outcome:
-- 分析、事件、策略建议写库后可被 Judge 作为质量门复核，失败反馈最多 3 次总尝试，仍失败进入人工处理。
+- 在 FastAPI/CrewAI Harness 上实现 Judge Agent 质量门：分析、事件、策略建议写库后可被 Judge 复核，失败反馈最多 3 次总尝试，仍失败进入人工处理。
 
 范围:
-- Judge rubric schema。
-- pass/fail review persistence。
-- retry counter。
+- 迁移或复用现有 Judge review 账本。
+- FastAPI worker/tool adapter 输出的 pass/fail review persistence。
+- CrewAI proposal 的 retry counter 和 required changes。
 - 人工处理队列。
 
 不做:
 - 不让 Judge 覆盖事实表。
 - 不让模型决定数值指标。
+- 不继续把新的 Judge 业务主线写进旧 `enterprise_worker.py`。
 
 Done rubric 摘要:
 1. 无证据输出被拒绝。
@@ -227,31 +240,36 @@ Done rubric 摘要:
 ## Change: haidao-fastapi-sidecar-harness
 
 Outcome:
-- FastAPI sidecar 可以承载新 Agent Harness API，与旧 Node 服务并行验证。
+- FastAPI sidecar 成为后续 Agent Harness 新后端入口，与旧 Node 服务并行验证；旧 Node/Python worker 只作为 legacy tool adapter，不再承载新增 Agent 主业务。
 
 范围:
 - FastAPI app skeleton。
 - health/migrate/status 基础接口。
+- MySQL 连接和现有 Harness ledger 只读/最小写入 adapter。
+- legacy worker tool adapter：调用既有微博采集、分析、事件、行动、Q&A 命令，但不把新 Agent 编排继续写进旧 worker。
 - Node proxy 或并行启动说明。
 
 不做:
 - 不下线 Node。
 - 不把所有 API 一次迁移。
+- 不引入 CrewAI runtime；CrewAI 在下一 change 接入。
 
 Done rubric 摘要:
 1. FastAPI 可本地启动。
 2. 不破坏旧 Node 工作台。
 3. health/status 有测试。
+4. FastAPI 能以 adapter 方式读取/创建 Agent Harness run，不直接使用真实 Cookie 或 `.env` 内容。
 
 ## Change: haidao-crewai-runtime-adapter
 
 Outcome:
-- CrewAI Flow/Agent 可以生成结构化 proposal，但不能直接写库；Harness 校验后决定写回。
+- CrewAI Flow/Agent 可以在 FastAPI Harness 内生成结构化 proposal，但不能直接写库；Harness 校验后决定写回。
 
 范围:
 - CrewAI dependency in project env。
 - fake tool tests。
 - proposal schema and validation.
+- CrewAI tool 权限边界：只能调用 FastAPI 暴露的安全 adapter，不能直接读 `.env`、Cookie、浏览器登录态或写 MySQL。
 
 不做:
 - 不让 CrewAI 直接访问 `.env`、Cookie 或 DB 写权限。

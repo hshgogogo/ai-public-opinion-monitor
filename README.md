@@ -61,6 +61,32 @@ python workers/enterprise_worker.py weibo-agent-loop-handoff --payload-json '{"s
 
 本基础 change 不新增公开 HTTP endpoint，不修改前端 workbench，不把 `weibo-comments-analyze`、`weibo-events-build`、`weibo-actions-build` 或 `weibo-bot-message` 强制挂载到 Agent Loop。可选 `agentLoopRunId` step attachment 属于后续 `haidao-agent-loop-step-attachment` change；完整用户确认、驳回、偏好写回语义属于后续 `haidao-feedback-memory-loop` change。
 
+### FastAPI Sidecar 迁移主线
+
+当前后续 Agent Harness 主线已切到 `haidao-fastapi-sidecar-harness`：FastAPI sidecar 是新后端入口，旧 Node 服务和 `workers/enterprise_worker.py` 暂时保留为兼容层与 legacy tool adapter。已经完成的 MySQL 账本、反馈、知识库和 worker attachment 能力继续复用；未完成的 Judge retry、CrewAI 编排和 React 工作台不再继续堆进旧 worker。
+
+安装 sidecar 依赖：
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+启动 sidecar：
+
+```bash
+MYSQL_URL='mysql://user:password@127.0.0.1:3306/yuqing_monitor' \
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8790
+```
+
+首版 sidecar endpoint：
+
+- `GET /health`
+- `POST /api/weibo/agent-loop/run`
+- `GET /api/weibo/agent-runs/{id}`
+- `POST /api/tools/legacy-worker/{command}`，仅允许经过白名单审查的 legacy worker 命令。
+
+sidecar 不读取或打印 Cookie、token、浏览器登录态、`config/cookies/weibo.json` 或 `.env` 内容。CrewAI runtime 和 React/Vite 工作台分别属于后续 OpenSpec change。
+
 面向影视制作公司的企业级 AI 舆情监测 Web 服务。系统限定监控小红书、抖音、微博，使用授权 Cookie 采集真实内容，写入本机 MySQL，并由 DeepSeek Agent 做逐评论情感分析和营销策略生成。
 
 ## 已实现
