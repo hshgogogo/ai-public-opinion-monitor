@@ -1178,6 +1178,285 @@ assert bad_refs == {"knowledge-card-999", "comment-3"}, missing_knowledge
 `);
 });
 
+test("JudgeReviewService rejects deterministic Rule Judge boundary violations", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return True
+
+class SourceRepository:
+    def has_sources(self, run_id, project_id, proposal_audit_id, step_run_id=None):
+        return True
+
+class EvidenceRepository:
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        return {"comment-3", "event-5", "action-6"}.intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        return {"knowledge-card-8"}.intersection(knowledge_ids)
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append(persisted)
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        return {"feedback": {"id": 1, "source_type": "judge_review", "source_id": review["id"]}}
+
+review_repository = ReviewRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(),
+    review_repository=review_repository,
+    evidence_repository=EvidenceRepository(),
+)
+
+cases = [
+    (
+        "vague action without operational fields",
+        {
+            "summary": "建议继续关注，加强沟通。",
+            "evidence_ids": ["comment-3"],
+            "recommendations": [{"text": "继续关注，加强沟通。"}],
+        },
+        "vague_action_without_operational_fields",
+    ),
+    (
+        "action item missing operational fields without fixed vague phrase",
+        {
+            "summary": "建议发布澄清帖回应争议。",
+            "evidence_ids": ["comment-3"],
+            "recommendations": [{"text": "发布澄清帖回应争议。"}],
+        },
+        "vague_action_without_operational_fields",
+    ),
+    (
+        "knowledge card written as current fact",
+        {
+            "summary": "current Weibo facts copied from a card",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": ["knowledge-card-8"],
+            "facts": [{"text": "knowledge-card-8 证明当前微博用户已经接受联名转发策略。"}],
+        },
+        "knowledge_card_as_current_fact",
+    ),
+    (
+        "knowledge card summary written as current Weibo fact",
+        {
+            "summary": "根据知识卡经验，当前微博用户已经接受联名转发策略。",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": ["knowledge-card-8"],
+        },
+        "knowledge_card_as_current_fact",
+    ),
+    (
+        "C-level card used as hard rule",
+        {
+            "summary": "C-level card is being used as a hard rule",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": ["knowledge-card-8"],
+            "knowledge_reference_details": [
+                {"id": "knowledge-card-8", "reliability_level": "C", "usage": "hard_rule"}
+            ],
+            "recommendations": [{"text": "必须按知识卡经验执行抽奖转发。"}],
+        },
+        "c_level_knowledge_card_hard_rule",
+    ),
+    (
+        "C-level card dict reference used as hard rule",
+        {
+            "summary": "C-level card reference dict is being used as a hard rule",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": [
+                {"id": "knowledge-card-8", "reliability_level": "C", "usage": "hard_rule"}
+            ],
+            "recommendations": [{"text": "必须按知识卡经验执行抽奖转发。"}],
+        },
+        "c_level_knowledge_card_hard_rule",
+    ),
+    (
+        "C-level weak label still cannot use hard-rule action text",
+        {
+            "summary": "C-level card is labelled weak, but the action text is mandatory",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": [
+                {"id": "knowledge-card-8", "reliability_level": "C", "usage": "weak_inspiration"}
+            ],
+            "recommendations": [
+                {
+                    "owner": "PR",
+                    "priority": "high",
+                    "check_after": "24h",
+                    "text": "必须按知识卡经验执行抽奖转发，并以 comment-3 作为跟踪信号。"
+                }
+            ],
+        },
+        "c_level_knowledge_card_hard_rule",
+    ),
+    (
+        "deterministic metric overclaim",
+        {
+            "summary": "Judge output sets authoritative deterministic metrics",
+            "evidence_ids": ["comment-3"],
+            "sentiment_score": 0.92,
+            "event_score": 88,
+            "trend_window": "7d",
+            "backtest_signal": "strong_positive",
+        },
+        "deterministic_metric_overclaim",
+    ),
+    (
+        "single-cause effect overclaim",
+        {
+            "summary": "这次宣发行动单独导致负面评论下降，行动效果已经确定。",
+            "evidence_ids": ["comment-3", "action-6"],
+            "recommendations": [
+                {
+                    "owner": "PR",
+                    "priority": "high",
+                    "check_after": "24h",
+                    "text": "继续监控 action-6 后续评论。"
+                }
+            ],
+        },
+        "single_cause_overclaim",
+    ),
+    (
+        "single-cause effect overclaim cannot be bypassed by uncertainty word",
+        {
+            "summary": "这次宣发行动直接导致负面评论下降；虽然存在不确定性，但行动效果已经确定。",
+            "evidence_ids": ["comment-3", "action-6"],
+            "recommendations": [
+                {
+                    "owner": "PR",
+                    "priority": "high",
+                    "check_after": "24h",
+                    "text": "Use comment-3 as the monitoring signal after action-6."
+                }
+            ],
+        },
+        "single_cause_overclaim",
+    ),
+    (
+        "single-cause effect overclaim cannot be bypassed by all boundary words",
+        {
+            "summary": "这次宣发行动直接导致负面评论下降，行动效果已经确定；comment-3 is a signal with uncertainty and confounders.",
+            "evidence_ids": ["comment-3", "action-6"],
+            "recommendations": [
+                {
+                    "owner": "PR",
+                    "priority": "high",
+                    "check_after": "24h",
+                    "text": "Use comment-3 as the monitoring signal after action-6."
+                }
+            ],
+        },
+        "single_cause_overclaim",
+    ),
+]
+
+for index, (name, output, error_type) in enumerate(cases, start=1):
+    result = service.create_review(10, {
+        "projectId": 2,
+        "proposalAuditId": 100 + index,
+        "stepRunId": 200 + index,
+        "maxAttempts": 1,
+        "fixtureOutputs": [{"output": output}],
+    })
+    assert result["review"]["status"] == "failed", (name, result)
+    assert result["review"]["passed"] is False, (name, result)
+    assert any(item["error_type"] == error_type for item in result["review"]["evidence_errors"]), (name, result)
+    assert any(error_type in change for change in result["review"]["required_changes"]), (name, result)
+
+weak_inspiration = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 200,
+    "stepRunId": 300,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "C-level knowledge is kept only as weak inspiration; real evidence is comment-3.",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": [
+                {"id": "knowledge-card-8", "reliability_level": "C", "usage": "weak_inspiration"}
+            ],
+            "recommendations": [
+                {
+                    "owner": "PR",
+                    "priority": "medium",
+                    "check_after": "24h",
+                    "text": "Use comment-3 as the signal and treat the C-level card as weak inspiration only."
+                }
+            ],
+        }
+    }],
+})
+assert weak_inspiration["review"]["status"] == "passed", weak_inspiration
+assert weak_inspiration["review"]["passed"] is True, weak_inspiration
+assert weak_inspiration["review"]["evidence_errors"] == [], weak_inspiration
+
+weak_inspiration_with_operational_must = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 202,
+    "stepRunId": 302,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "C-level knowledge is weak inspiration only; real evidence is comment-3.",
+            "evidence_ids": ["comment-3"],
+            "knowledge_references": [
+                {"id": "knowledge-card-8", "reliability_level": "C", "usage": "weak_inspiration"}
+            ],
+            "recommendations": [
+                {
+                    "owner": "PR",
+                    "priority": "high",
+                    "check_after": "24h",
+                    "text": "PR must reply to comment-3 today; the team must not treat the C-level card as evidence."
+                }
+            ],
+        }
+    }],
+})
+assert weak_inspiration_with_operational_must["review"]["status"] == "passed", weak_inspiration_with_operational_must
+assert weak_inspiration_with_operational_must["review"]["passed"] is True, weak_inspiration_with_operational_must
+assert weak_inspiration_with_operational_must["review"]["evidence_errors"] == [], weak_inspiration_with_operational_must
+
+non_causal_confirmed_plan = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 201,
+    "stepRunId": 301,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "执行计划已经确定，但当前舆情仍只作为观察信号处理。",
+            "evidence_ids": ["comment-3"],
+            "recommendations": [
+                {
+                    "owner": "PR",
+                    "priority": "medium",
+                    "check_after": "24h",
+                    "text": "Use comment-3 as the signal and keep monitoring uncertainty."
+                }
+            ],
+        }
+    }],
+})
+assert non_causal_confirmed_plan["review"]["status"] == "passed", non_causal_confirmed_plan
+assert non_causal_confirmed_plan["review"]["passed"] is True, non_causal_confirmed_plan
+assert not any(
+    item["error_type"] == "single_cause_overclaim"
+    for item in non_causal_confirmed_plan["review"]["evidence_errors"]
+), non_causal_confirmed_plan
+`);
+});
+
 test("JudgeReviewService MySQL handoff path uses an explicit transaction", () => {
   runPython(`
 from pathlib import Path
