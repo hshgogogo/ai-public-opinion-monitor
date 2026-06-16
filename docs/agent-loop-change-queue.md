@@ -40,8 +40,8 @@
 | 3 | haidao-agent-loop-step-attachment | 让已存在的分析、事件、行动、问答 worker 可选挂载 `agentLoopRunId` 并写 step evidence | worker tests, real MySQL persistence tests | 1 | 中 | done |
 | 4 | haidao-feedback-memory-loop | 用户反馈、人工确认/驳回、偏好写回影响后续建议 | feedback API tests, memory persistence tests, action/event state tests | 1, 3 | 中 | done |
 | 5 | haidao-knowledge-card-rag-mvp | 建立结构化营销知识卡、检索和建议引用，不把知识写死在代码里 | migration/tests, card validation tests, suggestion citation tests | 1 | 中 | done |
-| 6 | haidao-fastapi-sidecar-harness | 新增 FastAPI sidecar 承载新 Agent Harness API，与旧 Node 服务并行 | FastAPI tests, Node proxy/compat tests, health checks | 1, 2, 3, 5 | 中 | active |
-| 7 | haidao-crewai-runtime-adapter | 引入 CrewAI Flow/Agent adapter，但 Agent 只产出 proposal，由 Harness 校验后写库 | unit tests with fake CrewAI tools, failure/fallback tests | 1, 5, 6 | 高 | planned |
+| 6 | haidao-fastapi-sidecar-harness | 新增 FastAPI sidecar 承载新 Agent Harness API，与旧 Node 服务并行 | FastAPI tests, Node proxy/compat tests, health checks | 1, 2, 3, 5 | 中 | done |
+| 7 | haidao-crewai-runtime-adapter | 引入 CrewAI Flow/Agent adapter，但 Agent 只产出 proposal，由 Harness 校验后写库 | unit tests with fake CrewAI tools, failure/fallback tests | 1, 5, 6 | 高 | active |
 | 8 | haidao-judge-agent-retry-loop | 在 FastAPI/CrewAI Harness 上实现 Judge Agent pass/fail 复核，最多 3 次总尝试后进入人工处理 | judge schema tests, retry tests, failed-output persistence tests | 1, 3, 5, 6, 7 | 中 | paused-rescope |
 | 9 | haidao-report-backtest-agent-loop | Report Agent 和 Backtest Agent 进入新 Harness loop，日报/回测结果带证据、归因限制和 Judge 状态 | report tests, backtest tests, no-causal-overclaim tests | 6, 7, 8 | 中 | planned |
 | 10 | haidao-agent-workbench-react-shell | 在不推翻旧前端的前提下，引入 React/Vite 工作台 shell 展示 loop 状态、评论、分析、事件、建议、日报和问答 | frontend tests, browser QA, no console errors | 2, 6, 8, 9 | 中 | planned |
