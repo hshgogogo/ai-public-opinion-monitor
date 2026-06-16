@@ -25,11 +25,11 @@
 
 ## 4. CrewAI Runtime Adapter
 
-- [ ] 4.1 Add project-local CrewAI dependency or optional import wrapper without breaking tests when real package is absent.
-- [ ] 4.2 Write fake runtime tests for successful structured proposal generation.
-- [ ] 4.3 Implement `CrewAIRuntimeAdapter` with injectable runtime for tests.
-- [ ] 4.4 Write failure tests for runtime exception and malformed model output.
-- [ ] 4.5 Implement stable fallback/error payloads for `crewai_runtime_failed` and `crewai_invalid_proposal`.
+- [x] 4.1 Add project-local CrewAI dependency or optional import wrapper without breaking tests when real package is absent.
+- [x] 4.2 Write fake runtime tests for successful structured proposal generation.
+- [x] 4.3 Implement `CrewAIRuntimeAdapter` with injectable runtime for tests.
+- [x] 4.4 Write failure tests for runtime exception and malformed model output.
+- [x] 4.5 Implement stable fallback/error payloads for `crewai_runtime_failed` and `crewai_invalid_proposal`.
 
 ## 5. FastAPI Integration
 

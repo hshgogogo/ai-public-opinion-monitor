@@ -11,7 +11,7 @@
 - 不自动发布外部平台内容。
 - 不把 CrewAI/DeepSeek 输出当成最终事实来源。
 - 不提交 `.env`、Cookie、token、浏览器登录态或真实账号材料。
-- 不把小红书、抖音纳入首版闭环。
+- 不把小红书、B站、抖音纳入当前微博首版闭环；跨平台采集已排入后置 change，先不打断当前 FastAPI/CrewAI 主线。
 
 全局风险边界：
 - DeepSeek 已被用户授权可在本项目中使用，但不得打印或提交 API key。
@@ -46,7 +46,8 @@
 | 9 | haidao-report-backtest-agent-loop | Report Agent 和 Backtest Agent 进入新 Harness loop，日报/回测结果带证据、归因限制和 Judge 状态 | report tests, backtest tests, no-causal-overclaim tests | 6, 7, 8 | 中 | planned |
 | 10 | haidao-agent-workbench-react-shell | 在不推翻旧前端的前提下，引入 React/Vite 工作台 shell 展示 loop 状态、评论、分析、事件、建议、日报和问答 | frontend tests, browser QA, no console errors | 2, 6, 8, 9 | 中 | planned |
 | 11 | haidao-rule-proposal-self-evolution | 用户反馈/Judge 失败生成待审 rule proposal 或知识卡草案 | rule proposal tests, approval-state tests | 4, 5, 6 | 中 | planned |
-| 12 | haidao-final-acceptance-weibo-agent | 按 `docs/final-acceptance.md` 真实使用工作台并监控日志，发现 P0/P1/P2 回流修复 | browser QA, logs, DB checks, PR acceptance report | 1-11 | 中 | planned |
+| 12 | haidao-agent-reach-multichannel-ingestion | 通过 Agent-Reach 受控接入 B站、小红书和抖音采集，先 B站、再小红书、最后抖音，输出 Harness evidence | adapter tests, fixture normalization tests, secret redaction tests, MySQL tests if persistence changes | 6, 7, 8, 10 | 高 | planned |
+| 13 | haidao-final-acceptance-weibo-agent | 按 `docs/final-acceptance.md` 真实使用工作台并监控日志，发现 P0/P1/P2 回流修复 | browser QA, logs, DB checks, PR acceptance report | 1-12 | 中 | planned |
 
 ## Change: haidao-agent-harness-loop-foundation
 
