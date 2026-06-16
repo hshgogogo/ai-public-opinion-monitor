@@ -547,6 +547,257 @@ assert missing_service.runtime_call_count == 0, missing_service.runtime_call_cou
 `);
 });
 
+test("FastAPI sidecar creates Judge reviews through an injected Harness service", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class FakeJudgeReviewService:
+    def __init__(self):
+        self.calls = []
+        self.review_call_count = 0
+        self.fact_write_count = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+    def create_review(self, run_id, payload):
+        self.calls.append((run_id, payload))
+        self.review_call_count += 1
+        return {
+            "ok": True,
+            "review": {
+                "id": "judge-review-1",
+                "status": "passed",
+                "passed": True,
+                "retry_count": 2,
+                "required_changes": [],
+                "evidence_errors": [],
+                "feedback_json": {"judge": "rule_judge"},
+            },
+            "retryCount": 2,
+            "proposalAuditId": 56,
+            "stepRunId": 34,
+        }
+
+service = FakeJudgeReviewService()
+client = TestClient(create_app(judge_review_service=service))
+
+response = client.post("/api/weibo/agent-runs/10/judge/reviews", json={
+    "projectId": "2",
+    "proposalAuditId": "56",
+    "stepRunId": "34",
+    "maxAttempts": 5,
+    "fixtureOutputs": [
+        {"output": {"evidence_ids": []}},
+        {"output": {"evidence_ids": ["comment-123"]}},
+        {"output": {"evidence_ids": ["comment-123"], "summary": "bounded"}}
+    ],
+})
+payload = response.json()
+
+assert response.status_code == 200, payload
+assert payload["ok"] is True, payload
+assert payload["review"]["status"] == "passed", payload
+assert payload["retryCount"] == 2, payload
+assert service.review_call_count == 1, service.review_call_count
+assert service.fact_write_count == 0, service.fact_write_count
+assert service.calls == [(10, {
+    "projectId": 2,
+    "proposalAuditId": 56,
+    "stepRunId": 34,
+    "maxAttempts": 3,
+    "fixtureOutputs": [
+        {"output": {"evidence_ids": []}},
+        {"output": {"evidence_ids": ["comment-123"]}},
+        {"output": {"evidence_ids": ["comment-123"], "summary": "bounded"}}
+    ],
+})], service.calls
+
+serialized = json.dumps(payload, ensure_ascii=False)
+for forbidden in ["raw_model_output", "prompt", "traceback", "stderr", "mysql://", ".env", "config/cookies/weibo.json"]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI sidecar rejects unsafe Judge review payloads before service execution", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CountingJudgeReviewService:
+    def __init__(self):
+        self.calls = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return True
+
+    def create_review(self, run_id, payload):
+        self.calls += 1
+        return {"ok": True, "review": {"status": "passed"}}
+
+service = CountingJudgeReviewService()
+client = TestClient(create_app(judge_review_service=service))
+
+cases = [
+    {"projectId": 2, "proposalAuditId": 56, "prompt": "hidden prompt"},
+    {"projectId": 2, "proposalAuditId": 56, "runtime": {"module": "forbidden"}},
+    {"projectId": 2, "proposalAuditId": 56},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"runtime": {"module": "forbidden"}}}]},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"module": "forbidden"}}]},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"dbUrl": "hidden"}}]},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"rawModelOutput": "hidden"}}]},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"evidence_ids": ["comment-123"], "summary": "Bearer fake-secret-value"}}]},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"evidence_ids": ["comment-123"], "summary": "mysql://root:secret"}}]},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"evidence_ids": ["../config/cookies/weibo.json"]}}]},
+    {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"raw_model_output": "hidden"}]},
+]
+
+for body in cases:
+    response = client.post("/api/weibo/agent-runs/10/judge/reviews", json=body)
+    payload = response.json()
+    assert response.status_code == 400, payload
+    assert payload["error_type"] == "invalid_judge_review_payload", payload
+    serialized = json.dumps(payload, ensure_ascii=False)
+    for forbidden in ["hidden prompt", "runtime", "Bearer fake-secret-value", "mysql://root:secret", "config/cookies/weibo.json", "raw_model_output", "traceback", "stderr"]:
+        assert forbidden not in serialized, serialized
+
+assert service.calls == 0, service.calls
+`);
+});
+
+test("FastAPI sidecar rejects Judge review requests before review logic on mysql_unavailable and run-not-found", () => {
+  runPython(`
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class MysqlUnavailableJudgeService:
+    def __init__(self):
+        self.review_call_count = 0
+
+    def is_mysql_available(self):
+        return False
+
+    def has_agent_run(self, run_id, project_id):
+        return True
+
+    def create_review(self, run_id, payload):
+        self.review_call_count += 1
+        raise AssertionError("Judge review should not run when MySQL is unavailable")
+
+class MissingRunJudgeService:
+    def __init__(self):
+        self.review_call_count = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def has_agent_run(self, run_id, project_id):
+        return False
+
+    def create_review(self, run_id, payload):
+        self.review_call_count += 1
+        raise AssertionError("Judge review should not run when run ownership fails")
+
+body = {"projectId": 2, "proposalAuditId": 56, "fixtureOutputs": [{"output": {"evidence_ids": ["comment-123"]}}]}
+
+mysql_service = MysqlUnavailableJudgeService()
+mysql_client = TestClient(create_app(judge_review_service=mysql_service))
+mysql_unavailable = mysql_client.post("/api/weibo/agent-runs/10/judge/reviews", json=body)
+mysql_payload = mysql_unavailable.json()
+assert mysql_unavailable.status_code == 503, mysql_payload
+assert mysql_payload["error_type"] == "mysql_unavailable", mysql_payload
+assert mysql_service.review_call_count == 0, mysql_service.review_call_count
+
+missing_service = MissingRunJudgeService()
+missing_client = TestClient(create_app(judge_review_service=missing_service))
+run_not_found = missing_client.post("/api/weibo/agent-runs/999/judge/reviews", json=body)
+missing_payload = run_not_found.json()
+assert run_not_found.status_code == 404, missing_payload
+assert missing_payload["error_type"] == "agent_loop_not_found", missing_payload
+assert missing_service.review_call_count == 0, missing_service.review_call_count
+`);
+});
+
+test("JudgeReviewService runs fixture outputs as a clamped three-attempt rule Judge retry", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+class SourceRepository:
+    def __init__(self, valid=True):
+        self.valid = valid
+        self.calls = []
+
+    def has_sources(self, run_id, project_id, proposal_audit_id, step_run_id=None):
+        self.calls.append((run_id, project_id, proposal_audit_id, step_run_id))
+        return self.valid
+
+source_repository = SourceRepository()
+service = JudgeReviewService(run_repository=RunRepository(), source_repository=source_repository)
+assert service.has_agent_run(10, 2) is True
+assert service.has_agent_run(10, 3) is False
+
+result = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 56,
+    "stepRunId": 34,
+    "maxAttempts": 5,
+    "fixtureOutputs": [
+        {"output": {"summary": "missing evidence"}},
+        {"output": {"evidence_ids": []}},
+        {"output": {"summary": "bounded", "evidence_ids": ["comment-123"]}},
+        {"output": {"summary": "must not run", "evidence_ids": []}},
+    ],
+})
+assert result["ok"] is True, result
+assert result["review"]["status"] == "passed", result
+assert result["review"]["passed"] is True, result
+assert result["review"]["retry_count"] == 2, result
+assert result["retryCount"] == 2, result
+assert result["proposalAuditId"] == 56, result
+assert result["stepRunId"] == 34, result
+assert service.fact_write_count == 0, service.fact_write_count
+assert source_repository.calls == [(10, 2, 56, 34)], source_repository.calls
+
+exhausted = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 57,
+    "maxAttempts": 3,
+    "fixtureOutputs": [
+        {"output": {"summary": "missing evidence"}},
+        {"output": {"summary": "still missing"}},
+        {"output": {"summary": "still missing again"}},
+        {"output": {"summary": "fourth output must not run", "evidence_ids": ["comment-999"]}},
+    ],
+})
+assert exhausted["review"]["status"] == "needs_human", exhausted
+assert exhausted["review"]["passed"] is False, exhausted
+assert exhausted["retryCount"] == 2, exhausted
+
+missing_source_service = JudgeReviewService(run_repository=RunRepository(), source_repository=SourceRepository(valid=False))
+missing_source = missing_source_service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 999,
+    "stepRunId": 34,
+    "fixtureOutputs": [{"output": {"evidence_ids": ["comment-123"]}}],
+})
+assert missing_source["ok"] is False, missing_source
+assert missing_source["error_type"] == "judge_review_source_not_found", missing_source
+`);
+});
+
 test("CrewAIProposalService records accepted rejected and runtime_failed proposal audits without fact writes and keeps raw_model_output_ref", () => {
   runPython(`
 import json

@@ -18,14 +18,14 @@
 
 ## 3. FastAPI Harness Retry 编排
 
-- [ ] 3.1 先写 FastAPI/service-level retry contract 测试，覆盖失败两轮后第三轮通过。
-- [ ] 3.2 新增 Harness-owned Judge service 或 FastAPI worker-facing endpoint；不得把新增主业务写回旧 `enterprise_worker.py`。
+- [x] 3.1 先写 FastAPI/service-level retry contract 测试，覆盖失败两轮后第三轮通过。
+- [x] 3.2 新增 Harness-owned Judge service 或 FastAPI worker-facing endpoint；不得把新增主业务写回旧 `enterprise_worker.py`。
 - [ ] 3.3 retry 每轮 MUST 写入一条 `judge_reviews`，包含 retry count、required changes、evidence errors 和失败输出摘要。
 - [ ] 3.4 通过时 MUST 写入 passed review，且 loop 不进入 `needs_human`。
 - [ ] 3.5 先写 retry exhausted 测试，覆盖连续 3 次总尝试失败。
 - [ ] 3.6 第 3 次总尝试失败后 MUST 将 step/loop 标记为 `needs_human` 并写入 `feedback_items` manual handoff。
 - [ ] 3.7 manual handoff 写入 MUST 校验 source 属于当前 project，不得使用弱校验路径。
-- [ ] 3.8 请求超过 3 次总尝试时 MUST clamp 到 3，且不得无限循环。
+- [x] 3.8 请求超过 3 次总尝试时 MUST clamp 到 3，且不得无限循环。
 
 ## 4. Step 集成边界
 
@@ -46,18 +46,18 @@
 
 ## 6. 安全与兼容
 
-- [ ] 6.1 增加静态测试，确认本 change 不新增旧 Node public Judge endpoint，且 FastAPI Judge endpoint 不接受 prompt/runtime/cookie/db-url 等控制字段。
+- [x] 6.1 增加静态测试，确认本 change 不新增旧 Node public Judge endpoint，且 FastAPI Judge endpoint 不接受 prompt/runtime/cookie/db-url 等控制字段。
 - [ ] 6.2 增加测试，确认不读取或输出 `.env`、Cookie、token、浏览器登录态、`config/cookies/weibo.json` 或 worker stderr。
 - [ ] 6.3 未传 `agentLoopRunId` 时现有 worker 命令 standalone 行为保持不变。
-- [ ] 6.4 本 change 不调用真实 MediaCrawler、真实微博登录、真实 CrewAI 外部模型或新的付费 API。
+- [x] 6.4 本 change 不调用真实 MediaCrawler、真实微博登录、真实 CrewAI 外部模型或新的付费 API。
 
 ## 7. 文档、验证与交付
 
 - [ ] 7.1 更新 README 或相关 docs，说明 Judge retry FastAPI Harness 能力、限制和人工处理状态。
-- [ ] 7.2 运行定向测试。
-- [ ] 7.3 运行 `npm test`。
+- [x] 7.2 运行定向测试。
+- [x] 7.3 运行 `npm test`。
 - [ ] 7.4 运行真实 MySQL persistence tests。
-- [ ] 7.5 运行 `openspec validate haidao-judge-agent-retry-loop --strict`。
-- [ ] 7.6 运行 `git diff --check`。
-- [ ] 7.7 运行 `npm run agent:guard`。
-- [ ] 7.8 通过 subagent reviewer 反驳式 review 后，更新 evidence report、commit、push 并更新 PR。
+- [x] 7.5 运行 `openspec validate haidao-judge-agent-retry-loop --strict`。
+- [x] 7.6 运行 `git diff --check`。
+- [x] 7.7 运行 `npm run agent:guard`。
+- [x] 7.8 通过 subagent reviewer 反驳式 review 后，更新 evidence report、commit、push 并更新 PR。

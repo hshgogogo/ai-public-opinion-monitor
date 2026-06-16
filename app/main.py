@@ -7,7 +7,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .crewai_proposal_service import CrewAIProposalService, agent_run_not_found_error
+from .crewai_tools import _sensitive_key as crewai_sensitive_key
 from .crewai_tools import _sensitive_value as crewai_sensitive_value
+from .judge_review_service import JudgeReviewService
 from .legacy_worker import (
     ALLOWED_LEGACY_COMMANDS,
     LegacyWorkerAdapter,
@@ -19,6 +21,7 @@ from .legacy_worker import (
 
 PUBLIC_AGENT_LOOP_MODES = {"manual", "scheduled", "after_collection"}
 PUBLIC_CREWAI_PROPOSAL_FIELDS = {"projectId", "stage", "evidenceIds", "knowledgeQuery"}
+PUBLIC_JUDGE_REVIEW_FIELDS = {"projectId", "proposalAuditId", "stepRunId", "maxAttempts", "maxRetries", "fixtureOutputs"}
 CREWAI_DANGEROUS_MARKERS = (
     ".env",
     "api_key",
@@ -40,12 +43,17 @@ CREWAI_DANGEROUS_MARKERS = (
     "stderr",
     "raw model output",
 )
+JUDGE_DANGEROUS_KEYS = {
+    "module",
+    "runtime",
+}
 CREWAI_EVIDENCE_ID_PATTERN = re.compile(r"^(comment|post|target|event|action|memory|sentiment):[1-9][0-9]*$")
 
 
-def create_app(legacy_adapter=None, crewai_proposal_service=None):
+def create_app(legacy_adapter=None, crewai_proposal_service=None, judge_review_service=None):
     adapter = legacy_adapter or LegacyWorkerAdapter()
     proposal_service = crewai_proposal_service or CrewAIProposalService()
+    judge_service = judge_review_service or JudgeReviewService()
     api = FastAPI(title="Yuqing FastAPI Sidecar", version="0.1.0")
 
     @api.get("/health")
@@ -122,6 +130,36 @@ def create_app(legacy_adapter=None, crewai_proposal_service=None):
 
         service_payload = build_crewai_proposal_service_payload(payload)
         result = sanitize_for_public(proposal_service.create_proposal(parsed_id, service_payload))
+        return JSONResponse(result, status_code=status_for(result))
+
+    @api.post("/api/weibo/agent-runs/{run_id}/judge/reviews")
+    async def create_judge_review(run_id: str, request: Request):
+        parsed_id = positive_integer(run_id)
+        if parsed_id is None:
+            return json_error(agent_loop_error(
+                "invalid_agent_run_id",
+                "Agent Loop run id is invalid.",
+                "The path id must be a positive integer.",
+                "Retry with an agentLoopRunId returned by POST /api/weibo/agent-loop/run.",
+            ), 400)
+
+        payload, error = await read_json_object(request, "invalid_judge_review_payload", "Judge review payload")
+        if error:
+            return json_error(error, 400)
+
+        validation_error = validate_judge_review_request_payload(payload)
+        if validation_error:
+            return json_error(validation_error, 400)
+
+        project_id = optional_positive_integer(payload.get("projectId"))
+        if not judge_service.is_mysql_available():
+            return json_error(mysql_unavailable_error(), 503)
+
+        if not judge_service.has_agent_run(parsed_id, project_id):
+            return json_error(agent_run_not_found_error(parsed_id, project_id), 404)
+
+        service_payload = build_judge_review_service_payload(payload)
+        result = sanitize_for_public(judge_service.create_review(parsed_id, service_payload))
         return JSONResponse(result, status_code=status_for(result))
 
     @api.post("/api/tools/legacy-worker/{command}")
@@ -362,6 +400,119 @@ def build_crewai_proposal_service_payload(payload):
     return service_payload
 
 
+def validate_judge_review_request_payload(payload):
+    unknown_fields = set(payload.keys()) - PUBLIC_JUDGE_REVIEW_FIELDS
+    if unknown_fields:
+        return invalid_judge_review_payload_error(
+            "Judge review payload contains unsupported public fields.",
+            "Unsupported public fields were provided.",
+            "Only pass projectId, proposalAuditId, stepRunId, maxAttempts, maxRetries, and fixtureOutputs.",
+        )
+
+    if contains_dangerous_judge_value(payload):
+        return invalid_judge_review_payload_error(
+            "Judge review payload contains unsafe public values.",
+            "The public Judge review payload contains blocked diagnostic, credential, storage, database, or model internals content.",
+            "Remove blocked diagnostic, credential, storage, database, and model internals content.",
+        )
+
+    project_id = optional_positive_integer(payload.get("projectId"))
+    if project_id is None:
+        return agent_loop_error(
+            "invalid_project_id",
+            "Judge review requires a valid projectId.",
+            "The public payload projectId must be a positive integer.",
+            "Pass a positive integer projectId from the existing Agent Loop run.",
+        )
+
+    proposal_audit_id = optional_positive_integer(payload.get("proposalAuditId"))
+    if proposal_audit_id is None:
+        return invalid_judge_review_payload_error(
+            "Judge review requires a valid proposalAuditId.",
+            "The public payload proposalAuditId must be a positive integer.",
+            "Pass a proposalAuditId returned by the CrewAI proposal Harness.",
+        )
+
+    if "stepRunId" in payload and optional_positive_integer(payload.get("stepRunId")) is None:
+        return invalid_judge_review_payload_error(
+            "Judge review stepRunId is invalid.",
+            "The public payload stepRunId must be a positive integer when provided.",
+            "Pass a positive integer stepRunId or omit it.",
+        )
+
+    if "maxAttempts" in payload and optional_positive_integer(payload.get("maxAttempts")) is None:
+        return invalid_judge_review_payload_error(
+            "Judge review maxAttempts is invalid.",
+            "The public payload maxAttempts must be a positive integer when provided.",
+            "Pass maxAttempts between 1 and 3, or omit it.",
+        )
+
+    if "maxRetries" in payload and optional_positive_integer(payload.get("maxRetries")) is None:
+        return invalid_judge_review_payload_error(
+            "Judge review maxRetries is invalid.",
+            "The public payload maxRetries must be a positive integer when provided.",
+            "Pass maxRetries as a compatibility alias, or omit it.",
+        )
+
+    fixture_outputs = payload.get("fixtureOutputs")
+    if not isinstance(fixture_outputs, list) or not fixture_outputs:
+        return invalid_judge_review_payload_error(
+            "Judge review fixtureOutputs are required for this fake-output slice.",
+            "This slice only supports service-level fake outputs and does not read proposal audit output yet.",
+            "Pass fixtureOutputs as a non-empty array, or wait for the proposal audit lookup slice.",
+        )
+    if not all(is_plain_object(item) for item in fixture_outputs):
+        return invalid_judge_review_payload_error(
+            "Judge review fixtureOutputs are invalid.",
+            "Each fixtureOutputs item must be a JSON object.",
+            "Pass each fixture output as an object with an output object.",
+        )
+    return None
+
+
+def build_judge_review_service_payload(payload):
+    max_attempts = optional_positive_integer(payload.get("maxAttempts"))
+    if max_attempts is None:
+        max_retries = optional_positive_integer(payload.get("maxRetries"))
+        max_attempts = max_retries if max_retries is not None else 3
+    max_attempts = min(max_attempts, 3)
+
+    service_payload = {
+        "projectId": optional_positive_integer(payload.get("projectId")),
+        "proposalAuditId": optional_positive_integer(payload.get("proposalAuditId")),
+        "maxAttempts": max_attempts,
+    }
+    step_run_id = optional_positive_integer(payload.get("stepRunId"))
+    if step_run_id is not None:
+        service_payload["stepRunId"] = step_run_id
+    if "fixtureOutputs" in payload:
+        service_payload["fixtureOutputs"] = payload["fixtureOutputs"]
+    return service_payload
+
+
+def invalid_judge_review_payload_error(message, cause, fix):
+    return agent_loop_error("invalid_judge_review_payload", message, cause, fix)
+
+
+def contains_dangerous_judge_value(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if dangerous_judge_key(key) or contains_dangerous_judge_value(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(contains_dangerous_judge_value(item) for item in value)
+    if isinstance(value, str):
+        return contains_dangerous_crewai_value(value)
+    return False
+
+
+def dangerous_judge_key(key):
+    text = str(key)
+    normalized = re.sub(r"_+", "_", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text).replace("-", "_").replace(" ", "_")).lower()
+    return normalized in JUDGE_DANGEROUS_KEYS or crewai_sensitive_key(text) or contains_dangerous_crewai_value(text)
+
+
 def agent_loop_run_response(payload):
     if payload.get("ok") is False:
         return payload
@@ -445,6 +596,8 @@ def status_for(payload):
         return 503
     if error_type == "agent_loop_not_found":
         return 404
+    if error_type == "judge_review_source_not_found":
+        return 404
     if error_type in {
         "crewai_evidence_rejected",
         "crewai_evidence_required",
@@ -455,6 +608,7 @@ def status_for(payload):
         "invalid_agent_loop_payload",
         "invalid_agent_loop_mode",
         "invalid_crewai_proposal_payload",
+        "invalid_judge_review_payload",
         "invalid_project_id",
         "invalid_agent_run_id",
         "invalid_legacy_worker_payload",
