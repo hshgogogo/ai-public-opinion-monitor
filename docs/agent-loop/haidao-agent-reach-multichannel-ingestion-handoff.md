@@ -841,3 +841,64 @@ Hubble final review 结论：
 - 抖音 search/detail、normalizer、persistence 和真实 collection 仍是 blocked/N/A，后续必须等安全、脱敏、稳定的上游 runner contract 或人工确认边界后另开 change。
 - `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有无关脏改，提交必须选择性 staging 排除。
 - 最终项目验收尚未执行；7.7 和 PR 更新后仍需按 `docs/final-acceptance.md` 启动网站、真实浏览器操作并监控日志。
+
+## Final Acceptance 2026-06-18
+
+最终验收状态：通过。
+
+验收环境：
+
+- 分支：`agent/agent-harness/loop-slice`
+- 启动命令：`YUQING_SKIP_ENV_FILE=1 PYTHON_BIN=.venv/bin/python PORT=8787 HOST=127.0.0.1 npm start`
+- URL：[http://127.0.0.1:8787](http://127.0.0.1:8787)
+- 日志观察：主控保持 `npm start` session 运行并轮询 stdout/stderr；验收期间没有额外服务端异常输出。
+
+真实使用路径：
+
+1. 打开 `/`：微博 Agent 工作台加载成功，显示“依赖未就绪”；推荐目标、事件、行动、评论、分析、数据缺口、证据引用、证据问答均有清晰空状态或 no-DB 失败状态。
+2. 点击证据问答“提问”：顶部显示“证据问答未完成：mysql unavailable”，问答区域显示 `POST /api/weibo/bot/messages requires MySQL-backed real Weibo records.`，不是静默失败。
+3. 打开 `/settings`：后台设置页加载成功，依赖状态显示 MySQL 未连接、MediaCrawler 未配置、Chrome CDP 不可用。
+4. 点击“发现目标”：页面显示“发现任务未完成：mysql unavailable”，没有假成功、没有新增假数据。
+5. 切到 390x844 窄屏：设置页布局仍可读，未观察到明显文本重叠。
+
+浏览器证据：
+
+- 主控 Playwright snapshot 覆盖 `/`、点击“提问”、`/settings`、点击“发现目标”、390x844 viewport。
+- 截图 artifact：`.playwright-cli/page-2026-06-17T21-11-42-662Z.png`。
+- Kierkegaard（QA/browser agent，019ed76d-43bd-7e13-9914-b867c1cf154b）独立复核 PASSED，无 P0/P1/P2。
+
+Console / network：
+
+- JS exception：0。
+- Unhandled promise / 页面崩溃：未观察到。
+- 预期 network 503：`/api/weibo/workbench`、`/api/weibo/comments`、`/api/weibo/analyses`、`/api/weibo/bot/messages`、`/api/weibo/discovery`；UI 均转成可见 no-DB 状态。
+- 允许项：`/favicon.ico` 404。
+- 未观察到浏览器访问微博/B站/小红书/抖音/Agent-Reach 外部域名。
+- 未发现 Cookie/token/真实密钥值泄漏；页面/API 只显示 `MYSQL_URL` 变量名和未配置原因。
+
+数据或持久化检查：
+
+- 无本地 `MYSQL_URL`，最终验收只验证 no-DB 可用状态和失败路径，不进行写库。
+- 真实 MySQL 7.3 已在前置验证中使用临时本地 MySQL 8.4 Docker 跑过 `test/weibo-db-persistence.test.js`，53/53 pass，0 skipped，0 fail。
+
+发现的问题：
+
+- P0：无。
+- P1：无。
+- P2：无。
+- P3：设置页“依赖状态”标题旁显示 `unknown`，但同屏已有“依赖未就绪 / MySQL 未连接 / 补齐依赖 / mysql_unavailable”语义，未影响核心验收。
+
+回流修复：
+
+- 无 P0/P1/P2，因此未创建修复切片。
+
+未验证范围：
+
+- 没有读取真实 `.env`、Cookie/token、`config/cookies/*` 或浏览器真实账号状态。
+- 没有调用真实微博/B站/小红书/抖音/Agent-Reach 平台。
+- 没有进行生产发布、merge PR 或生产数据库操作。
+
+剩余风险：
+
+- 抖音 search/detail、normalizer、persistence 和真实 collection 仍保持 blocked/N/A。
+- 若用户要体验真实数据流，需要提供安全的本地 MySQL 测试配置并明确真实账号/平台调用边界；默认 agent loop 不读取真实凭据。
