@@ -63,7 +63,7 @@ python workers/enterprise_worker.py weibo-agent-loop-handoff --payload-json '{"s
 
 ### FastAPI Sidecar 迁移主线
 
-当前后续 Agent Harness 主线已切到 `haidao-fastapi-sidecar-harness`：FastAPI sidecar 是新后端入口，旧 Node 服务和 `workers/enterprise_worker.py` 暂时保留为兼容层与 legacy tool adapter。已经完成的 MySQL 账本、反馈、知识库和 worker attachment 能力继续复用；未完成的 Judge retry、CrewAI 编排和 React 工作台不再继续堆进旧 worker。
+当前后续 Agent Harness 主线已切到 `haidao-fastapi-sidecar-harness`：FastAPI sidecar 是新后端入口，旧 Node 服务和 `workers/enterprise_worker.py` 暂时保留为兼容层与 legacy tool adapter。已经完成的 MySQL 账本、反馈、知识库、worker attachment、CrewAI proposal audit contract 和 Judge retry quality gate 继续复用；React 工作台不继续堆进旧 worker。
 
 安装 sidecar 依赖：
 
@@ -83,9 +83,22 @@ MYSQL_URL='mysql://user:password@127.0.0.1:3306/yuqing_monitor' \
 - `GET /health`
 - `POST /api/weibo/agent-loop/run`
 - `GET /api/weibo/agent-runs/{id}`
+- `POST /api/weibo/agent-runs/{id}/judge/reviews`
 - `POST /api/tools/legacy-worker/{command}`，仅允许经过白名单审查的 legacy worker 命令。
 
 sidecar 不读取或打印 Cookie、token、浏览器登录态、`config/cookies/weibo.json` 或 `.env` 内容。CrewAI runtime 和 React/Vite 工作台分别属于后续 OpenSpec change。
+
+### FastAPI Judge retry quality gate
+
+`POST /api/weibo/agent-runs/{id}/judge/reviews` 是 Harness-owned Judge 质量门，用于复核 CrewAI proposal audit 和已 allowlist 的 Agent Loop step output。首轮已支持 `weibo-comments-analyze`、`weibo-events-build`、`weibo-actions-build`；`weibo-bot-message`、Q&A、Report、Backtest 不在本 change 接入 Judge retry。
+
+请求只接受当前 project/run 下的 `proposalAuditId` 或 `stepRunId`、`maxAttempts` 和测试用 fixture/fake output 等 Harness 范围字段；不接受 prompt、runtime module、Cookie 路径、DB URL、任意文件路径或旧 worker 任意命令。`maxAttempts` 默认 3，且最多 3 次总尝试。第 1 次 review 的 `retry_count=0`，第 2 次为 `1`，第 3 次为 `2`。
+
+Judge 失败时追加 `judge_reviews`，记录 required changes、evidence errors、retry count 和白名单失败摘要。第 3 次仍失败时，对应 step/run 进入 `needs_human`，并通过 `feedback_items` 写入 `manual_handoff`，让状态查询能展示人工处理状态。
+
+Judge 只复核并阻断未接受输出：不覆盖事实表，不决定情感分数、事件分数或 backtest signal，不自动确认现实宣发动作。知识卡只能通过 `knowledge_references` 辅助判断，不能替代真实微博 evidence。
+
+本实现复用现有 schema：`judge_reviews.retry_count`、`feedback_items`、`agent_step_runs.output_json/error_*`，失败输出摘要写入 `judge_reviews.feedback_json.failed_output_summary`，不新增 migration。真实 MySQL persistence tests 仍需设置 `WEIBO_DB_PERSISTENCE_TEST_URL` 后运行。
 
 面向影视制作公司的企业级 AI 舆情监测 Web 服务。系统限定监控小红书、抖音、微博，使用授权 Cookie 采集真实内容，写入本机 MySQL，并由 DeepSeek Agent 做逐评论情感分析和营销策略生成。
 

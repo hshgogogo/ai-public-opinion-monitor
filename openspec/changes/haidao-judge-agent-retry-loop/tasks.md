@@ -42,7 +42,7 @@
 - [x] 5.1 先写真实 MySQL persistence 测试，验证 passed/failed/needs_human reviews 入库。
 - [x] 5.2 验证 `weibo-agent-loop-status` 返回 Judge reviews、retry count 和 manual handoff。
 - [x] 5.3 验证失败输出摘要只保存白名单字段，不返回 raw secret/internal fields。
-- [ ] 5.4 如果现有 schema 不足，先写 migration 测试，再新增 MySQL-safe migration；若现有 `feedback_json` 足够，则不新增 migration。
+- [x] 5.4 如果现有 schema 不足，先写 migration 测试，再新增 MySQL-safe migration；若现有 `feedback_json` 足够，则不新增 migration。
 
 ## 6. 安全与兼容
 
@@ -53,7 +53,7 @@
 
 ## 7. 文档、验证与交付
 
-- [ ] 7.1 更新 README 或相关 docs，说明 Judge retry FastAPI Harness 能力、限制和人工处理状态。
+- [x] 7.1 更新 README 或相关 docs，说明 Judge retry FastAPI Harness 能力、限制和人工处理状态。
 - [x] 7.2 运行定向测试。
 - [x] 7.3 运行 `npm test`。
 - [ ] 7.4 运行真实 MySQL persistence tests。

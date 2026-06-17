@@ -165,6 +165,8 @@ Judge review、handoff、status payload 不得暴露：
 
 如果需要保留失败输出摘要，优先写入 `judge_reviews.feedback_json.failed_output_summary`，避免新增 migration。只有当真实 MySQL 无法表达必须字段时，才新增 MySQL-safe migration，且必须可连续运行两遍。
 
+实现决策（2026-06-17）：当前实现已能用现有 schema 表达 Judge retry、manual handoff 和失败输出摘要；`failed_output_summary` 写入 `judge_reviews.feedback_json` 的白名单字段中，`needs_human` 通过 `agent_step_runs`、`agent_loop_runs` 和 `feedback_items` 表达。因此本 change 不新增 migration。真实 MySQL persistence tests 仍由 `WEIBO_DB_PERSISTENCE_TEST_URL` gate 控制，未设置时不得勾选 7.4。
+
 ## Verification Strategy
 
 - 静态测试：OpenSpec 任务不得把 Judge 主业务放回旧 worker；FastAPI endpoint/service 不得引入真实微博/Cookie 调用或任意 runtime control。
