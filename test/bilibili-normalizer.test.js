@@ -62,6 +62,7 @@ assert first["title"] == "海岛舒服日志官宣反应混剪", first
 assert "刘昊然和李兰迪" in first["text"], first
 assert first["author_external_id"] == "up1001", first
 assert first["author_display_name"] == "海风剪辑室", first
+assert first["author_url"] == "https://space.bilibili.com/1001", first
 assert first["url"] == "https://www.bilibili.com/video/BV1HDLOG0001", first
 assert first["published_at"] == "2026-05-20T10:20:00+08:00", first
 assert first["metrics"] == {

@@ -2156,6 +2156,90 @@ test(
 );
 
 test(
+  "persists Bilibili normalized evidence idempotently with project-scoped keys",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("海岛舒服日志 B站隔离项目");
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.bilibili_normalizer import BilibiliNormalizer
+from app.bilibili_persistence import BilibiliEvidenceWriter, MySQLBilibiliRepository
+from workers import db
+
+project_id = int(os.environ["PROJECT_ID"])
+other_project_id = int(os.environ["OTHER_PROJECT_ID"])
+writer = BilibiliEvidenceWriter(MySQLBilibiliRepository(db))
+search = BilibiliNormalizer(project_id=project_id).normalize_search_fixture(
+    "test/fixtures/bilibili-search.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/search-fixture.json",
+)
+detail = BilibiliNormalizer(project_id=project_id).normalize_detail_fixture(
+    "test/fixtures/bilibili-detail.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/detail-fixture.json",
+)
+writer.persist(search)
+detail_result = writer.persist(detail)
+for evidence in detail["evidence_summaries"]:
+    if evidence.get("external_id") == "r9002":
+        evidence["metrics"]["like_count"] = 141
+repeat_result = writer.persist(detail)
+other = BilibiliNormalizer(project_id=other_project_id).normalize_search_fixture(
+    "test/fixtures/bilibili-search.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/search-other-project.json",
+)
+other_result = writer.persist(other)
+other_detail = BilibiliNormalizer(project_id=other_project_id).normalize_detail_fixture(
+    "test/fixtures/bilibili-detail.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/detail-other-project.json",
+)
+for evidence in other_detail["evidence_summaries"]:
+    if evidence.get("external_id") == "r9002":
+        evidence["metrics"]["like_count"] = 7
+other_detail_result = writer.persist(other_detail)
+print(json.dumps({
+    "detail": detail_result,
+    "repeat": repeat_result,
+    "other": other_result,
+    "otherDetail": other_detail_result,
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId), OTHER_PROJECT_ID: String(otherProjectId) });
+
+    assert.equal(result.detail.ok, true, result);
+    assert.equal(result.detail.persisted_posts, 1, result);
+    assert.equal(result.detail.persisted_comments, 3, result);
+    assert.equal(result.repeat.persisted_comments, 3, result);
+    assert.equal(result.other.persisted_posts, 2, result);
+    assert.equal(result.otherDetail.persisted_source_accounts, 4, result);
+    assert.equal(result.otherDetail.persisted_posts, 1, result);
+    assert.equal(result.otherDetail.persisted_comments, 3, result);
+
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts WHERE project_id=%s AND platform='bilibili'", [projectId])[0].count, 2);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments WHERE project_id=%s AND platform='bilibili'", [projectId])[0].count, 3);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM source_accounts WHERE project_id=%s AND platform='bilibili'", [projectId])[0].count, 5);
+    assert.equal(queryRows("SELECT like_count FROM social_comments WHERE project_id=%s AND platform='bilibili' AND external_id='r9002'", [projectId])[0].like_count, 141);
+    assert.equal(
+      queryRows("SELECT JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.raw_artifact_ref')) AS raw_ref FROM social_posts WHERE project_id=%s AND platform='bilibili' AND external_id='BV1HDLOG0001'", [projectId])[0].raw_ref,
+      "artifacts/agent-reach/bilibili/detail-fixture.json"
+    );
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts WHERE project_id=%s AND platform='bilibili'", [otherProjectId])[0].count, 2);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments WHERE project_id=%s AND platform='bilibili'", [otherProjectId])[0].count, 3);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM source_accounts WHERE project_id=%s AND platform='bilibili'", [otherProjectId])[0].count, 5);
+    assert.equal(
+      queryRows("SELECT JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.raw_artifact_ref')) AS raw_ref FROM social_posts WHERE project_id=%s AND platform='bilibili' AND external_id='BV1HDLOG0001'", [otherProjectId])[0].raw_ref,
+      "artifacts/agent-reach/bilibili/detail-other-project.json"
+    );
+    assert.equal(queryRows("SELECT like_count FROM social_comments WHERE project_id=%s AND platform='bilibili' AND external_id='r9002'", [projectId])[0].like_count, 141);
+    assert.equal(queryRows("SELECT like_count FROM social_comments WHERE project_id=%s AND platform='bilibili' AND external_id='r9002'", [otherProjectId])[0].like_count, 7);
+  }
+);
+
+test(
   "runs knowledge card RAG schema migration twice and creates source/card tables",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

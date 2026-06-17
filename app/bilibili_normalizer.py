@@ -61,6 +61,7 @@ class BilibiliNormalizer:
             "url": _safe_public(item.get("url")),
             "author_external_id": _safe_public(author.get("mid")),
             "author_display_name": _safe_public(author.get("name")),
+            "author_url": _safe_public(author.get("url")),
             "published_at": _safe_public(item.get("published_at")),
             "metrics": _metrics_from_stat(item.get("stat") or {}),
             "raw_artifact_ref": raw_artifact_ref,
