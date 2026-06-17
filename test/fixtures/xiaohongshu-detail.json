@@ -1,0 +1,58 @@
+{
+  "note": {
+    "note_id": "xhs-note-1001",
+    "title": "海岛舒服日志官宣后的小红书观感",
+    "content": "官宣后评论区集中讨论刘昊然和李兰迪的组合感、海岛取景质感，以及宣发节奏是否足够稳定。",
+    "url": "https://www.xiaohongshu.com/explore/xhs-note-1001",
+    "published_at": "2026-05-22T09:30:00+08:00",
+    "user": {
+      "id": "xhs-user-501",
+      "nickname": "海岛追剧手账",
+      "profile_url": "https://www.xiaohongshu.com/user/profile/xhs-user-501"
+    },
+    "interact_info": {
+      "liked_count": 9100,
+      "collected_count": 1500,
+      "comment_count": 3,
+      "share_count": 120
+    },
+    "debug_payload": "synthetic collector-only diagnostics"
+  },
+  "comments": [
+    {
+      "comment_id": "xhs-comment-7001",
+      "content": "官宣节奏终于落地了，组合感比路透阶段更清楚。",
+      "author": {
+        "user_id": "xhs-fan-7001",
+        "nickname": "海风观剧",
+        "profile_url": "https://www.xiaohongshu.com/user/profile/xhs-fan-7001"
+      },
+      "like_count": 126,
+      "reply_count": 6
+    },
+    {
+      "id": "xhs-comment-7002",
+      "text": "希望宣发别只靠氛围图，想看到更多角色关系信息。",
+      "user": {
+        "id": "xhs-fan-7002",
+        "name": "追剧样本B",
+        "url": "https://www.xiaohongshu.com/user/profile/xhs-fan-7002"
+      },
+      "interact_info": {
+        "likes": "88",
+        "reply_count": "3"
+      }
+    },
+    {
+      "comment_id": "xhs-comment-7002",
+      "content": "重复评论样本，验证 comment evidence 去重稳定。",
+      "author": {
+        "user_id": "xhs-fan-7002",
+        "nickname": "追剧样本B"
+      },
+      "like_count": 88,
+      "reply_count": 3
+    }
+  ],
+  "private_runner_note": "synthetic internal collector note not public"
+}

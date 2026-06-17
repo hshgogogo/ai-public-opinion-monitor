@@ -30,7 +30,9 @@
 - 已完成 2.x Agent-Reach Adapter Foundation。
 - 已完成 3.1/3.2 B站 fixture normalizer。
 - 已完成 3.3/3.4 B站 idempotent persistence。
-- 当前下一切片：3.5 Add Agent Loop step status for B站 collection success/partial/failure。
+- 已完成 3.5 B站 collection step status。
+- 当前提交候选切片：4.1/4.2 小红书 fixture normalization。
+- 下一切片：4.3/4.4 小红书 auth-required/login-state boundary。
 
 ## 5. 推荐串行任务顺序
 
@@ -127,3 +129,30 @@ Agent：James（worker，019ed5f9-6503-77b2-8a72-e231b2f99919）
 - Adapter `.run()` fallback 固定 service-owned `collect` command，public `payload.command` 不进入 runner request。
 - `adapter_summary` 只保留白名单安全字段；不要恢复 passthrough。
 - success 只接受 posts/comments durable content，source-account-only 必须保持 partial。
+
+### 2026-06-17 Agent 2
+
+日期：2026-06-17
+
+Agent：Jason（worker，019ed620-6089-7302-8aee-4af7b35b53b5）
+
+任务：小红书 fixture normalization 4.1/4.2
+
+状态：worker 已返回；Newton P2 follow-up 已修复 `raw_artifact_ref` path-safe 敏感 marker 残留，保留安全 `artifacts/agent-reach/xiaohongshu/search-safe.json`，并保持无 ID comment fallback 按父 note 去重隔离。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-normalizer.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-normalizer.test.js test/bilibili-normalizer.test.js test/agent-reach-adapter.test.js`
+- `git diff --check`
+
+复审结果：
+
+- Laplace 初审 P2：`raw_artifact_ref` 不能只走通用 sanitizer；ID-less comment fallback 必须包含父 note。
+- Newton 复审 P2：path-safe `raw_stdout` / `collector_transcript` 变体仍需归一化 marker 拒绝。
+- Mencius 最终复审 APPROVED：无 P0/P1/P2；确认 `rawstdout`、`collectortranscript`、`stderr`、`cookie`、`token`、DB/browser marker 被拒，安全 `search-safe.json` 保留；跨 note ID-less comment 不碰撞，同 note 重复去重。
+
+遗留问题：
+
+- 真实小红书登录态、Spider_XHS 真实采集、persistence、FastAPI endpoint、抖音均不在 4.1/4.2 范围内。
+- 提交必须选择性 stage，排除无关 `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 脏改。

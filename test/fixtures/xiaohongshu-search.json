@@ -1,0 +1,45 @@
+{
+  "query": "海岛舒服日志 刘昊然 李兰迪",
+  "notes": [
+    {
+      "note_id": "xhs-note-1001",
+      "title": "海岛舒服日志官宣后的小红书观感",
+      "desc": "整理官宣后小红书用户对刘昊然、李兰迪组合和海岛取景氛围的讨论。",
+      "url": "https://www.xiaohongshu.com/explore/xhs-note-1001",
+      "published_at": "2026-05-22T09:30:00+08:00",
+      "author": {
+        "user_id": "xhs-user-501",
+        "nickname": "海岛追剧手账",
+        "profile_url": "https://www.xiaohongshu.com/user/profile/xhs-user-501"
+      },
+      "stats": {
+        "liked_count": 8300,
+        "collected_count": 1200,
+        "comment_count": 460,
+        "share_count": 98
+      },
+      "raw_json": {
+        "collector": "not public"
+      },
+      "private_runner_note": "synthetic internal collector note not public"
+    },
+    {
+      "id": "xhs-note-1002",
+      "title": "李兰迪海岛舒服日志角色氛围猜想",
+      "content": "笔记记录站内对角色关系、服化风格和宣发节奏的反馈。",
+      "url": "https://www.xiaohongshu.com/explore/xhs-note-1002",
+      "time": "2026-05-22T15:45:00+08:00",
+      "user": {
+        "id": "xhs-user-502",
+        "name": "剧集灵感册",
+        "url": "https://www.xiaohongshu.com/user/profile/xhs-user-502"
+      },
+      "interact_info": {
+        "likes": "5100",
+        "collects": "760",
+        "comments": "210",
+        "shares": "45"
+      }
+    }
+  ]
+}
