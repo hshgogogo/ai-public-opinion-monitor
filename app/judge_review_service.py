@@ -367,10 +367,22 @@ def load_step_output_fixture(run_id, project_id, step_run_id, source_repository)
             "cause": error.get("cause", "The stepRunId does not belong to the requested Agent Loop run and project."),
             "fix": error.get("fix", "Retry with a stepRunId from the same Harness run."),
         }
-    mapped = map_comment_analysis_step_output(loaded.get("step"))
+    mapped = map_step_output_for_review(loaded.get("step"))
     if not mapped.get("ok"):
         return mapped
     return {"ok": True, "output": mapped["output"]}
+
+
+def map_step_output_for_review(step):
+    if not isinstance(step, dict):
+        return unsupported_step_output_error()
+    output_json = step.get("output_json") if isinstance(step.get("output_json"), dict) else {}
+    command = output_json.get("command")
+    if step.get("step_name") == "comment_analysis" and command == "weibo-comments-analyze":
+        return map_comment_analysis_step_output(step)
+    if step.get("step_name") == "event_building" and command == "weibo-events-build":
+        return map_event_building_step_output(step)
+    return unsupported_step_output_error()
 
 
 def map_comment_analysis_step_output(step):
@@ -393,14 +405,49 @@ def map_comment_analysis_step_output(step):
     return {"ok": True, "output": output}
 
 
+def map_event_building_step_output(step):
+    if not isinstance(step, dict):
+        return unsupported_step_output_error()
+    output_json = step.get("output_json") if isinstance(step.get("output_json"), dict) else {}
+    if step.get("step_name") != "event_building" or output_json.get("command") != "weibo-events-build":
+        return unsupported_step_output_error()
+    evidence_count = integer_or_zero(output_json.get("evidence_count"))
+    persisted_events = integer_or_zero(output_json.get("persisted_events"))
+    output = {
+        "summary": f"weibo-events-build persisted {persisted_events} event(s) with {evidence_count} evidence reference(s).",
+        "evidence_ids": normalize_event_building_evidence_ids(step.get("evidence_ids")),
+        "_allowed_evidence_prefixes": ["comment", "analysis", "event"],
+        "_unsupported_evidence_error_type": "unsupported_event_building_evidence_prefix",
+        "_unsupported_evidence_required_change": "Use only comment-*, analysis-*, or event-* evidence IDs for event-building Judge reviews.",
+        "_unsupported_evidence_message": "This step output can only use comment, analysis, or event evidence IDs.",
+        "_required_source_evidence_prefixes": ["comment", "analysis"],
+        "_source_evidence_error_type": "event_building_source_evidence_required",
+        "_source_evidence_required_change": "Add comment-* or analysis-* source evidence before treating an event-building output as accepted.",
+        "command": "weibo-events-build",
+        "evidence_count": evidence_count,
+        "persisted_events": persisted_events,
+    }
+    return {"ok": True, "output": output}
+
+
+def normalize_event_building_evidence_ids(values):
+    normalized = []
+    for value in safe_string_list(values):
+        if value.isdigit() and not value.startswith("0"):
+            normalized.append(f"comment-{value}")
+            continue
+        normalized.append(value)
+    return normalized
+
+
 def unsupported_step_output_error():
     return {
         "ok": False,
         "mode": "weibo-agent-mvp",
         "error_type": "judge_review_source_not_found",
         "message": "Judge review step output is not allowlisted for this slice.",
-        "cause": "Only weibo-comments-analyze comment_analysis step outputs can be reviewed without fixtureOutputs in this change slice.",
-        "fix": "Pass a comment_analysis stepRunId from weibo-comments-analyze, or use fixtureOutputs for service-level tests.",
+        "cause": "Only allowlisted Agent Loop step outputs can be reviewed without fixtureOutputs in this change slice.",
+        "fix": "Pass a comment_analysis stepRunId from weibo-comments-analyze, an event_building stepRunId from weibo-events-build, or use fixtureOutputs for service-level tests.",
     }
 
 
@@ -436,7 +483,10 @@ def apply_step_output_evidence_prefix_boundary(review, output):
     prepared = dict(review)
     feedback_json = dict(prepared.get("feedback_json") or {})
     evidence_ids = list(feedback_json.get("evidence_ids") or [])
-    evidence_errors = list(prepared.get("evidence_errors") or [])
+    evidence_errors = remap_step_unsupported_prefix_errors(
+        prepared.get("evidence_errors") or [],
+        output,
+    )
     required_changes = list(prepared.get("required_changes") or [])
     supported_evidence_ids = []
 
@@ -450,11 +500,32 @@ def apply_step_output_evidence_prefix_boundary(review, output):
         evidence_errors.append({
             "error_type": error_type,
             "evidence_id": parsed["raw"],
-            "message": "This step output can only use comment or analysis evidence IDs.",
+            "message": str(output.get("_unsupported_evidence_message") or "This step output uses an unsupported evidence ID prefix."),
         })
 
     if len(supported_evidence_ids) != len(evidence_ids):
-        required_changes.append("Use only comment-* or analysis-* evidence IDs for comment analysis Judge reviews.")
+        required_changes.append(str(
+            output.get("_unsupported_evidence_required_change")
+            or "Use only allowlisted evidence IDs for this step Judge review."
+        ))
+    source_prefixes = output.get("_required_source_evidence_prefixes")
+    if isinstance(source_prefixes, list) and source_prefixes:
+        required_source_prefixes = {str(prefix) for prefix in source_prefixes}
+        has_source_evidence = False
+        for evidence_id in supported_evidence_ids:
+            parsed = parse_judge_evidence_id(evidence_id)
+            if not parsed.get("error") and parsed.get("prefix") in required_source_prefixes:
+                has_source_evidence = True
+                break
+        if not has_source_evidence and supported_evidence_ids:
+            evidence_errors.append({
+                "error_type": str(output.get("_source_evidence_error_type") or "source_evidence_required"),
+                "message": "This step output needs source evidence IDs, not only derived records.",
+            })
+            required_changes.append(str(
+                output.get("_source_evidence_required_change")
+                or "Add source evidence IDs before accepting this step output."
+            ))
     feedback_json["evidence_ids"] = supported_evidence_ids
     prepared["feedback_json"] = feedback_json
     prepared["evidence_errors"] = evidence_errors
@@ -464,6 +535,21 @@ def apply_step_output_evidence_prefix_boundary(review, output):
     if prepared["status"] == "failed" and int(prepared.get("retry_count") or 0) >= 2:
         prepared["status"] = "needs_human"
     return prepared
+
+
+def remap_step_unsupported_prefix_errors(evidence_errors, output):
+    error_type = str(output.get("_unsupported_evidence_error_type") or "unsupported_step_evidence_prefix")
+    message = str(output.get("_unsupported_evidence_message") or "This step output uses an unsupported evidence ID prefix.")
+    remapped = []
+    for error in evidence_errors:
+        if not isinstance(error, dict) or error.get("error_type") != "unsupported_evidence_prefix":
+            remapped.append(error)
+            continue
+        prepared = dict(error)
+        prepared["error_type"] = error_type
+        prepared["message"] = message
+        remapped.append(prepared)
+    return remapped
 
 
 def summarize_failed_output(output):

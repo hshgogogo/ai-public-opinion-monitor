@@ -908,6 +908,274 @@ print(json.dumps({
 );
 
 test(
+  "FastAPI Judge review endpoint maps event-building step output without fixtureOutputs",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("Judge event step output cross-project fixture");
+    const commentId = createEvidenceComment(projectId, "judge-step-output-event-comment");
+    const analysisId = createSentimentResult(commentId, "judge-step-output-event-analysis");
+    const eventId = createEvent(projectId, "judge-step-output-event");
+    const actionId = createAction(projectId, "judge-step-output-action");
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+project_id = int(os.environ["PROJECT_ID"])
+other_project_id = int(os.environ["OTHER_PROJECT_ID"])
+comment_id = int(os.environ["COMMENT_ID"])
+analysis_id = int(os.environ["ANALYSIS_ID"])
+event_id = int(os.environ["EVENT_ID"])
+action_id = int(os.environ["ACTION_ID"])
+loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="event_building",
+    input_json={"source": "judge-event-step-output-review-test"},
+)
+event_step = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Event Agent",
+    step_name="event_building",
+    status="succeeded",
+    output_json={
+        "command": "weibo-events-build",
+        "evidence_count": 3,
+        "persisted_events": 1,
+        "deepseek": {"status": "disabled"},
+    },
+    evidence_ids=[str(comment_id), f"analysis-{analysis_id}", f"event-{event_id}"],
+)
+missing_evidence_step = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Event Agent",
+    step_name="event_building",
+    status="partial",
+    output_json={
+        "command": "weibo-events-build",
+        "evidence_count": 0,
+        "persisted_events": 0,
+    },
+    evidence_ids=[],
+)
+unsupported_evidence_step = worker.record_agent_step_run(
+    loop_run_id=loop["id"],
+    project_id=project_id,
+    agent_name="Event Agent",
+    step_name="event_building",
+    status="succeeded",
+    output_json={
+        "command": "weibo-events-build",
+        "evidence_count": 1,
+        "persisted_events": 1,
+    },
+    evidence_ids=[f"action-{action_id}", "foo-5"],
+)
+same_project_other_loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="event_building",
+    input_json={"source": "judge-event-step-output-other-run"},
+)
+same_project_other_step = worker.record_agent_step_run(
+    loop_run_id=same_project_other_loop["id"],
+    project_id=project_id,
+    agent_name="Event Agent",
+    step_name="event_building",
+    status="succeeded",
+    output_json={
+        "command": "weibo-events-build",
+        "evidence_count": 1,
+        "persisted_events": 1,
+    },
+    evidence_ids=[f"event-{event_id}"],
+)
+other_project_loop = worker.create_agent_loop_run(
+    project_id=other_project_id,
+    trigger_mode="manual",
+    current_step="event_building",
+    input_json={"source": "judge-event-step-output-other-project"},
+)
+other_project_step = worker.record_agent_step_run(
+    loop_run_id=other_project_loop["id"],
+    project_id=other_project_id,
+    agent_name="Event Agent",
+    step_name="event_building",
+    status="succeeded",
+    output_json={
+        "command": "weibo-events-build",
+        "evidence_count": 1,
+        "persisted_events": 1,
+    },
+    evidence_ids=[f"event-{event_id}"],
+)
+client = TestClient(create_app())
+response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": event_step["id"],
+        "maxAttempts": 3,
+    },
+)
+missing_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": missing_evidence_step["id"],
+        "maxAttempts": 3,
+    },
+)
+unsupported_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": unsupported_evidence_step["id"],
+        "maxAttempts": 3,
+    },
+)
+wrong_run_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": same_project_other_step["id"],
+        "maxAttempts": 3,
+    },
+)
+cross_project_response = client.post(
+    f"/api/weibo/agent-runs/{loop['id']}/judge/reviews",
+    json={
+        "projectId": project_id,
+        "stepRunId": other_project_step["id"],
+        "maxAttempts": 3,
+    },
+)
+print(json.dumps({
+    "loop_id": loop["id"],
+    "event_step_id": event_step["id"],
+    "missing_step_id": missing_evidence_step["id"],
+    "unsupported_step_id": unsupported_evidence_step["id"],
+    "response_status": response.status_code,
+    "response": response.json(),
+    "missing_status": missing_response.status_code,
+    "missing": missing_response.json(),
+    "unsupported_status": unsupported_response.status_code,
+    "unsupported": unsupported_response.json(),
+    "wrong_run_status": wrong_run_response.status_code,
+    "wrong_run": wrong_run_response.json(),
+    "cross_project_status": cross_project_response.status_code,
+    "cross_project": cross_project_response.json(),
+}, ensure_ascii=False, default=str))
+`, {
+      PROJECT_ID: String(projectId),
+      OTHER_PROJECT_ID: String(otherProjectId),
+      COMMENT_ID: String(commentId),
+      ANALYSIS_ID: String(analysisId),
+      EVENT_ID: String(eventId),
+      ACTION_ID: String(actionId)
+    });
+
+    assert.equal(result.response_status, 200, result.response);
+    assert.equal(result.response.ok, true, result.response);
+    assert.equal(result.response.proposalAuditId, null, result.response);
+    assert.equal(result.response.stepRunId, result.event_step_id, result.response);
+    assert.equal(result.response.review.status, "passed", result.response);
+    assert.equal(result.response.review.retry_count, 0, result.response);
+    assert.deepEqual(result.response.review.evidence_errors, [], result.response);
+
+    assert.equal(result.missing_status, 200, result.missing);
+    assert.equal(result.missing.review.status, "failed", result.missing);
+    assert.equal(result.missing.review.evidence_errors.some((item) => item.error_type === "missing_evidence_ids"), true, result.missing);
+
+    assert.equal(result.unsupported_status, 200, result.unsupported);
+    assert.equal(result.unsupported.review.status, "failed", result.unsupported);
+    assert.deepEqual(
+      result.unsupported.review.evidence_errors.map((item) => item.error_type),
+      ["unsupported_event_building_evidence_prefix", "unsupported_event_building_evidence_prefix"],
+      result.unsupported
+    );
+
+    assert.deepEqual(queryRows(
+      `
+      SELECT
+        step_run_id,
+        status,
+        passed,
+        retry_count,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.evidence_ids[0]')) AS first_evidence_id,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.evidence_ids[1]')) AS second_evidence_id,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.evidence_ids[2]')) AS third_evidence_id,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.summary')) AS summary,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.deepseek.status')) AS deepseek_status,
+        JSON_UNQUOTE(JSON_EXTRACT(evidence_errors, '$[0].error_type')) AS first_error_type,
+        JSON_UNQUOTE(JSON_EXTRACT(evidence_errors, '$[1].error_type')) AS second_error_type
+      FROM judge_reviews
+      WHERE loop_run_id=%s AND project_id=%s
+      ORDER BY id
+      `,
+      [result.loop_id, projectId]
+    ), [
+      {
+        step_run_id: result.event_step_id,
+        status: "passed",
+        passed: 1,
+        retry_count: 0,
+        first_evidence_id: `comment-${commentId}`,
+        second_evidence_id: `analysis-${analysisId}`,
+        third_evidence_id: `event-${eventId}`,
+        summary: "weibo-events-build persisted 1 event(s) with 3 evidence reference(s).",
+        deepseek_status: null,
+        first_error_type: null,
+        second_error_type: null
+      },
+      {
+        step_run_id: result.missing_step_id,
+        status: "failed",
+        passed: 0,
+        retry_count: 0,
+        first_evidence_id: null,
+        second_evidence_id: null,
+        third_evidence_id: null,
+        summary: "weibo-events-build persisted 0 event(s) with 0 evidence reference(s).",
+        deepseek_status: null,
+        first_error_type: "missing_evidence_ids",
+        second_error_type: null
+      },
+      {
+        step_run_id: result.unsupported_step_id,
+        status: "failed",
+        passed: 0,
+        retry_count: 0,
+        first_evidence_id: null,
+        second_evidence_id: null,
+        third_evidence_id: null,
+        summary: "weibo-events-build persisted 1 event(s) with 1 evidence reference(s).",
+        deepseek_status: null,
+        first_error_type: "unsupported_event_building_evidence_prefix",
+        second_error_type: "unsupported_event_building_evidence_prefix"
+      }
+    ]);
+
+    assert.equal(result.wrong_run_status, 404, result.wrong_run);
+    assert.equal(result.wrong_run.error_type, "judge_review_source_not_found", result.wrong_run);
+    assert.equal(result.cross_project_status, 404, result.cross_project);
+    assert.equal(result.cross_project.error_type, "judge_review_source_not_found", result.cross_project);
+    assert.deepEqual(queryRows(
+      "SELECT COUNT(*) AS count FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s",
+      [result.loop_id, projectId]
+    )[0], { count: 3 });
+  }
+);
+
+test(
   "FastAPI Judge review endpoint resolves owned evidence IDs and rejects cross-project analysis IDs",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

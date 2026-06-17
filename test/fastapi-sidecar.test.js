@@ -949,6 +949,172 @@ assert wrong_command["error_type"] == "judge_review_source_not_found", wrong_com
 `);
 });
 
+test("JudgeReviewService maps weibo-events-build step output into Rule Judge input", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+class SourceRepository:
+    def __init__(self, evidence_ids=None, command="weibo-events-build"):
+        self.calls = []
+        self.output_calls = []
+        self.evidence_ids = evidence_ids if evidence_ids is not None else ["123", "analysis-4", "event-7"]
+        self.command = command
+
+    def has_sources(self, run_id, project_id, proposal_audit_id=None, step_run_id=None):
+        self.calls.append((run_id, project_id, proposal_audit_id, step_run_id))
+        return run_id == 10 and project_id == 2 and proposal_audit_id is None and step_run_id == 44
+
+    def step_output_for_review(self, run_id, project_id, step_run_id):
+        self.output_calls.append((run_id, project_id, step_run_id))
+        return {
+            "ok": True,
+            "step": {
+                "id": step_run_id,
+                "step_name": "event_building",
+                "status": "succeeded",
+                "output_json": {
+                    "command": self.command,
+                    "evidence_count": 3,
+                    "persisted_events": 1,
+                    "deepseek": {"status": "disabled"},
+                },
+                "evidence_ids": self.evidence_ids,
+            },
+        }
+
+class EvidenceRepository:
+    def __init__(self):
+        self.calls = []
+
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        self.calls.append((project_id, list(evidence_ids)))
+        return {"comment-123", "analysis-4", "event-7", "action-8"}.intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        return set()
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append({
+            "proposal_audit_id": proposal_audit_id,
+            "step_run_id": step_run_id,
+            "review": persisted,
+            "output": output,
+        })
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        raise AssertionError("single event step-output review should not create handoff")
+
+source_repository = SourceRepository()
+review_repository = ReviewRepository()
+evidence_repository = EvidenceRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=source_repository,
+    review_repository=review_repository,
+    evidence_repository=evidence_repository,
+)
+
+accepted = service.create_review(10, {
+    "projectId": 2,
+    "stepRunId": 44,
+    "maxAttempts": 3,
+})
+assert accepted["ok"] is True, accepted
+assert accepted["proposalAuditId"] is None, accepted
+assert accepted["stepRunId"] == 44, accepted
+assert accepted["review"]["status"] == "passed", accepted
+assert accepted["review"]["retry_count"] == 0, accepted
+assert source_repository.calls == [(10, 2, None, 44)], source_repository.calls
+assert source_repository.output_calls == [(10, 2, 44)], source_repository.output_calls
+assert evidence_repository.calls == [(2, ["comment-123", "analysis-4", "event-7"])], evidence_repository.calls
+assert len(review_repository.records) == 1, review_repository.records
+recorded = review_repository.records[0]
+assert recorded["proposal_audit_id"] is None, recorded
+assert recorded["step_run_id"] == 44, recorded
+assert recorded["output"]["command"] == "weibo-events-build", recorded
+assert recorded["output"]["evidence_ids"] == ["comment-123", "analysis-4", "event-7"], recorded
+assert recorded["output"]["summary"] == "weibo-events-build persisted 1 event(s) with 3 evidence reference(s).", recorded
+assert "deepseek" not in recorded["output"], recorded
+
+missing_evidence_reviews = ReviewRepository()
+missing_evidence = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=[]),
+    review_repository=missing_evidence_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 44,
+    "maxAttempts": 3,
+})
+assert missing_evidence["review"]["status"] == "failed", missing_evidence
+assert missing_evidence["review"]["passed"] is False, missing_evidence
+assert any(item["error_type"] == "missing_evidence_ids" for item in missing_evidence["review"]["evidence_errors"]), missing_evidence
+assert len(missing_evidence_reviews.records) == 1, missing_evidence_reviews.records
+
+unsupported_evidence_reviews = ReviewRepository()
+unsupported_evidence = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=["action-8", "foo-5"]),
+    review_repository=unsupported_evidence_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 44,
+    "maxAttempts": 3,
+})
+assert unsupported_evidence["review"]["status"] == "failed", unsupported_evidence
+assert unsupported_evidence["review"]["passed"] is False, unsupported_evidence
+unsupported_errors = unsupported_evidence["review"]["evidence_errors"]
+assert {item["evidence_id"] for item in unsupported_errors} == {"action-8", "foo-5"}, unsupported_evidence
+assert [item["error_type"] for item in unsupported_errors] == [
+    "unsupported_event_building_evidence_prefix",
+    "unsupported_event_building_evidence_prefix",
+], unsupported_evidence
+assert len(unsupported_evidence_reviews.records) == 1, unsupported_evidence_reviews.records
+
+event_only_reviews = ReviewRepository()
+event_only = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=["event-7"]),
+    review_repository=event_only_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 44,
+    "maxAttempts": 3,
+})
+assert event_only["review"]["status"] == "failed", event_only
+assert event_only["review"]["passed"] is False, event_only
+event_only_errors = event_only["review"]["evidence_errors"]
+assert any(item["error_type"] == "event_building_source_evidence_required" for item in event_only_errors), event_only
+assert len(event_only_reviews.records) == 1, event_only_reviews.records
+
+wrong_command = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(command="weibo-actions-build"),
+    review_repository=ReviewRepository(),
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 44,
+    "maxAttempts": 3,
+})
+assert wrong_command["ok"] is False, wrong_command
+assert wrong_command["error_type"] == "judge_review_source_not_found", wrong_command
+`);
+});
+
 test("JudgeReviewService runs fixture outputs as a clamped three-attempt rule Judge retry", () => {
   runPython(`
 from app.judge_review_service import JudgeReviewService
