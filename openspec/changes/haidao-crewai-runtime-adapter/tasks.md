@@ -2,7 +2,7 @@
 
 - [x] 1.1 Create `haidao-crewai-runtime-adapter` proposal, design, tasks, and spec artifacts.
 - [x] 1.2 Validate artifacts with `openspec validate haidao-crewai-runtime-adapter --strict`.
-- [ ] 1.3 Update change queue only if scope or ordering changes.
+- [x] 1.3 Update change queue only if scope or ordering changes.
 - [x] 1.4 Complete subagent planning review before implementation.
 
 ## 2. Proposal Schema Foundation
@@ -46,13 +46,13 @@
 - [x] 6.3 Write tests proving runtime errors are recorded as error proposal audit records.
 - [x] 6.4 Write tests proving invalid submit attempts do not create accepted proposal records.
 - [x] 6.5 Implement proposal audit persistence if existing ledger supports it, or create a non-destructive migration proposal if needed.
-- [ ] 6.6 Run real MySQL tests when available.
+- [x] 6.6 Run real MySQL tests when available.
 
 ## 7. Verification And Review
 
 - [x] 7.1 Run targeted CrewAI adapter tests.
 - [x] 7.2 Run `npm test`.
-- [ ] 7.3 Run real MySQL test suite when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
+- [x] 7.3 Run real MySQL test suite when `WEIBO_DB_PERSISTENCE_TEST_URL` is available.
 - [x] 7.4 Run `openspec validate haidao-crewai-runtime-adapter --strict`.
 - [x] 7.5 Run `git diff --check`.
 - [x] 7.6 Run `npm run agent:guard`.

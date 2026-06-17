@@ -56,7 +56,7 @@
 - [x] 7.1 更新 README 或相关 docs，说明 Judge retry FastAPI Harness 能力、限制和人工处理状态。
 - [x] 7.2 运行定向测试。
 - [x] 7.3 运行 `npm test`。
-- [ ] 7.4 运行真实 MySQL persistence tests。
+- [x] 7.4 运行真实 MySQL persistence tests。
 - [x] 7.5 运行 `openspec validate haidao-judge-agent-retry-loop --strict`。
 - [x] 7.6 运行 `git diff --check`。
 - [x] 7.7 运行 `npm run agent:guard`。
