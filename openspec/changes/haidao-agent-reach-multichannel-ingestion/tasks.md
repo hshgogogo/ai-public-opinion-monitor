@@ -38,7 +38,7 @@
 
 ## 6. Harness Integration
 
-- [ ] 6.1 Add FastAPI internal service/endpoint contract for platform collection trigger if needed.
+- [x] 6.1 Add FastAPI internal service/endpoint contract for platform collection trigger if needed.
 - [ ] 6.2 Ensure CrewAI can only read normalized evidence summary, not call Agent-Reach directly.
 - [ ] 6.3 Ensure Judge/Report can cite platform evidence IDs with platform labels.
 - [ ] 6.4 Ensure old微博 paths continue to pass regression tests.

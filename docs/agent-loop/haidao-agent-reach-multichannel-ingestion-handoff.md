@@ -406,3 +406,75 @@ Blocked / unverified evidence：
 - 5.3 normalizer/persistence 需要等待 5.2 完成。
 - 后续如果用户明确提供安全 runner schema 或人工确认真实登录态边界，必须重新开启一个小切片，不得复用 blocked evidence 直接放开真实采集。
 - P3：`workers/enterprise_worker.py` 仍注册 dormant `douyin.collect`，而 `workers/collectors/douyin.py` 会在失败前读取 `cookie_file`；当前 public legacy collect path 已禁用，不阻塞 5.4，但后续 6.x 或安全清理切片应移除或 hard-block 这条 dormant 路径。
+
+### 2026-06-18 Agent 7
+
+日期：2026-06-18
+
+Agents：
+
+- Boole（explorer，019ed6b9-22c1-72c2-a425-7f38ac9f2bbd）
+- Singer（worker，019ed6c0-b1e0-7891-96a5-1b95ffcbcf61）
+- Mill（reviewer，019ed6cb-0565-79b1-90d9-ee2de423bb5b）
+- Maxwell（worker follow-up，019ed6d0-c77c-7b10-bf63-20dd5f54ac37）
+
+任务：FastAPI internal platform collection trigger 6.1
+
+状态：6.1 已完成并通过复审；6.2/6.3/6.4 保持未完成。
+
+改动文件：
+
+- `app/main.py`
+- `test/fastapi-sidecar.test.js`
+- `openspec/changes/haidao-agent-reach-multichannel-ingestion/tasks.md`
+- `docs/agent-loop/subagent-events.jsonl`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+
+新增接口：
+
+- `create_app(..., platform_collection_services=None)`
+- `POST /api/internal/agent-runs/{run_id}/platform-collections`
+
+实现语义：
+
+- 内部 endpoint 只允许 `bilibili` 与 `xiaohongshu` 平台。
+- `douyin`、未知平台、未注入 service 均 fail-closed，且不执行 service。
+- 默认 `platform_collection_services` 为空，不实例化真实 runner，不读取真实平台、`.env`、Cookie、browser state。
+- 请求体只接受 `projectId`、`platform`、`query`、`keywords`、`limit`、`cursor`。
+- caller 不能通过 body 传 `agentLoopRunId`、`command`、credential/storage/browser/artifact/path 字段；run id 只来自 path。
+- service response 先走现有 public sanitizer，再递归移除 stdout/stderr/raw/private/login/browser/storage 等 key 和 safe-looking string value 中的 raw runner output marker。
+
+TDD / review 证据：
+
+- RED 1：新增 3 个 FastAPI internal collection tests 时，旧实现因 `create_app()` 不支持 `platform_collection_services` 参数失败。
+- GREEN 1：新增 endpoint 后 fastapi-sidecar 32/32 pass，相关定向 60/60 pass。
+- Mill 初审 P1：response sanitizer 会漏 safe-looking key 下的 `raw runner output` / `raw_stdout transcript` string value。
+- RED 2：Maxwell 补测试复现 message、summary、list/object value 泄漏 raw runner output marker，以及 allowed `query` 中 `raw_stdout transcript` 未被拒。
+- GREEN 2：新增 `contains_platform_collection_private_string()`，request validator 与 response sanitizer 复用，fastapi-sidecar 34/34 pass，相关定向 62/62 pass。
+- Mill 复审 APPROVED：无 P0/P1/P2；确认 douyin 即使注入 service 仍 fail-closed，CrewAI/Judge/legacy grammar 未放宽。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/fastapi-sidecar.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test test/fastapi-sidecar.test.js test/bilibili-collection-step.test.js test/xiaohongshu-collection-service.test.js test/crewai-tool-gateway.test.js test/agent-reach-adapter.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`
+- `openspec validate haidao-agent-reach-multichannel-ingestion --strict`
+- `git diff --check`
+- `npm run agent:guard`
+- `node -e` JSONL parse check for `docs/agent-loop/subagent-events.jsonl`
+
+验证结果：
+
+- FastAPI sidecar 34/34 pass。
+- 相关 FastAPI/B站/小红书/CrewAI gateway/Agent-Reach 定向 62/62 pass。
+- 全量 `npm test`：234 tests，182 pass / 52 skipped / 0 fail。
+- OpenSpec strict valid。
+- `git diff --check` pass。
+- `npm run agent:guard` pass。
+- JSONL parse pass。
+
+遗留问题：
+
+- `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有本切片前存在的无关格式化脏改，提交必须选择性 staging 排除，不要回滚用户/既有改动。
+- 本切片不做 6.2 CrewAI evidence-only grammar、6.3 Judge/Report platform citations、6.4 旧微博整体回归确认。
+- 真实 MySQL 测试按 `WEIBO_DB_PERSISTENCE_TEST_URL` env gate 跳过；本切片未改 schema 或 persistence。

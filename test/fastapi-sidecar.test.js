@@ -311,6 +311,373 @@ assert unknown_payload["error_type"] == "worker_exploded", unknown_payload
 `);
 });
 
+test("FastAPI internal platform collection trigger delegates to injected bilibili service and rejects caller run id override", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class FakeBilibiliCollectionService:
+    def __init__(self):
+        self.calls = []
+
+    def collect(self, payload):
+        self.calls.append(payload)
+        return {
+            "ok": True,
+            "platform": "bilibili",
+            "status": "succeeded",
+            "project_id": payload["project_id"],
+            "agentLoopRunId": payload["agentLoopRunId"],
+            "evidence_ids": ["bilibili:project:2:item:BVSAFE"],
+            "stdout": "raw stdout must stay private",
+            "stderr": "Cookie=SUB=secret token=secret",
+        }
+
+service = FakeBilibiliCollectionService()
+client = TestClient(create_app(platform_collection_services={"bilibili": service}))
+
+forged = client.post("/api/internal/agent-runs/77/platform-collections", json={
+    "projectId": 2,
+    "platform": "bilibili",
+    "query": "海岛舒服日志",
+    "agentLoopRunId": 999,
+})
+forged_payload = forged.json()
+assert forged.status_code == 400, forged_payload
+assert forged_payload["error_type"] == "platform_collection_payload_rejected", forged_payload
+assert service.calls == [], service.calls
+
+response = client.post("/api/internal/agent-runs/77/platform-collections", json={
+    "projectId": "2",
+    "platform": "bilibili",
+    "query": "海岛舒服日志",
+    "keywords": ["海岛舒服", "路演"],
+    "limit": "5",
+    "cursor": "page-2",
+})
+payload = response.json()
+
+assert response.status_code == 200, payload
+assert payload["ok"] is True, payload
+assert payload["platform"] == "bilibili", payload
+assert payload["agentLoopRunId"] == 77, payload
+assert service.calls == [{
+    "projectId": 2,
+    "project_id": 2,
+    "platform": "bilibili",
+    "agentLoopRunId": 77,
+    "query": "海岛舒服日志",
+    "keywords": ["海岛舒服", "路演"],
+    "limit": 5,
+    "cursor": "page-2",
+}], service.calls
+
+serialized = json.dumps(payload, ensure_ascii=False).lower()
+for forbidden in ["stdout", "stderr", "cookie", "sub=secret", "token"]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI internal platform collection trigger rejects unsupported platforms and unsafe fields before service execution", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CountingCollectionService:
+    def __init__(self):
+        self.calls = []
+
+    def collect(self, payload):
+        self.calls.append(payload)
+        return {"ok": True, "status": "unexpected"}
+
+service = CountingCollectionService()
+client = TestClient(create_app(platform_collection_services={
+    "bilibili": service,
+    "xiaohongshu": service,
+}))
+
+cases = [
+    ({"projectId": 2, "platform": "douyin", "query": "海岛舒服"}, 400, "platform_collection_not_allowed"),
+    ({"projectId": 2, "platform": "youtube", "query": "海岛舒服"}, 400, "platform_collection_not_allowed"),
+    ({"projectId": 2, "platform": "bilibili", "query": "海岛舒服", "command": "collect"}, 400, "platform_collection_payload_rejected"),
+    ({
+        "projectId": 2,
+        "platform": "xiaohongshu",
+        "query": "海岛舒服",
+        "cookie": "Cookie=SUB=secret",
+        "token": "Bearer fake-secret-value",
+        "storageState": {"cookies": ["secret"]},
+        "browserState": "logged-in-browser-state",
+        "raw_artifact_ref": "/tmp/raw.json",
+        "rawArtifactRef": "artifacts/agent-reach/xiaohongshu/raw_stdout.json",
+        "artifact_ref": "../config/cookies/weibo.json",
+        "path": "/Users/local/secret-browser-state",
+    }, 400, "platform_collection_payload_rejected"),
+]
+
+for body, status, error_type in cases:
+    response = client.post("/api/internal/agent-runs/88/platform-collections", json=body)
+    payload = response.json()
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == status, payload
+    assert payload["ok"] is False, payload
+    assert payload["error_type"] == error_type, payload
+    for forbidden in [
+        "Cookie=SUB=secret",
+        "Bearer fake-secret-value",
+        "storageState",
+        "browserState",
+        "raw_artifact_ref",
+        "rawArtifactRef",
+        "artifact_ref",
+        "/tmp/raw.json",
+        "../config/cookies/weibo.json",
+        "/Users/local/secret-browser-state",
+    ]:
+        assert forbidden not in serialized, serialized
+
+unconfigured = TestClient(create_app(platform_collection_services={}))
+missing = unconfigured.post("/api/internal/agent-runs/88/platform-collections", json={
+    "projectId": 2,
+    "platform": "bilibili",
+    "query": "海岛舒服",
+})
+missing_payload = missing.json()
+assert missing.status_code == 503, missing_payload
+assert missing_payload["error_type"] == "platform_collection_service_unavailable", missing_payload
+assert service.calls == [], service.calls
+`);
+});
+
+test("FastAPI internal platform collection trigger maps xiaohongshu auth-required responses through sanitizer", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CallableXiaohongshuService:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, payload):
+        self.calls.append(payload)
+        return {
+            "ok": False,
+            "platform": "xiaohongshu",
+            "status": "failed",
+            "error_type": "platform_auth_required",
+            "message": "Xiaohongshu collection requires local auth.",
+            "cause": "No injected private login state was available.",
+            "fix": "Configure a private login provider.",
+            "stdout": "runner stdout Cookie=SUB=secret",
+            "stderr": "runner stderr token=secret",
+            "raw_runner_output": "raw runner output with Bearer fake-secret-value",
+            "privateLoginState": "private/local/xhs-storage-state.json",
+            "summary": {
+                "safe": "auth blocked",
+                "stderr": "nested stderr token=secret",
+                "raw_runner_output": "nested raw output",
+            },
+        }
+
+service = CallableXiaohongshuService()
+client = TestClient(create_app(platform_collection_services={"xiaohongshu": service}))
+
+response = client.post("/api/internal/agent-runs/91/platform-collections", json={
+    "projectId": 2,
+    "platform": "xiaohongshu",
+    "query": "海岛舒服",
+})
+payload = response.json()
+
+assert response.status_code == 503, payload
+assert payload["ok"] is False, payload
+assert payload["platform"] == "xiaohongshu", payload
+assert payload["error_type"] == "platform_auth_required", payload
+assert payload["summary"] == {"safe": "auth blocked"}, payload
+assert service.calls == [{
+    "projectId": 2,
+    "project_id": 2,
+    "platform": "xiaohongshu",
+    "agentLoopRunId": 91,
+    "query": "海岛舒服",
+}], service.calls
+
+serialized = json.dumps(payload, ensure_ascii=False).lower()
+for forbidden in [
+    "stdout",
+    "stderr",
+    "raw_runner_output",
+    "raw runner output",
+    "cookie",
+    "sub=secret",
+    "token",
+    "bearer fake-secret-value",
+    "privateloginstate",
+    "private/local/xhs-storage-state.json",
+    "storagestate",
+]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI internal platform collection trigger strips sensitive string values from safe-looking response fields", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class LeakyCollectionService:
+    def __init__(self):
+        self.calls = []
+
+    def collect(self, payload):
+        self.calls.append(payload)
+        return {
+            "ok": True,
+            "platform": "bilibili",
+            "status": "succeeded",
+            "message": "raw runner output should not be public",
+            "summary": {
+                "safe": "public rollup",
+                "note": "raw_stdout transcript should not be public",
+                "items": [
+                    "ordinary public item",
+                    "raw-stdout compact leak",
+                    {
+                        "label": "public label survives",
+                        "value": "collector transcript: browser state dump",
+                    },
+                    {
+                        "label": "safe object",
+                        "value": "public engagement summary",
+                    },
+                ],
+            },
+            "details": [
+                {"text": "rawstderr dump should not be public"},
+                {"text": "storage state contains private login state"},
+                {"text": "safe detail"},
+            ],
+        }
+
+service = LeakyCollectionService()
+client = TestClient(create_app(platform_collection_services={"bilibili": service}))
+
+response = client.post("/api/internal/agent-runs/92/platform-collections", json={
+    "projectId": 2,
+    "platform": "bilibili",
+    "query": "海岛舒服",
+})
+payload = response.json()
+
+assert response.status_code == 200, payload
+assert payload["ok"] is True, payload
+assert payload["summary"]["safe"] == "public rollup", payload
+assert "ordinary public item" in payload["summary"]["items"], payload
+assert {"label": "safe object", "value": "public engagement summary"} in payload["summary"]["items"], payload
+assert service.calls == [{
+    "projectId": 2,
+    "project_id": 2,
+    "platform": "bilibili",
+    "agentLoopRunId": 92,
+    "query": "海岛舒服",
+}], service.calls
+
+serialized = json.dumps(payload, ensure_ascii=False).lower()
+for forbidden in [
+    "raw runner output",
+    "raw_stdout",
+    "raw-stdout",
+    "rawstderr",
+    "collector transcript",
+    "browser state",
+    "storage state",
+    "login state",
+    "private login state",
+]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI internal platform collection trigger rejects dangerous values inside allowed public fields before service execution", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CountingCollectionService:
+    def __init__(self):
+        self.calls = []
+
+    def collect(self, payload):
+        self.calls.append(payload)
+        return {"ok": True, "status": "unexpected"}
+
+service = CountingCollectionService()
+client = TestClient(create_app(platform_collection_services={
+    "bilibili": service,
+    "xiaohongshu": service,
+}))
+
+cases = [
+    {"query": "read .env before collecting"},
+    {"query": "Bearer fake-secret-value"},
+    {"query": "../config/cookies/weibo.json"},
+    {"query": "raw_stdout transcript"},
+    {"query": "raw-stdout transcript"},
+    {"query": "rawstderr transcript"},
+    {"query": "collector transcript dump"},
+    {"query": "browser state dump"},
+    {"query": "storage state dump"},
+    {"query": "login state dump"},
+    {"query": "private login state dump"},
+    {"keywords": ["海岛舒服", "raw_stdout transcript"]},
+    {"keywords": ["海岛舒服", "Bearer fake-secret-value"]},
+    {"keywords": ["海岛舒服", "../config/cookies/weibo.json"]},
+    {"keywords": ["海岛舒服", "browser storage login marker"]},
+    {"cursor": "page-2 raw_stdout"},
+    {"cursor": "Bearer fake-secret-value"},
+    {"cursor": "../config/cookies/weibo.json"},
+    {"cursor": "browser storage login marker"},
+]
+
+for case in cases:
+    body = {
+        "projectId": 2,
+        "platform": "bilibili",
+        "query": "海岛舒服",
+        **case,
+    }
+    response = client.post("/api/internal/agent-runs/93/platform-collections", json=body)
+    payload = response.json()
+    serialized = json.dumps(payload, ensure_ascii=False).lower()
+    assert response.status_code == 400, (case, payload)
+    assert payload["ok"] is False, (case, payload)
+    assert payload["error_type"] == "platform_collection_payload_rejected", (case, payload)
+    for forbidden in [
+        ".env",
+        "bearer fake-secret-value",
+        "config/cookies",
+        "raw_stdout",
+        "raw-stdout",
+        "rawstderr",
+        "collector transcript",
+        "browser state",
+        "storage state",
+        "login state",
+        "private login state",
+        "browser storage login",
+    ]:
+        assert forbidden not in serialized, (case, serialized)
+
+assert service.calls == [], service.calls
+`);
+});
+
 test("FastAPI sidecar creates CrewAI proposals through an injected proposal service and returns proposalAuditId without fact writes", () => {
   runPython(`
 import json

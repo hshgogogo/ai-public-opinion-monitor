@@ -22,6 +22,49 @@ from .legacy_worker import (
 PUBLIC_AGENT_LOOP_MODES = {"manual", "scheduled", "after_collection"}
 PUBLIC_CREWAI_PROPOSAL_FIELDS = {"projectId", "stage", "evidenceIds", "knowledgeQuery"}
 PUBLIC_JUDGE_REVIEW_FIELDS = {"projectId", "proposalAuditId", "stepRunId", "maxAttempts", "maxRetries", "fixtureOutputs"}
+PUBLIC_PLATFORM_COLLECTION_FIELDS = {"projectId", "platform", "query", "keywords", "limit", "cursor"}
+ALLOWED_PLATFORM_COLLECTIONS = {"bilibili", "xiaohongshu"}
+PLATFORM_COLLECTION_PRIVATE_RESPONSE_KEYS = {
+    "browser_state",
+    "browser_state_ref",
+    "browserstate",
+    "browserstateref",
+    "login_state",
+    "loginstate",
+    "path",
+    "private",
+    "private_login_state",
+    "privateloginstate",
+    "raw_output",
+    "raw_runner_output",
+    "raw_stderr",
+    "raw_stdout",
+    "rawoutput",
+    "rawrunneroutput",
+    "rawstderr",
+    "rawstdout",
+    "storage_state",
+    "storage_state_ref",
+    "storagestate",
+    "storagestateref",
+    "stderr",
+    "stdout",
+}
+PLATFORM_COLLECTION_PRIVATE_VALUE_MARKERS = (
+    "raw runner output",
+    "raw_stdout",
+    "raw-stdout",
+    "rawstderr",
+    "collector transcript",
+    "collector_transcript",
+    "browser state",
+    "storage state",
+    "login state",
+    "private login state",
+)
+PLATFORM_COLLECTION_PRIVATE_VALUE_COMPACT_MARKERS = tuple(
+    re.sub(r"[^a-z0-9]", "", marker) for marker in PLATFORM_COLLECTION_PRIVATE_VALUE_MARKERS
+)
 CREWAI_DANGEROUS_MARKERS = (
     ".env",
     "api_key",
@@ -50,10 +93,11 @@ JUDGE_DANGEROUS_KEYS = {
 CREWAI_EVIDENCE_ID_PATTERN = re.compile(r"^(comment|post|target|event|action|memory|sentiment):[1-9][0-9]*$")
 
 
-def create_app(legacy_adapter=None, crewai_proposal_service=None, judge_review_service=None):
+def create_app(legacy_adapter=None, crewai_proposal_service=None, judge_review_service=None, platform_collection_services=None):
     adapter = legacy_adapter or LegacyWorkerAdapter()
     proposal_service = crewai_proposal_service or CrewAIProposalService()
     judge_service = judge_review_service or JudgeReviewService()
+    collection_services = platform_collection_services or {}
     api = FastAPI(title="Yuqing FastAPI Sidecar", version="0.1.0")
 
     @api.get("/health")
@@ -161,6 +205,33 @@ def create_app(legacy_adapter=None, crewai_proposal_service=None, judge_review_s
         service_payload = build_judge_review_service_payload(payload)
         result = sanitize_for_public(judge_service.create_review(parsed_id, service_payload))
         return JSONResponse(result, status_code=status_for(result))
+
+    @api.post("/api/internal/agent-runs/{run_id}/platform-collections")
+    async def trigger_platform_collection(run_id: str, request: Request):
+        parsed_id = positive_integer(run_id)
+        if parsed_id is None:
+            return json_error(agent_loop_error(
+                "invalid_agent_run_id",
+                "Agent Loop run id is invalid.",
+                "The path id must be a positive integer.",
+                "Retry with an agentLoopRunId returned by POST /api/weibo/agent-loop/run.",
+            ), 400)
+
+        payload, error = await read_json_object(request, "invalid_platform_collection_payload", "Platform collection payload")
+        if error:
+            return json_error(error, 400)
+
+        validation_error = validate_platform_collection_request_payload(payload)
+        if validation_error:
+            return json_error(validation_error, status_for(validation_error))
+
+        service_payload = build_platform_collection_service_payload(parsed_id, payload)
+        service = collection_services.get(service_payload["platform"])
+        result = call_platform_collection_service(service, service_payload)
+        safe_result = sanitize_platform_collection_public(result)
+        if not is_plain_object(safe_result):
+            safe_result = platform_collection_service_unavailable_error()
+        return JSONResponse(safe_result, status_code=status_for(safe_result))
 
     @api.post("/api/tools/legacy-worker/{command}")
     async def legacy_worker_tool(command: str, request: Request):
@@ -518,6 +589,200 @@ def build_judge_review_service_payload(payload):
     return service_payload
 
 
+def validate_platform_collection_request_payload(payload):
+    unknown_fields = set(payload.keys()) - PUBLIC_PLATFORM_COLLECTION_FIELDS
+    if unknown_fields:
+        return platform_collection_payload_rejected_error()
+
+    if contains_dangerous_platform_collection_value(payload):
+        return platform_collection_payload_rejected_error()
+
+    project_id = optional_positive_integer(payload.get("projectId"))
+    if project_id is None:
+        return agent_loop_error(
+            "invalid_project_id",
+            "Platform collection requires a valid projectId.",
+            "The internal payload projectId must be a positive integer.",
+            "Pass a positive integer projectId from the existing Agent Loop run.",
+        )
+
+    platform = normalize_platform_collection(payload.get("platform"))
+    if platform not in ALLOWED_PLATFORM_COLLECTIONS:
+        return platform_collection_not_allowed_error()
+
+    if "query" in payload and (not isinstance(payload.get("query"), str) or not payload.get("query").strip()):
+        return platform_collection_payload_rejected_error()
+
+    if "keywords" in payload:
+        keywords = payload.get("keywords")
+        if not isinstance(keywords, list) or not all(isinstance(item, str) and item.strip() for item in keywords):
+            return platform_collection_payload_rejected_error()
+
+    if "limit" in payload and optional_positive_integer(payload.get("limit")) is None:
+        return platform_collection_payload_rejected_error()
+
+    if "cursor" in payload and not isinstance(payload.get("cursor"), str):
+        return platform_collection_payload_rejected_error()
+    return None
+
+
+def build_platform_collection_service_payload(run_id, payload):
+    project_id = optional_positive_integer(payload.get("projectId"))
+    platform = normalize_platform_collection(payload.get("platform"))
+    service_payload = {
+        "projectId": project_id,
+        "project_id": project_id,
+        "platform": platform,
+        "agentLoopRunId": run_id,
+    }
+
+    query = payload.get("query")
+    if isinstance(query, str) and query.strip():
+        service_payload["query"] = query.strip()
+
+    keywords = payload.get("keywords")
+    if isinstance(keywords, list):
+        service_payload["keywords"] = [item.strip() for item in keywords if isinstance(item, str) and item.strip()]
+
+    limit = optional_positive_integer(payload.get("limit"))
+    if limit is not None:
+        service_payload["limit"] = limit
+
+    cursor = payload.get("cursor")
+    if isinstance(cursor, str) and cursor.strip():
+        service_payload["cursor"] = cursor.strip()
+    return service_payload
+
+
+def call_platform_collection_service(service, payload):
+    if service is None:
+        return platform_collection_service_unavailable_error()
+
+    try:
+        if hasattr(service, "collect") and callable(service.collect):
+            result = service.collect(payload)
+        elif callable(service):
+            result = service(payload)
+        else:
+            return platform_collection_service_unavailable_error()
+    except Exception:
+        return platform_collection_service_unavailable_error()
+
+    if not is_plain_object(result):
+        return platform_collection_service_unavailable_error()
+    return result
+
+
+def normalize_platform_collection(value):
+    if not isinstance(value, str):
+        return None
+    return value.strip().lower()
+
+
+def contains_dangerous_platform_collection_value(value):
+    if isinstance(value, dict):
+        return any(contains_dangerous_platform_collection_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_dangerous_platform_collection_value(item) for item in value)
+    if isinstance(value, str):
+        return contains_platform_collection_private_string(value)
+    return False
+
+
+def sanitize_platform_collection_public(value):
+    return strip_platform_collection_private_response(sanitize_for_public(value))
+
+
+def strip_platform_collection_private_response(value):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if is_platform_collection_private_response_key(key):
+                continue
+            sanitized_item = strip_platform_collection_private_response(item)
+            if sanitized_item is not None:
+                result[key] = sanitized_item
+        return result
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            sanitized_item = strip_platform_collection_private_response(item)
+            if sanitized_item is not None:
+                result.append(sanitized_item)
+        return result
+    if isinstance(value, str) and contains_platform_collection_private_string(value):
+        return None
+    return value
+
+
+def is_platform_collection_private_response_key(key):
+    normalized = normalize_public_key(key)
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    if normalized in PLATFORM_COLLECTION_PRIVATE_RESPONSE_KEYS or compact in PLATFORM_COLLECTION_PRIVATE_RESPONSE_KEYS:
+        return True
+    if "stdout" in compact or "stderr" in compact:
+        return True
+    if "private" in compact or "loginstate" in compact:
+        return True
+    return "raw" in compact and ("output" in compact or "runner" in compact)
+
+
+def normalize_public_key(key):
+    text = str(key).replace("-", "_").replace(" ", "_")
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+    return re.sub(r"_+", "_", text).lower()
+
+
+def contains_platform_collection_private_string(value):
+    if contains_dangerous_crewai_value(value):
+        return True
+
+    lowered = str(value).lower()
+    compact = re.sub(r"[^a-z0-9]", "", lowered)
+    if any(marker in lowered for marker in PLATFORM_COLLECTION_PRIVATE_VALUE_MARKERS):
+        return True
+    if any(marker and marker in compact for marker in PLATFORM_COLLECTION_PRIVATE_VALUE_COMPACT_MARKERS):
+        return True
+    if "raw" in compact and ("stdout" in compact or "stderr" in compact):
+        return True
+    if "raw" in compact and "runner" in compact and "output" in compact:
+        return True
+    if "collector" in compact and "transcript" in compact:
+        return True
+    if "browser" in compact and ("state" in compact or "storage" in compact or "login" in compact):
+        return True
+    if "storage" in compact and "state" in compact:
+        return True
+    return "login" in compact and "state" in compact
+
+
+def platform_collection_payload_rejected_error():
+    return agent_loop_error(
+        "platform_collection_payload_rejected",
+        "Platform collection payload contains unsupported public fields or unsafe values.",
+        "The internal payload did not match the allowlisted collection trigger contract.",
+        "Only pass projectId, platform, query, keywords, limit, and cursor.",
+    )
+
+
+def platform_collection_not_allowed_error():
+    return agent_loop_error(
+        "platform_collection_not_allowed",
+        "Platform collection is not allowlisted.",
+        "The requested platform is not enabled for this internal collection trigger.",
+        "Use bilibili or xiaohongshu; keep douyin collection blocked until its safe contract is implemented.",
+    )
+
+
+def platform_collection_service_unavailable_error():
+    return agent_loop_error(
+        "platform_collection_service_unavailable",
+        "Platform collection service is not configured.",
+        "No injected collection service is available for this platform.",
+        "Inject a FastAPI Harness collection service for the requested allowlisted platform.",
+    )
+
+
 def invalid_judge_review_payload_error(message, cause, fix):
     return agent_loop_error("invalid_judge_review_payload", message, cause, fix)
 
@@ -640,10 +905,15 @@ def status_for(payload):
         "invalid_project_id",
         "invalid_agent_run_id",
         "invalid_legacy_worker_payload",
+        "invalid_platform_collection_payload",
         "legacy_worker_command_not_allowed",
+        "platform_collection_not_allowed",
+        "platform_collection_payload_rejected",
         "project_not_found",
     }:
         return 400
+    if error_type in {"platform_auth_required", "platform_collection_service_unavailable"}:
+        return 503
     if error_type == "legacy_worker_failed":
         return 502
     if isinstance(payload, dict) and payload.get("ok") is False:
