@@ -15,8 +15,8 @@
 
 ## 3. B站 First Slice
 
-- [ ] 3.1 Write B站 search/detail fixture tests for content item normalization.
-- [ ] 3.2 Implement B站 normalizer for title/text/author/url/metrics/published time/raw artifact refs.
+- [x] 3.1 Write B站 search/detail fixture tests for content item normalization.
+- [x] 3.2 Implement B站 normalizer for title/text/author/url/metrics/published time/raw artifact refs.
 - [ ] 3.3 Write persistence tests for B站 source accounts, posts/items, comments or evidence links.
 - [ ] 3.4 Implement idempotent persistence with project-scoped platform/external ID keys.
 - [ ] 3.5 Add Agent Loop step status for B站 collection success/partial/failure.

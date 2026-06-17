@@ -1,0 +1,42 @@
+{
+  "query": "海岛舒服日志 刘昊然 李兰迪",
+  "items": [
+    {
+      "bvid": "BV1HDLOG0001",
+      "title": "海岛舒服日志官宣反应混剪",
+      "description": "UP主整理官宣后评论区对刘昊然和李兰迪组合的讨论。",
+      "url": "https://www.bilibili.com/video/BV1HDLOG0001",
+      "published_at": "2026-05-20T10:20:00+08:00",
+      "author": {
+        "mid": "up1001",
+        "name": "海风剪辑室",
+        "url": "https://space.bilibili.com/1001"
+      },
+      "stat": {
+        "view": 128000,
+        "like": 6200,
+        "reply": 860,
+        "share": 470
+      },
+      "private_runner_note": "synthetic internal collector note not public"
+    },
+    {
+      "bvid": "BV1HDLOG0002",
+      "title": "李兰迪海岛舒服日志角色猜想",
+      "description": "视频正文记录站内对角色关系和取景氛围的二创反馈。",
+      "url": "https://www.bilibili.com/video/BV1HDLOG0002",
+      "published_at": "2026-05-21T16:05:00+08:00",
+      "author": {
+        "mid": "up1002",
+        "name": "剧集观察站",
+        "url": "https://space.bilibili.com/1002"
+      },
+      "stat": {
+        "view": 83000,
+        "like": 4100,
+        "reply": 390,
+        "share": 180
+      }
+    }
+  ]
+}
