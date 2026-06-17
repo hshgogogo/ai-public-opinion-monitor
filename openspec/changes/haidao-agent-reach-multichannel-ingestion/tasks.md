@@ -19,7 +19,7 @@
 - [x] 3.2 Implement B站 normalizer for title/text/author/url/metrics/published time/raw artifact refs.
 - [x] 3.3 Write persistence tests for B站 source accounts, posts/items, comments or evidence links.
 - [x] 3.4 Implement idempotent persistence with project-scoped platform/external ID keys.
-- [ ] 3.5 Add Agent Loop step status for B站 collection success/partial/failure.
+- [x] 3.5 Add Agent Loop step status for B站 collection success/partial/failure.
 
 ## 4. 小红书 Second Slice
 

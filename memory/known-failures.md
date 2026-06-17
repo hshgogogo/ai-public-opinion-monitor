@@ -40,3 +40,20 @@ Apply:
 
 Verification:
 - 只有当旧实现下失败集中在新增断言或缺失接口上，才把它计为有效 RED；环境/依赖失败只能作为无效红测重跑。
+
+## Adapter step output 只做递归脱敏但不白名单
+
+When:
+- 外部 runner、adapter 或 collection service 要把 `summary`、`output_json`、step audit payload 暴露给 public response 或 `agent_step_runs`。
+
+Symptom:
+- 顶层 stdout/stderr 被移除了，但 `summary.stdout`、`summary.raw_stdout`、未知诊断字段或 caller-controlled command 仍可能进入 step output。
+
+Root cause:
+- 递归 sanitizer 只能识别已知 key/value marker；外部 runner summary 是开放形状，不能只靠 sanitizer 当安全边界。
+
+Apply:
+- Step/public output 必须用字段白名单；runner command 必须 service-owned allowlist，不能从 public payload 透传；写 `agent_step_runs` 前必须校验 run/project ownership。
+
+Verification:
+- 测试同时覆盖 `summary.stdout`、caller `payload.command`、missing/cross-project `agentLoopRunId`、source-account-only/zero durable content partial。
