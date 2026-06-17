@@ -344,3 +344,65 @@ TDD / review 证据：
 - 5.3 normalizer/persistence 未做，避免固化不稳定抖音 schema。
 - 5.4 真实抖音 validation blocked/unverified 还需要独立 evidence report 后再决定勾选。
 - 工作区存在非本切片范围的 `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 脏改，提交时必须选择性 staging 排除。
+
+### 2026-06-18 Agent 6
+
+日期：2026-06-18
+
+Agent：Heisenberg（explorer，019ed6ab-2ad7-70a3-82bf-0302f190a711）
+
+任务：抖音 5.2/5.3/5.4 路线判断与真实验证 blocked evidence。
+
+状态：5.4 blocked/unverified evidence 已记录；5.2/5.3 保持未完成。
+
+结论：
+
+- 5.2 前置未满足。`workers/collectors/douyin.py` 里的 `normalize_video()` 是旧 collector helper，只返回 `external_id`、`url`、`author_name`、`title`、`content`、`keyword`、`engagement`、`comments`、`raw_json`。它不是稳定的 Agent-Reach `search/detail` runner contract。
+- 当前没有安全、脱敏、已提交的抖音 `search/detail` runner schema，也没有 `test/fixtures/douyin-*.json`、`test/douyin-normalizer.test.js`、`app/douyin_normalizer.py`。
+- 当前 `AgentReachAdapter` 仅允许 `douyin doctor/capability` fake-runner contract；`douyin search/detail/collect` 明确 fail-closed，返回 `agent_reach_command_not_allowed` 且不执行 runner。
+- 因为真实抖音访问可能需要登录态、Cookie、浏览器 state 或不稳定上游 runner，自动 agent loop 不读取真实凭据、不触发真实平台，也不把真实验证伪装为完成。
+
+Blocked / unverified evidence：
+
+```json
+{
+  "platform": "douyin",
+  "real_douyin_collection": "blocked",
+  "real_douyin_validation": "unverified",
+  "blocked_reason": "high_risk_login_state_or_unstable_runner_contract",
+  "safe_contract_available": ["doctor", "capability"],
+  "blocked_commands": ["search", "detail", "collect"],
+  "no_real_platform_call": true,
+  "no_env_or_cookie_read": true,
+  "no_browser_state_read": true,
+  "no_douyin_fixture_schema_committed": true,
+  "no_douyin_normalizer_or_persistence": true
+}
+```
+
+为什么不做 5.2：
+
+- OpenSpec 5.2 明确要求“only after the upstream runner contract is clear”。
+- 现有旧 collector helper 不是上游 Agent-Reach runner schema，不包含 Harness evidence 所需字段，也不经过平台 artifact allowlist。
+- 若在此时自造 `douyin_normalizer` 和 fixtures，会把不稳定 schema 固化为事实合同。
+
+为什么不做 5.3：
+
+- 5.3 前置为 local/fake runner contract stable。
+- 5.2 尚未完成，没有抖音 normalized evidence payload。
+- 直接做 persistence 会把未确认字段写入现有事实表语义，增加回滚和数据污染风险。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/agent-reach-adapter.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`
+- `openspec validate haidao-agent-reach-multichannel-ingestion --strict`
+- `git diff --check`
+- `npm run agent:guard`
+
+遗留问题：
+
+- 5.2 search/detail fixture tests 需要等待安全、脱敏、已提交的上游 runner schema。
+- 5.3 normalizer/persistence 需要等待 5.2 完成。
+- 后续如果用户明确提供安全 runner schema 或人工确认真实登录态边界，必须重新开启一个小切片，不得复用 blocked evidence 直接放开真实采集。
+- P3：`workers/enterprise_worker.py` 仍注册 dormant `douyin.collect`，而 `workers/collectors/douyin.py` 会在失败前读取 `cookie_file`；当前 public legacy collect path 已禁用，不阻塞 5.4，但后续 6.x 或安全清理切片应移除或 hard-block 这条 dormant 路径。
