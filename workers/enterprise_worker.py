@@ -18,6 +18,7 @@ if len(sys.argv) > 1 and sys.argv[1] in {"weibo-knowledge-seed", "weibo-knowledg
     os.environ["YUQING_SKIP_ENV_FILE"] = "1"
 
 from workers import db
+from workers.agents.judge_agent import judge_evidence_citation_detail, judge_evidence_citation_details
 from workers.agents.sentiment_agent import analyze_comment
 from workers.analyzer_core import fallback_analysis
 from workers.collectors import douyin, weibo, xiaohongshu
@@ -8065,6 +8066,7 @@ def answer_weibo_question(records, question):
             "inferences": [],
             "recommendations": [],
             "citations": [],
+            "citationDetails": [],
             "knowledge_references": [],
             "error": standard_answer_error("insufficient_evidence", "No stored Weibo evidence is available.", "Run Weibo discovery and analysis first."),
         }
@@ -8080,6 +8082,7 @@ def answer_weibo_question(records, question):
                 "inferences": ["不能把待确认建议或未回测动作当作已验证效果。"],
                 "recommendations": ["先确认或补充现实动作时间，再采集动作后的评论窗口。"],
                 "citations": citations,
+                "citationDetails": public_citation_details(citations),
                 "preference_context": preference_context,
                 "knowledge_references": [],
                 "error": standard_answer_error("insufficient_backtest_data", "No confirmed action backtest exists.", "Confirm/log an action and collect post-action windows."),
@@ -8119,6 +8122,7 @@ def answer_weibo_question(records, question):
         "preference_context": preference_context,
         "knowledge_references": knowledge_references,
         "citations": citations,
+        "citationDetails": public_citation_details(citations),
         "error": None,
     }
 
@@ -8132,13 +8136,37 @@ def answer_real_evidence_ids(answer):
 
 
 def is_real_evidence_reference(value):
+    return is_legacy_real_evidence_reference(value) or judge_evidence_citation_detail(value) is not None
+
+
+def is_legacy_real_evidence_reference(value):
     return bool(re.match(r"^(comment|event|action|memory)-[1-9]\d*$", str(value or "")))
+
+
+def public_citation_details(evidence_ids):
+    return [
+        {
+            "id": item["id"],
+            "platform": item["platform"],
+            "platformLabel": item["platform_label"],
+            "sourceType": item["source_type"],
+            "label": item["label"],
+        }
+        for item in judge_evidence_citation_details(evidence_ids)
+    ]
+
+
+def citation_markdown_label(evidence_id):
+    detail = judge_evidence_citation_detail(evidence_id)
+    if not detail:
+        return str(evidence_id)
+    return f"{detail['label']} {detail['id']}"
 
 
 def bot_knowledge_references(records, question, evidence_ids):
     project_id = records.get("project_id")
     knowledge_rows = records.get("knowledge_cards") or []
-    real_evidence_ids = [item for item in unique_evidence_ids(evidence_ids or []) if is_real_evidence_reference(item)]
+    real_evidence_ids = [item for item in unique_evidence_ids(evidence_ids or []) if is_legacy_real_evidence_reference(item)]
     if not project_id or not knowledge_rows or not real_evidence_ids:
         return []
     evidence_check = validate_knowledge_evidence(project_id, real_evidence_ids, True)
@@ -8239,7 +8267,7 @@ def daily_report(records, now):
         f"Events: {len(event_ids)}",
         f"Actions: {len(action_ids)}",
         f"Comments: {len(comment_ids)}",
-        "Evidence: " + (", ".join(evidence_ids) if evidence_ids else "insufficient"),
+        "Evidence: " + (", ".join(citation_markdown_label(item) for item in evidence_ids) if evidence_ids else "insufficient"),
     ])
     return {
         "markdown": markdown,
@@ -8250,6 +8278,7 @@ def daily_report(records, now):
             "backtests": len(records.get("backtests", [])),
         },
         "evidence_ids": evidence_ids,
+        "citationDetails": public_citation_details(evidence_ids),
     }
 
 

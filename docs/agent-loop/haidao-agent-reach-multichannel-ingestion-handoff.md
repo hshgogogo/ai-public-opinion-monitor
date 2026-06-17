@@ -540,3 +540,85 @@ TDD / review 证据：
 - 真实平台 evidence summary repository 尚未端到端接入 CrewAI runtime；当前完成的是 CrewAI 只能读取 normalized/public summary 的安全边界。后续 6.3 platform citation/summary integration 可继续接真实 lookup。
 - `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有本切片前存在的无关格式化脏改，提交必须选择性 staging 排除。
 - 本切片不做 Judge/Report citation 展示、不放开 FastAPI public platform evidence grammar、不做抖音 search/detail/normalizer。
+
+### 2026-06-18 Agent 9
+
+日期：2026-06-18
+
+Agents：
+
+- Sartre（explorer，019ed6ff-4569-7680-9bc2-41d96087646b）
+- Schrodinger（worker，019ed707-151b-7e53-aa55-8efbbaffa722）
+- Anscombe（reviewer，019ed712-3161-7231-89c6-dc97d88584df）
+- Hume（worker follow-up，019ed718-94ed-7e91-af37-df5382a3d709）
+- Dewey（worker follow-up，019ed723-19a7-7443-befe-033fb349d3b6）
+
+任务：Judge/Report platform evidence citations 6.3
+
+状态：6.3 已完成并通过最终复审；6.4/7.x 保持未完成。
+
+改动文件：
+
+- `workers/agents/judge_agent.py`
+- `app/judge_review_service.py`
+- `workers/enterprise_worker.py`
+- `app/bilibili_persistence.py`
+- `test/fastapi-sidecar.test.js`
+- `test/weibo-memory-report.test.js`
+- `test/bilibili-persistence.test.js`
+- `docs/agent-loop/subagent-events.jsonl`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+- `openspec/changes/haidao-agent-reach-multichannel-ingestion/tasks.md`
+
+实现语义：
+
+- Judge 支持同项目平台证据 ID：`bilibili:project:<id>:item:<bvid>`、`bilibili:project:<id>:comment:<rpid>`、`bilibili:project:<id>:text:<bvid>:transcript:<lang>`、`bilibili:project:<id>:text:<bvid>:body`、`xiaohongshu:project:<id>:item:<note>`、`xiaohongshu:project:<id>:comment:<comment>`。
+- Judge `feedback_json.citation_details` 输出平台标签：B站视频、B站评论、B站字幕、B站正文、小红书笔记、小红书评论。
+- MySQL Judge evidence repository 通过 `social_posts` / `social_comments` 的 project/platform/external_id 校验 item/comment 归属；B站 text 还要求同项目 B站 `social_posts.raw_json.evidence_ids` 包含完整 text evidence ID。
+- Report/Q&A 新增 `citationDetails`，旧 `citations` 字符串数组保持兼容；日报 Markdown 显示平台标签。
+- B站 persistence 的内存和 MySQL duplicate upsert 路径合并 existing/incoming `raw_json.evidence_ids`，避免 detail->search 或 search->detail 顺序丢失 text citation membership。
+
+安全边界：
+
+- 不放宽 FastAPI public proposal `evidenceIds` grammar。
+- 不新增 CrewAI Agent-Reach 或 platform collection tool allowlist。
+- 不支持 Douyin citation，不支持小红书 text citation。
+- 不读取真实凭据、`.env`、Cookie/token、`config/cookies/*`、browser state，不调用真实平台或真实 Agent-Reach。
+- 不新增 migration 或事实表 schema。
+
+TDD / review 证据：
+
+- RED 1：旧 Judge 把平台 evidence IDs 判为 `invalid_evidence_id_format`，Report 缺 `citationDetails`。
+- GREEN 1：Judge 支持 B站/小红书 item/comment citation，Report/Q&A 输出平台标签并保留旧 citations。
+- Anscombe 初审 P2：B站 normalizer 已产生字幕/body text evidence IDs，但 Judge/MySQL lookup 只支持 item/comment。
+- RED 2：B站 text IDs、MySQL text lookup、Report B站字幕/正文标签缺失。
+- GREEN 2：支持 B站 text transcript/body citation，MySQL lookup 要求同项目 B站 post raw_json evidence_ids membership；Douyin text 和小红书 text 仍拒绝。
+- Anscombe 复审 P2：B站 duplicate upsert 覆盖 `raw_json.evidence_ids`，detail->search 顺序会丢失 text citation。
+- RED 3：B站 persistence detail->search 丢 evidence IDs，MySQL probe 命中旧 `raw_json=VALUES(raw_json)`。
+- GREEN 3：内存 repository 合并 evidence IDs；MySQL duplicate update 使用 `JSON_SET` + `JSON_MERGE_PRESERVE` 合并 evidence IDs。
+- Anscombe 最终复审 APPROVED：无 P0/P1/P2；P3 为 `JSON_MERGE_PRESERVE` 可能保留重复数组项，但 membership lookup 不受影响。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/bilibili-persistence.test.js test/fastapi-sidecar.test.js test/weibo-memory-report.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`
+- `openspec validate haidao-agent-reach-multichannel-ingestion --strict`
+- `git diff --check`
+- `npm run agent:guard`
+- `node -e` JSONL parse check for `docs/agent-loop/subagent-events.jsonl`
+
+验证结果：
+
+- 定向 platform citation / persistence / report：44/44 pass。
+- 全量 `npm test`：241 tests，189 pass / 52 skipped / 0 fail。
+- OpenSpec strict valid。
+- `git diff --check` pass。
+- `npm run agent:guard` pass。
+- JSONL parse pass。
+
+遗留问题：
+
+- 6.4 旧微博路径回归仍需独立切片确认。
+- 7.x 最终验证与 review 仍未完成。
+- 真实 MySQL 只有在 `WEIBO_DB_PERSISTENCE_TEST_URL` 设置时运行；当前 fake MySQL probe 不执行真实 SQL。
+- `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有无关脏改，提交必须选择性 staging 排除。

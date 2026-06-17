@@ -93,6 +93,7 @@ class InMemoryBilibiliRepository:
     def upsert_post(self, project_id, item):
         key = (project_id, PLATFORM, item.get("external_id"))
         existing = self.posts.get(key)
+        raw_json = _merged_post_raw_json(existing.get("raw_json") if existing else None, _post_raw_json(item))
         row = {
             "id": existing["id"] if existing else self._id(),
             "project_id": project_id,
@@ -108,7 +109,7 @@ class InMemoryBilibiliRepository:
             "reply_count": _int_metric(item, "comment_count"),
             "share_count": _int_metric(item, "share_count"),
             "raw_artifact_ref": item.get("raw_artifact_ref"),
-            "raw_json": _post_raw_json(item),
+            "raw_json": raw_json,
         }
         self.posts[key] = row
         return row["id"]
@@ -213,7 +214,14 @@ class MySQLBilibiliRepository:
                       reply_count=VALUES(reply_count),
                       share_count=VALUES(share_count),
                       source_account_external_id=VALUES(source_account_external_id),
-                      raw_json=VALUES(raw_json)
+                      raw_json=JSON_SET(
+                        VALUES(raw_json),
+                        '$.evidence_ids',
+                        JSON_MERGE_PRESERVE(
+                          COALESCE(JSON_EXTRACT(raw_json, '$.evidence_ids'), JSON_ARRAY()),
+                          COALESCE(JSON_EXTRACT(VALUES(raw_json), '$.evidence_ids'), JSON_ARRAY())
+                        )
+                      )
                     """,
                     (
                         project_id,
@@ -319,6 +327,21 @@ def _post_raw_json(item):
         "evidence_ids": item.get("evidence_ids") or [],
         "metrics": item.get("metrics") or {},
     }
+
+
+def _merged_post_raw_json(existing_raw_json, incoming_raw_json):
+    raw_json = dict(incoming_raw_json or {})
+    raw_json["evidence_ids"] = _dedupe(
+        _raw_json_evidence_ids(existing_raw_json) + _raw_json_evidence_ids(incoming_raw_json)
+    )
+    return raw_json
+
+
+def _raw_json_evidence_ids(raw_json):
+    if not isinstance(raw_json, dict):
+        return []
+    evidence_ids = raw_json.get("evidence_ids")
+    return evidence_ids if isinstance(evidence_ids, list) else []
 
 
 def _evidence_raw_json(evidence):

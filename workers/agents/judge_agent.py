@@ -4,6 +4,22 @@ import re
 JUDGE_EVIDENCE_PREFIXES = {"target", "post", "comment", "analysis", "event", "action", "memory"}
 JUDGE_EVIDENCE_ID_PATTERN = re.compile(r"^([a-z][a-z0-9_-]*)-([1-9]\d*)$")
 KNOWLEDGE_CARD_ID_PATTERN = re.compile(r"^knowledge-card-([1-9]\d*)$")
+PLATFORM_EVIDENCE_ID_PATTERN = re.compile(
+    r"^([a-z][a-z0-9_-]*):project:([1-9]\d*):(item|comment):([A-Za-z0-9][A-Za-z0-9_-]{0,127})$"
+)
+PLATFORM_TEXT_EVIDENCE_ID_PATTERN = re.compile(
+    r"^([a-z][a-z0-9_-]*):project:([1-9]\d*):text:([A-Za-z0-9][A-Za-z0-9_-]{0,127}):(?:(transcript):([A-Za-z0-9][A-Za-z0-9_-]{0,63})|(body))$"
+)
+PLATFORM_EVIDENCE_LABELS = {
+    ("bilibili", "item"): ("B站", "B站视频"),
+    ("bilibili", "comment"): ("B站", "B站评论"),
+    ("xiaohongshu", "item"): ("小红书", "小红书笔记"),
+    ("xiaohongshu", "comment"): ("小红书", "小红书评论"),
+}
+PLATFORM_TEXT_EVIDENCE_LABELS = {
+    ("bilibili", "transcript"): ("B站", "B站字幕"),
+    ("bilibili", "body"): ("B站", "B站正文"),
+}
 
 
 def rule_judge_step_output(output, retry_count=0):
@@ -77,14 +93,26 @@ def judge_output_knowledge_references(output):
     return unique_evidence_ids(values)
 
 
-def validate_judge_evidence_ids(evidence_ids, existing_evidence_ids=None):
+def validate_judge_evidence_ids(evidence_ids, existing_evidence_ids=None, project_id=None):
     valid = []
     errors = []
     existing = set(existing_evidence_ids) if existing_evidence_ids is not None else None
+    scoped_project_id = positive_int(project_id)
     for evidence_id in evidence_ids:
         parsed = parse_judge_evidence_id(evidence_id)
         if parsed.get("error"):
             errors.append(parsed["error"])
+            continue
+        if (
+            scoped_project_id is not None
+            and parsed.get("kind") == "platform"
+            and parsed.get("project_id") != scoped_project_id
+        ):
+            errors.append(evidence_error(
+                "evidence_project_mismatch",
+                parsed["raw"],
+                "Platform evidence ID belongs to a different project.",
+            ))
             continue
         valid.append(parsed["raw"])
         if existing is not None and parsed["raw"] not in existing:
@@ -577,6 +605,14 @@ def contains_supported_evidence_id(text):
         parsed = parse_judge_evidence_id(match.group(0))
         if not parsed.get("error"):
             return True
+    for match in re.finditer(r"\b[a-z][a-z0-9_-]*:project:[1-9]\d*:(?:item|comment):[A-Za-z0-9][A-Za-z0-9_-]{0,127}\b", str(text or "")):
+        parsed = parse_judge_evidence_id(match.group(0))
+        if not parsed.get("error"):
+            return True
+    for match in re.finditer(r"\b[a-z][a-z0-9_-]*:project:[1-9]\d*:text:[A-Za-z0-9][A-Za-z0-9_-]{0,127}:(?:transcript:[A-Za-z0-9][A-Za-z0-9_-]{0,63}|body)\b", str(text or "")):
+        parsed = parse_judge_evidence_id(match.group(0))
+        if not parsed.get("error"):
+            return True
     return False
 
 
@@ -740,6 +776,66 @@ def parse_judge_evidence_id(value):
                 "knowledge-card-* references must be placed in knowledge_references, not evidence_ids.",
             ),
         }
+    platform_match = PLATFORM_EVIDENCE_ID_PATTERN.match(raw)
+    if platform_match:
+        platform = platform_match.group(1)
+        source_type = platform_match.group(3)
+        labels = PLATFORM_EVIDENCE_LABELS.get((platform, source_type))
+        if not labels:
+            return {
+                "raw": raw,
+                "error": evidence_error(
+                    "unsupported_platform_evidence_id",
+                    raw,
+                    f"Platform evidence IDs for '{platform}' are not supported by Judge yet.",
+                ),
+            }
+        platform_label, label = labels
+        return {
+            "raw": raw,
+            "kind": "platform",
+            "prefix": platform,
+            "platform": platform,
+            "project_id": int(platform_match.group(2)),
+            "source_type": source_type,
+            "external_id": platform_match.group(4),
+            "platform_label": platform_label,
+            "label": label,
+        }
+    platform_text_match = PLATFORM_TEXT_EVIDENCE_ID_PATTERN.match(raw)
+    if platform_text_match:
+        platform = platform_text_match.group(1)
+        text_type = platform_text_match.group(4) or platform_text_match.group(6)
+        labels = PLATFORM_TEXT_EVIDENCE_LABELS.get((platform, text_type))
+        if not labels:
+            return {
+                "raw": raw,
+                "error": evidence_error(
+                    "unsupported_platform_evidence_id",
+                    raw,
+                    f"Platform text evidence IDs for '{platform}' are not supported by Judge yet.",
+                ),
+            }
+        platform_label, label = labels
+        content_item_external_id = platform_text_match.group(3)
+        language = platform_text_match.group(5)
+        external_parts = [content_item_external_id, text_type]
+        if language:
+            external_parts.append(language)
+        return {
+            "raw": raw,
+            "kind": "platform",
+            "prefix": platform,
+            "platform": platform,
+            "project_id": int(platform_text_match.group(2)),
+            "source_type": "text",
+            "text_type": text_type,
+            "text_language": language,
+            "external_id": ":".join(external_parts),
+            "content_item_external_id": content_item_external_id,
+            "platform_label": platform_label,
+            "label": label,
+        }
     match = JUDGE_EVIDENCE_ID_PATTERN.match(raw)
     if not match:
         return {
@@ -747,7 +843,7 @@ def parse_judge_evidence_id(value):
             "error": evidence_error(
                 "invalid_evidence_id_format",
                 raw,
-                "Evidence IDs must use <prefix>-<numeric-id> hyphen format.",
+                "Evidence IDs must use <prefix>-<numeric-id> or supported platform:project:<id>:item|comment:<external-id> or bilibili:project:<id>:text:<bvid>:transcript:<language>|body format.",
             ),
         }
     prefix = match.group(1)
@@ -760,7 +856,29 @@ def parse_judge_evidence_id(value):
                 f"Evidence prefix '{prefix}' is not supported.",
             ),
         }
-    return {"raw": f"{prefix}-{int(match.group(2))}", "prefix": prefix, "id": int(match.group(2))}
+    return {"raw": f"{prefix}-{int(match.group(2))}", "kind": "legacy", "prefix": prefix, "id": int(match.group(2))}
+
+
+def judge_evidence_citation_detail(evidence_id):
+    parsed = parse_judge_evidence_id(evidence_id)
+    if parsed.get("error") or parsed.get("kind") != "platform":
+        return None
+    return {
+        "id": parsed["raw"],
+        "platform": parsed["platform"],
+        "platform_label": parsed["platform_label"],
+        "source_type": parsed["source_type"],
+        "label": parsed["label"],
+    }
+
+
+def judge_evidence_citation_details(evidence_ids):
+    details = []
+    for evidence_id in unique_evidence_ids(evidence_ids or []):
+        detail = judge_evidence_citation_detail(evidence_id)
+        if detail:
+            details.append(detail)
+    return details
 
 
 def evidence_error(error_type, evidence_id, message):
@@ -783,3 +901,11 @@ def unique_evidence_ids(values):
         seen.add(text)
         unique.append(value)
     return unique
+
+
+def positive_int(value):
+    try:
+        integer = int(value)
+    except Exception:
+        return None
+    return integer if integer > 0 else None

@@ -133,6 +133,118 @@ assert repo.comment(3, "r9002")["like_count"] == 7, repo.snapshot()
 `);
 });
 
+test("Bilibili post upsert preserves raw_json evidence IDs across search/detail duplicates", () => {
+  runPython(`
+from app.bilibili_normalizer import BilibiliNormalizer
+from app.bilibili_persistence import BilibiliEvidenceWriter, InMemoryBilibiliRepository
+
+normalizer = BilibiliNormalizer(project_id=2)
+search = normalizer.normalize_search_fixture(
+    "test/fixtures/bilibili-search.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/search-fixture.json",
+)
+detail = normalizer.normalize_detail_fixture(
+    "test/fixtures/bilibili-detail.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/detail-fixture.json",
+)
+expected = detail["content_items"][0]["evidence_ids"]
+
+def persisted_post_evidence_ids(first_payload, second_payload):
+    repo = InMemoryBilibiliRepository()
+    writer = BilibiliEvidenceWriter(repo)
+    writer.persist(first_payload)
+    writer.persist(second_payload)
+    return repo.post(2, "BV1HDLOG0001")["raw_json"]["evidence_ids"]
+
+assert persisted_post_evidence_ids(detail, search) == expected
+assert persisted_post_evidence_ids(search, detail) == expected
+`);
+});
+
+test("MySQLBilibiliRepository duplicate post upsert merges raw_json evidence IDs", () => {
+  runPython(`
+import json
+from app.bilibili_normalizer import BilibiliNormalizer
+from app.bilibili_persistence import MySQLBilibiliRepository
+
+normalizer = BilibiliNormalizer(project_id=2)
+search = normalizer.normalize_search_fixture(
+    "test/fixtures/bilibili-search.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/search-fixture.json",
+)
+detail = normalizer.normalize_detail_fixture(
+    "test/fixtures/bilibili-detail.json",
+    raw_artifact_ref="artifacts/agent-reach/bilibili/detail-fixture.json",
+)
+search_item = next(item for item in search["content_items"] if item["external_id"] == "BV1HDLOG0001")
+detail_item = detail["content_items"][0]
+expected = set(detail_item["evidence_ids"])
+
+class Cursor:
+    def __init__(self, db):
+        self.db = db
+        self.lastrowid = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, sql, params):
+        self.db.queries.append((sql, params))
+        assert "INSERT INTO social_posts" in sql, sql
+        incoming = json.loads(params[10])
+        key = (params[0], "bilibili", params[1])
+        existing = self.db.posts.get(key)
+        if existing:
+            assert "JSON_MERGE_PRESERVE" in sql, sql
+            assert "JSON_EXTRACT(raw_json, '$.evidence_ids')" in sql, sql
+            assert "JSON_EXTRACT(VALUES(raw_json), '$.evidence_ids')" in sql, sql
+            merged_ids = list(dict.fromkeys(
+                (existing["raw_json"].get("evidence_ids") or []) + (incoming.get("evidence_ids") or [])
+            ))
+            self.db.posts[key]["raw_json"] = {**incoming, "evidence_ids": merged_ids}
+            self.lastrowid = existing["id"]
+        else:
+            self.db.posts[key] = {"id": self.db.next_id, "raw_json": incoming}
+            self.lastrowid = self.db.next_id
+            self.db.next_id += 1
+
+class Connection:
+    def __init__(self, db):
+        self.db = db
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def cursor(self):
+        return Cursor(self.db)
+
+class FakeDb:
+    def __init__(self):
+        self.posts = {}
+        self.queries = []
+        self.next_id = 100
+
+    def connect(self):
+        return Connection(self)
+
+def persisted_mysql_post_evidence_ids(first_item, second_item):
+    fake_db = FakeDb()
+    repo = MySQLBilibiliRepository(fake_db)
+    repo.upsert_post(2, first_item)
+    repo.upsert_post(2, second_item)
+    return set(fake_db.posts[(2, "bilibili", "BV1HDLOG0001")]["raw_json"]["evidence_ids"])
+
+assert persisted_mysql_post_evidence_ids(detail_item, search_item) == expected
+assert persisted_mysql_post_evidence_ids(search_item, detail_item) == expected
+`);
+});
+
 test("BilibiliEvidenceWriter rejects unsafe or cross-platform persistence payloads", () => {
   runPython(`
 from app.bilibili_persistence import BilibiliEvidenceWriter, InMemoryBilibiliRepository

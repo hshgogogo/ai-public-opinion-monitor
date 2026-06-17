@@ -2278,6 +2278,237 @@ assert bad_refs == {"knowledge-card-999", "comment-3"}, missing_knowledge
 `);
 });
 
+test("JudgeReviewService accepts platform evidence IDs with labels and rejects cross-project or unsupported platform IDs", () => {
+  runPython(`
+import json
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return True
+
+class SourceRepository:
+    def has_sources(self, run_id, project_id, proposal_audit_id, step_run_id=None):
+        return True
+
+platform_ids = [
+    "bilibili:project:2:item:BV1HDLOG0001",
+    "bilibili:project:2:text:BV1HDLOG0001:transcript:zh-cn",
+    "bilibili:project:2:text:BV1HDLOG0001:body",
+    "bilibili:project:2:comment:r9001",
+    "xiaohongshu:project:2:item:xhs-note-1001",
+    "xiaohongshu:project:2:comment:xhs-comment-7001",
+]
+
+class EvidenceRepository:
+    def __init__(self):
+        self.existing_calls = []
+
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        self.existing_calls.append((project_id, list(evidence_ids)))
+        existing = {2: set(platform_ids)}
+        return set(existing.get(project_id, set())).intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        return set()
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append(persisted)
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        raise AssertionError("platform fixture evidence should not need human handoff")
+
+evidence_repository = EvidenceRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(),
+    review_repository=ReviewRepository(),
+    evidence_repository=evidence_repository,
+)
+
+accepted = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 61,
+    "stepRunId": 41,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "platform evidence has normalized citations",
+            "evidence_ids": platform_ids,
+        }
+    }],
+})
+assert accepted["review"]["status"] == "passed", accepted
+assert accepted["review"]["passed"] is True, accepted
+assert accepted["review"]["evidence_errors"] == [], accepted
+assert accepted["review"]["feedback_json"]["evidence_ids"] == platform_ids, accepted
+assert accepted["review"]["feedback_json"]["citation_details"] == [
+    {"id": "bilibili:project:2:item:BV1HDLOG0001", "platform": "bilibili", "platform_label": "B站", "source_type": "item", "label": "B站视频"},
+    {"id": "bilibili:project:2:text:BV1HDLOG0001:transcript:zh-cn", "platform": "bilibili", "platform_label": "B站", "source_type": "text", "label": "B站字幕"},
+    {"id": "bilibili:project:2:text:BV1HDLOG0001:body", "platform": "bilibili", "platform_label": "B站", "source_type": "text", "label": "B站正文"},
+    {"id": "bilibili:project:2:comment:r9001", "platform": "bilibili", "platform_label": "B站", "source_type": "comment", "label": "B站评论"},
+    {"id": "xiaohongshu:project:2:item:xhs-note-1001", "platform": "xiaohongshu", "platform_label": "小红书", "source_type": "item", "label": "小红书笔记"},
+    {"id": "xiaohongshu:project:2:comment:xhs-comment-7001", "platform": "xiaohongshu", "platform_label": "小红书", "source_type": "comment", "label": "小红书评论"},
+], accepted
+assert evidence_repository.existing_calls == [(2, platform_ids)], evidence_repository.existing_calls
+serialized = json.dumps(accepted, ensure_ascii=False)
+for forbidden in ["raw_artifact", "stdout", "stderr", "Cookie", "token", "browser", "storage", "login", "private"]:
+    assert forbidden not in serialized, serialized
+
+cross_project = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 62,
+    "stepRunId": 42,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "cross-project platform evidence must fail",
+            "evidence_ids": ["bilibili:project:3:item:BV1HDLOG0001"],
+        }
+    }],
+})
+assert cross_project["review"]["status"] == "failed", cross_project
+assert any(item["error_type"] == "evidence_project_mismatch" for item in cross_project["review"]["evidence_errors"]), cross_project
+
+cross_project_text = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 65,
+    "stepRunId": 45,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "cross-project B站 text evidence must fail",
+            "evidence_ids": ["bilibili:project:3:text:BV1HDLOG0001:body"],
+        }
+    }],
+})
+assert cross_project_text["review"]["status"] == "failed", cross_project_text
+assert any(item["error_type"] == "evidence_project_mismatch" for item in cross_project_text["review"]["evidence_errors"]), cross_project_text
+
+missing_text = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 66,
+    "stepRunId": 46,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "missing B站 text evidence must fail",
+            "evidence_ids": ["bilibili:project:2:text:BV1HDLOG4040:transcript:zh-cn"],
+        }
+    }],
+})
+assert missing_text["review"]["status"] == "failed", missing_text
+assert any(item["error_type"] == "evidence_not_found" for item in missing_text["review"]["evidence_errors"]), missing_text
+
+unsupported = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 63,
+    "stepRunId": 43,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "douyin platform evidence is not implemented",
+            "evidence_ids": ["douyin:project:2:item:douyin-video-1"],
+        }
+    }],
+})
+assert unsupported["review"]["status"] == "failed", unsupported
+assert any(item["error_type"] == "unsupported_platform_evidence_id" for item in unsupported["review"]["evidence_errors"]), unsupported
+
+malformed = service.create_review(10, {
+    "projectId": 2,
+    "proposalAuditId": 64,
+    "stepRunId": 44,
+    "maxAttempts": 1,
+    "fixtureOutputs": [{
+        "output": {
+            "summary": "malformed platform evidence must fail",
+            "evidence_ids": ["bilibili:project:2:item:../raw_stdout"],
+        }
+    }],
+})
+assert malformed["review"]["status"] == "failed", malformed
+assert any(item["error_type"] == "invalid_evidence_id_format" for item in malformed["review"]["evidence_errors"]), malformed
+`);
+});
+
+test("MySQLJudgeEvidenceRepository verifies Bilibili text evidence through same-project post raw_json evidence_ids", () => {
+  runPython(`
+import sys
+import types
+import workers
+from app.judge_review_service import MySQLJudgeEvidenceRepository
+
+transcript_id = "bilibili:project:2:text:BV1HDLOG0001:transcript:zh-cn"
+body_id = "bilibili:project:2:text:BV1HDLOG0001:body"
+missing_id = "bilibili:project:2:text:BV1HDLOG4040:transcript:zh-cn"
+cross_project_id = "bilibili:project:3:text:BV1HDLOG0001:body"
+persisted = {
+    (2, "bilibili", "BV1HDLOG0001", transcript_id),
+    (2, "bilibili", "BV1HDLOG0001", body_id),
+}
+queries = []
+
+class Cursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, sql, params):
+        self.sql = sql
+        self.params = params
+        queries.append((sql, params))
+        self.row = None
+        if "FROM social_posts" in sql and "JSON_CONTAINS" in sql and "raw_json" in sql:
+            project_id, platform, external_id, evidence_id = params
+            if (project_id, platform, external_id, evidence_id) in persisted:
+                self.row = {"id": 1001}
+
+    def fetchone(self):
+        return self.row
+
+class Connection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def cursor(self):
+        return Cursor()
+
+fake_db = types.SimpleNamespace(connect=lambda: Connection())
+workers.db = fake_db
+sys.modules["workers.db"] = fake_db
+
+repository = MySQLJudgeEvidenceRepository()
+existing = repository.existing_evidence_ids(2, [
+    transcript_id,
+    body_id,
+    missing_id,
+    cross_project_id,
+])
+
+assert existing == {transcript_id, body_id}, existing
+assert len(queries) == 3, queries
+for sql, params in queries:
+    assert "FROM social_posts" in sql, sql
+    assert "JSON_CONTAINS" in sql, sql
+    assert "raw_json" in sql, sql
+    assert params[0] == 2, params
+    assert params[1] == "bilibili", params
+    assert params[3].startswith("bilibili:project:2:text:"), params
+`);
+});
+
 test("JudgeReviewService rejects deterministic Rule Judge boundary violations", () => {
   runPython(`
 from app.judge_review_service import JudgeReviewService

@@ -1,5 +1,6 @@
 from app.crewai_proposal_service import MySQLAgentRunRepository
 from workers.agents.judge_agent import (
+    judge_evidence_citation_details,
     parse_judge_evidence_id,
     rule_judge_step_output,
     validate_judge_evidence_ids,
@@ -97,7 +98,42 @@ class MySQLJudgeEvidenceRepository:
                         parsed = parse_judge_evidence_id(evidence_id)
                         if parsed.get("error"):
                             continue
-                        if parsed["prefix"] == "analysis":
+                        if parsed.get("kind") == "platform":
+                            if parsed.get("project_id") != project_id:
+                                continue
+                            if parsed.get("source_type") == "text":
+                                cur.execute(
+                                    """
+                                    SELECT id
+                                    FROM social_posts
+                                    WHERE project_id=%s
+                                      AND platform=%s
+                                      AND external_id=%s
+                                      AND JSON_CONTAINS(
+                                        COALESCE(JSON_EXTRACT(raw_json, '$.evidence_ids'), JSON_ARRAY()),
+                                        JSON_QUOTE(%s)
+                                      )
+                                    LIMIT 1
+                                    """,
+                                    (
+                                        project_id,
+                                        parsed["platform"],
+                                        parsed["content_item_external_id"],
+                                        parsed["raw"],
+                                    ),
+                                )
+                            else:
+                                table = "social_posts" if parsed.get("source_type") == "item" else "social_comments"
+                                cur.execute(
+                                    f"""
+                                    SELECT id
+                                    FROM {table}
+                                    WHERE project_id=%s AND platform=%s AND external_id=%s
+                                    LIMIT 1
+                                    """,
+                                    (project_id, parsed["platform"], parsed["external_id"]),
+                                )
+                        elif parsed["prefix"] == "analysis":
                             cur.execute(
                                 """
                                 SELECT sr.id
@@ -807,8 +843,21 @@ def resolve_judge_evidence(review, project_id, evidence_repository):
     evidence_errors = list(prepared.get("evidence_errors") or [])
     required_changes = list(prepared.get("required_changes") or [])
 
-    existing_evidence_ids = load_existing_judge_evidence_ids(evidence_repository, project_id, evidence_ids)
-    _, missing_evidence_errors = validate_judge_evidence_ids(evidence_ids, existing_evidence_ids)
+    project_evidence_ids, project_evidence_errors = validate_judge_evidence_ids(evidence_ids, project_id=project_id)
+    if project_evidence_errors:
+        evidence_errors.extend(project_evidence_errors)
+        required_changes.append("Use only evidence IDs that belong to the current project.")
+    feedback_json["evidence_ids"] = project_evidence_ids
+    citation_details = judge_evidence_citation_details(project_evidence_ids)
+    if citation_details:
+        feedback_json["citation_details"] = citation_details
+
+    existing_evidence_ids = load_existing_judge_evidence_ids(evidence_repository, project_id, project_evidence_ids)
+    _, missing_evidence_errors = validate_judge_evidence_ids(
+        project_evidence_ids,
+        existing_evidence_ids,
+        project_id=project_id,
+    )
     if missing_evidence_errors:
         evidence_errors.extend(missing_evidence_errors)
         required_changes.append("Use only evidence IDs that exist in the current project.")
