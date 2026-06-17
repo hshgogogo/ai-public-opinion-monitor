@@ -205,3 +205,69 @@ TDD 证据：
 
 - 本切片不做真实登录、真实小红书/Agent-Reach/Spider_XHS 调用、persistence/MySQL、FastAPI endpoint、CrewAI/Judge/Report、抖音。
 - 仍需主控/后续 reviewer 做反驳式 review 后再决定 tasks 勾选、commit/push。
+
+### 2026-06-18 Agent 4
+
+日期：2026-06-18
+
+Agent：Noether（worker，019ed666-xhs-persistence-worker）
+
+任务：小红书 evidence persistence/idempotent writes 4.5
+
+状态：worker 已完成最小切片；未更新 OpenSpec tasks，未 commit/push。
+
+改动文件：
+
+- `app/xiaohongshu_persistence.py`
+- `test/xiaohongshu-persistence.test.js`
+- `test/weibo-db-persistence.test.js`
+- `docs/agent-loop/subagent-events.jsonl`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+
+新增接口：
+
+- `XiaohongshuEvidenceWriter(repository)`
+- `InMemoryXiaohongshuRepository`
+- `MySQLXiaohongshuRepository`
+
+持久化语义：
+
+- normalized 小红书 note/search/detail/comment payload 写入现有 `source_accounts`、`social_posts`、`social_comments` 语义。
+- `evidence_summaries` 的 evidence id、source type、content item external id、metrics、raw artifact ref 放入 `raw_json`；未新增 generic evidence 表。
+- 同项目按 `(project_id, platform, external_id)` 幂等，重复 search/detail 只更新 metrics/raw refs，不增加 source/post/comment count。
+- 跨项目相同 external id 隔离，source/post/comment raw refs 和 comment like_count 不串项目。
+
+安全边界：
+
+- writer 拒绝非 `xiaohongshu` payload、缺/非法 `project_id`、unsafe `raw_artifact_ref`、敏感 key/value、非小红书 evidence ID、evidence ID project mismatch。
+- `raw_artifact_ref` 复用 `safe_xiaohongshu_artifact_ref`，不只依赖通用 sanitizer。
+- MySQL 三个 upsert 均使用 `ON DUPLICATE KEY UPDATE` + `LAST_INSERT_ID(id)`。
+
+TDD 证据：
+
+- RED：`PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-persistence.test.js` 初次运行 0/3 pass、3/3 fail，失败原因为 `ENOENT app/xiaohongshu_persistence.py` / `ModuleNotFoundError: No module named 'app.xiaohongshu_persistence'`。
+- GREEN：同命令复跑 3/3 pass。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-persistence.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test test/weibo-db-persistence.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-persistence.test.js test/xiaohongshu-normalizer.test.js test/xiaohongshu-collection-service.test.js test/bilibili-persistence.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`
+- `openspec validate haidao-agent-reach-multichannel-ingestion --strict`
+- `git diff --check`
+
+验证结果：
+
+- 小红书 persistence 3/3 pass。
+- weibo-db persistence 无 `WEIBO_DB_PERSISTENCE_TEST_URL` 时 1 pass / 52 skipped / 0 fail；新增小红书 MySQL 用例按 env gate skip。
+- 小红书 persistence + normalizer + collection service + B站 persistence 19/19 pass。
+- 全量 `npm test` 224 tests：172 pass / 52 skipped / 0 fail。
+- OpenSpec strict valid。
+- `git diff --check` pass。
+
+遗留问题：
+
+- 本切片不做真实小红书采集、登录态 provider、Agent Loop step status、FastAPI endpoint、CrewAI/Judge/Report、抖音、PRD 修改、migration、tasks 勾选、commit 或 push。
+- 真实 MySQL 回归仅在 `WEIBO_DB_PERSISTENCE_TEST_URL` 设置时运行；本 worker 环境未设置该 env，因此只验证了 skip path。
+- 工作区存在非本 worker 范围的 `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 脏改，需后续选择性 staging 排除。

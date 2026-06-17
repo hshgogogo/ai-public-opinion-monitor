@@ -2240,6 +2240,94 @@ print(json.dumps({
 );
 
 test(
+  "persists Xiaohongshu normalized evidence idempotently with project-scoped keys",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("海岛舒服日志 小红书隔离项目");
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.xiaohongshu_normalizer import XiaohongshuNormalizer
+from app.xiaohongshu_persistence import XiaohongshuEvidenceWriter, MySQLXiaohongshuRepository
+from workers import db
+
+project_id = int(os.environ["PROJECT_ID"])
+other_project_id = int(os.environ["OTHER_PROJECT_ID"])
+writer = XiaohongshuEvidenceWriter(MySQLXiaohongshuRepository(db))
+search = XiaohongshuNormalizer(project_id=project_id).normalize_search_fixture(
+    "test/fixtures/xiaohongshu-search.json",
+    raw_artifact_ref="artifacts/agent-reach/xiaohongshu/search-fixture.json",
+)
+detail = XiaohongshuNormalizer(project_id=project_id).normalize_detail_fixture(
+    "test/fixtures/xiaohongshu-detail.json",
+    raw_artifact_ref="artifacts/agent-reach/xiaohongshu/detail-fixture.json",
+)
+writer.persist(search)
+detail_result = writer.persist(detail)
+for evidence in detail["evidence_summaries"]:
+    if evidence.get("external_id") == "xhs-comment-7001":
+        evidence["metrics"]["like_count"] = 141
+repeat_result = writer.persist(detail)
+other = XiaohongshuNormalizer(project_id=other_project_id).normalize_search_fixture(
+    "test/fixtures/xiaohongshu-search.json",
+    raw_artifact_ref="artifacts/agent-reach/xiaohongshu/search-other-project.json",
+)
+other_result = writer.persist(other)
+other_detail = XiaohongshuNormalizer(project_id=other_project_id).normalize_detail_fixture(
+    "test/fixtures/xiaohongshu-detail.json",
+    raw_artifact_ref="artifacts/agent-reach/xiaohongshu/detail-other-project.json",
+)
+for evidence in other_detail["evidence_summaries"]:
+    if evidence.get("external_id") == "xhs-comment-7001":
+        evidence["metrics"]["like_count"] = 7
+other_detail_result = writer.persist(other_detail)
+print(json.dumps({
+    "detail": detail_result,
+    "repeat": repeat_result,
+    "other": other_result,
+    "otherDetail": other_detail_result,
+}, ensure_ascii=False, default=str))
+`, { PROJECT_ID: String(projectId), OTHER_PROJECT_ID: String(otherProjectId) });
+
+    assert.equal(result.detail.ok, true, result);
+    assert.equal(result.detail.persisted_posts, 1, result);
+    assert.equal(result.detail.persisted_comments, 2, result);
+    assert.equal(result.repeat.persisted_comments, 2, result);
+    assert.equal(result.other.persisted_posts, 2, result);
+    assert.equal(result.otherDetail.persisted_source_accounts, 3, result);
+    assert.equal(result.otherDetail.persisted_posts, 1, result);
+    assert.equal(result.otherDetail.persisted_comments, 2, result);
+
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts WHERE project_id=%s AND platform='xiaohongshu'", [projectId])[0].count, 2);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments WHERE project_id=%s AND platform='xiaohongshu'", [projectId])[0].count, 2);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM source_accounts WHERE project_id=%s AND platform='xiaohongshu'", [projectId])[0].count, 4);
+    assert.equal(queryRows("SELECT like_count FROM social_comments WHERE project_id=%s AND platform='xiaohongshu' AND external_id='xhs-comment-7001'", [projectId])[0].like_count, 141);
+    assert.equal(
+      queryRows("SELECT JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.raw_artifact_ref')) AS raw_ref FROM social_posts WHERE project_id=%s AND platform='xiaohongshu' AND external_id='xhs-note-1001'", [projectId])[0].raw_ref,
+      "artifacts/agent-reach/xiaohongshu/detail-fixture.json"
+    );
+    assert.equal(
+      Number(queryRows("SELECT JSON_EXTRACT(raw_json, '$.metrics.like_count') AS like_count FROM social_posts WHERE project_id=%s AND platform='xiaohongshu' AND external_id='xhs-note-1001'", [projectId])[0].like_count),
+      9100
+    );
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_posts WHERE project_id=%s AND platform='xiaohongshu'", [otherProjectId])[0].count, 2);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM social_comments WHERE project_id=%s AND platform='xiaohongshu'", [otherProjectId])[0].count, 2);
+    assert.equal(queryRows("SELECT COUNT(*) AS count FROM source_accounts WHERE project_id=%s AND platform='xiaohongshu'", [otherProjectId])[0].count, 4);
+    assert.equal(
+      queryRows("SELECT JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.raw_artifact_ref')) AS raw_ref FROM social_posts WHERE project_id=%s AND platform='xiaohongshu' AND external_id='xhs-note-1001'", [otherProjectId])[0].raw_ref,
+      "artifacts/agent-reach/xiaohongshu/detail-other-project.json"
+    );
+    assert.equal(queryRows("SELECT like_count FROM social_comments WHERE project_id=%s AND platform='xiaohongshu' AND external_id='xhs-comment-7001'", [projectId])[0].like_count, 141);
+    assert.equal(queryRows("SELECT like_count FROM social_comments WHERE project_id=%s AND platform='xiaohongshu' AND external_id='xhs-comment-7001'", [otherProjectId])[0].like_count, 7);
+  }
+);
+
+test(
   "runs knowledge card RAG schema migration twice and creates source/card tables",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {
