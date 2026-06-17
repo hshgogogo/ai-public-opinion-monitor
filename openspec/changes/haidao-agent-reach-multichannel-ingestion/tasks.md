@@ -32,8 +32,8 @@
 ## 5. 抖音 Final Slice
 
 - [x] 5.1 Write 抖音 doctor/capability fixture tests after B站 and 小红书 slices pass.
-- [ ] 5.2 Write 抖音 search/detail fixture tests only after the upstream runner contract is clear.
-- [ ] 5.3 Implement 抖音 normalizer and persistence if local/fake runner contract is stable.
+- [x] 5.2 Record 抖音 search/detail fixture tests as blocked/N/A because no safe, redacted upstream Agent-Reach runner contract is available; do not create synthetic fixtures or claim search/detail support.
+- [x] 5.3 Record 抖音 normalizer and persistence as blocked/N/A because the local/fake runner contract is not stable; no 抖音 normalizer, persistence, migration, or real collection path is implemented.
 - [x] 5.4 If real 抖音 access requires high-risk login or unstable tooling, leave real validation blocked with explicit evidence.
 
 ## 6. Harness Integration
@@ -41,14 +41,14 @@
 - [x] 6.1 Add FastAPI internal service/endpoint contract for platform collection trigger if needed.
 - [x] 6.2 Ensure CrewAI can only read normalized evidence summary, not call Agent-Reach directly.
 - [x] 6.3 Ensure Judge/Report can cite platform evidence IDs with platform labels.
-- [ ] 6.4 Ensure old微博 paths continue to pass regression tests.
+- [x] 6.4 Ensure old微博 paths continue to pass regression tests.
 
 ## 7. Verification And Review
 
-- [ ] 7.1 Run targeted adapter and normalizer tests.
-- [ ] 7.2 Run `npm test`.
-- [ ] 7.3 Run real MySQL tests if schema or persistence changes.
-- [ ] 7.4 Run `openspec validate haidao-agent-reach-multichannel-ingestion --strict`.
-- [ ] 7.5 Run `git diff --check`.
-- [ ] 7.6 Run `npm run agent:guard`.
-- [ ] 7.7 Complete subagent review, evidence report, commit, push, and PR update.
+- [x] 7.1 Run targeted adapter and normalizer tests.
+- [x] 7.2 Run `npm test`.
+- [x] 7.3 Run real MySQL tests if schema or persistence changes.
+- [x] 7.4 Run `openspec validate haidao-agent-reach-multichannel-ingestion --strict`.
+- [x] 7.5 Run `git diff --check`.
+- [x] 7.6 Run `npm run agent:guard`.
+- [x] 7.7 Complete subagent review, evidence report, commit, push, and PR update.

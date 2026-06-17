@@ -291,6 +291,7 @@ test(
     resetTestDatabase();
     assert.equal(runWorker(["migrate"]).ok, true);
     const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const commentId = createEvidenceComment(projectId, "crewai-runtime-failed-valid-evidence");
 
     const result = runPythonSnippet(`
 import json
@@ -346,7 +347,7 @@ rejected_response = client.post(
     json={
         "projectId": project_id,
         "stage": "strategy",
-        "evidenceIds": ["comment:123"],
+        "evidenceIds": [f"comment:{os.environ['COMMENT_ID']}"],
         "knowledgeQuery": "宣发回应",
     },
 )
@@ -359,7 +360,7 @@ runtime_failed_response = runtime_failed_client.post(
     json={
         "projectId": project_id,
         "stage": "strategy",
-        "evidenceIds": ["comment:123"],
+        "evidenceIds": [f"comment:{os.environ['COMMENT_ID']}"],
         "knowledgeQuery": "宣发回应",
     },
 )
@@ -369,7 +370,7 @@ print(json.dumps({
     "runtime_failed": runtime_failed_response.json(),
     "loop_id": loop["id"],
 }, ensure_ascii=False, default=str))
-`, { PROJECT_ID: String(projectId) });
+`, { PROJECT_ID: String(projectId), COMMENT_ID: String(commentId) });
 
     assert.equal(result.rejected.ok, false, result.rejected);
     assert.equal(result.rejected.error_type, "crewai_evidence_rejected", result.rejected);
@@ -695,6 +696,16 @@ print(json.dumps({
       { status: "failed", retry_count: 1, failed_summary: "still missing" },
       { status: "needs_human", retry_count: 2, failed_summary: "still missing again" },
     ]);
+    assert.deepEqual(queryRows(
+      `
+      SELECT COUNT(*) AS count
+      FROM judge_reviews
+      WHERE loop_run_id=%s
+        AND project_id=%s
+        AND JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.proposal_audit_id'))=%s
+      `,
+      [result.loop_id, projectId, String(result.proposal_audit_id)]
+    )[0], { count: 6 });
     assert.deepEqual(queryRows(
       "SELECT status, current_step, error_type FROM agent_loop_runs WHERE id=%s AND project_id=%s",
       [result.loop_id, projectId]
@@ -1207,7 +1218,7 @@ test(
     assert.equal(actions.ok, true, actions);
     assert.equal(actions.agentStepRun.step_name, "action_recommendation", actions);
     assert.equal(actions.agentStepRun.evidence_ids.includes(`event-${eventId}`), true, actions);
-    assert.equal(actions.agentStepRun.evidence_ids.includes(commentId), true, actions);
+    assert.equal(actions.agentStepRun.evidence_ids.includes(`comment-${commentId}`), true, actions);
     assert.deepEqual(actions.agentStepRun.output_json.recommendations, [{
       text: actions.actions[0].content_summary,
       reason: actions.actions[0].reason,

@@ -193,7 +193,10 @@ class MySQLJudgeReviewRepository:
         from workers import enterprise_worker as worker
 
         feedback_json = dict(review.get("feedback_json") or {})
-        feedback_json["proposal_audit_id"] = proposal_audit_id
+        if proposal_audit_id is not None:
+            feedback_json["proposal_audit_id"] = proposal_audit_id
+        else:
+            feedback_json.pop("proposal_audit_id", None)
         return worker.judge_review_to_payload(worker.record_judge_review(
             loop_run_id=run_id,
             project_id=project_id,

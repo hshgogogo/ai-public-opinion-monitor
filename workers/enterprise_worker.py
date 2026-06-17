@@ -5428,7 +5428,7 @@ def action_step_evidence_ids(actions):
     for action in actions:
         if action.get("related_event_id"):
             evidence_ids.append(f"event-{action['related_event_id']}")
-        evidence_ids.extend(action.get("evidence_ids") or [])
+        evidence_ids.extend(prefixed_comment_evidence_ids(action.get("evidence_ids") or []))
     return unique_evidence_ids(evidence_ids)
 
 

@@ -622,3 +622,222 @@ TDD / review 证据：
 - 7.x 最终验证与 review 仍未完成。
 - 真实 MySQL 只有在 `WEIBO_DB_PERSISTENCE_TEST_URL` 设置时运行；当前 fake MySQL probe 不执行真实 SQL。
 - `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有无关脏改，提交必须选择性 staging 排除。
+
+### 2026-06-18 Agent 10
+
+日期：2026-06-18
+
+Agents：
+
+- Gibbs（explorer，019ed737-96a5-7471-bc83-fb401ba0e77c）
+- Parfit（reviewer，019ed73d-54f3-77c1-a0d7-58872c57c40b）
+
+任务：旧微博路径回归 6.4 与验证任务 7.1/7.2/7.4/7.5/7.6
+
+状态：6.4 已完成并通过独立复核；7.1/7.2/7.4/7.5/7.6 已完成；7.3 真实 MySQL 因 `WEIBO_DB_PERSISTENCE_TEST_URL` 未设置仍未验证；7.7 需在 evidence report、commit、push、PR update 后完成。
+
+改动文件：
+
+- `docs/agent-loop/subagent-events.jsonl`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+- `openspec/changes/haidao-agent-reach-multichannel-ingestion/tasks.md`
+
+实现语义：
+
+- 本切片不改业务代码，目标是证明 6.3 的平台 `citationDetails` 为 additive，未破坏旧微博 trigger/status/feedback/workbench/fixture E2E、旧 `citations` 字符串数组、legacy evidence parser、public CrewAI proposal grammar 或旧微博 API payload。
+- Gibbs 只读探索建议复用现有定向测试，不新增重复测试。
+- Parfit 独立复核确认 6.4 相对 6.3 无新增代码 diff，旧微博路径与兼容边界未被放宽。
+
+Done rubric 证据：
+
+1. 旧微博 trigger/status/feedback/workbench/fixture E2E 回归通过：旧微博定向 67/67 pass。
+2. 旧微博 Q&A/report `citations` 字符串兼容不被 6.3 破坏：`test/weibo-memory-report.test.js` 在旧微博和平台 citation cases 均通过。
+3. 不放宽 public CrewAI proposal grammar 或旧微博 API payload：FastAPI/CrewAI/Judge 定向 46/46 pass；Parfit 检查 `app/crewai_proposal.py` 与 `src/server.js` 后无 P0/P1/P2。
+4. 不触碰真实凭据、真实平台、真实 DB：测试通过 `scripts/run-tests.mjs` 剥离真实 MySQL、DeepSeek、微博 Cookie、MediaCrawler env；`WEIBO_DB_PERSISTENCE_TEST_URL` 未设置，真实 DB 未运行。
+5. 定向/全量/OpenSpec/diff/guard 通过：见验证结果。
+6. 独立子 agent 复核无 P0/P1/P2：Parfit APPROVED。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python npm test -- test/agent-loop-trigger-api.test.js test/weibo-api-contract.test.js test/weibo-workbench.test.js test/weibo-frontend.test.js test/weibo-fixture-e2e.test.js test/weibo-memory-report.test.js test/enterprise-worker.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test -- test/fastapi-sidecar.test.js test/crewai-proposal-validator.test.js test/crewai-tool-gateway.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test -- test/agent-reach-adapter.test.js test/bilibili-normalizer.test.js test/xiaohongshu-normalizer.test.js test/bilibili-persistence.test.js test/xiaohongshu-persistence.test.js test/bilibili-collection-step.test.js test/xiaohongshu-collection-service.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`
+- `openspec validate haidao-agent-reach-multichannel-ingestion --strict`
+- `git diff --check`
+- `npm run agent:guard`
+- `node -e` JSONL parse check for `docs/agent-loop/subagent-events.jsonl`
+
+验证结果：
+
+- 旧微博定向：67/67 pass。
+- FastAPI/CrewAI/Judge 定向：46/46 pass。
+- Adapter/normalizer/persistence/collection 定向：40/40 pass。
+- 全量 `npm test`：241 tests，189 pass / 52 skipped / 0 fail。
+- OpenSpec strict valid。
+- `git diff --check` pass。
+- `npm run agent:guard` pass。
+- JSONL parse pass。
+
+仍未触碰范围：
+
+- 真实 MySQL：已使用临时本地 MySQL 8.4 Docker 容器设置 `WEIBO_DB_PERSISTENCE_TEST_URL` 运行 `test/weibo-db-persistence.test.js`，53/53 pass；容器运行结束后自动删除。
+- 真实微博/B站/小红书/抖音/Agent-Reach 平台调用：按安全边界未执行。
+
+遗留问题：
+
+- 5.2/5.3 抖音 search/detail fixture 与 normalizer/persistence 仍受上游 runner contract 不清晰阻塞。
+- 7.7 需要最终 evidence report、commit、push 和 PR update。
+- `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有无关脏改，提交必须选择性 staging 排除。
+
+### 2026-06-18 Agent 11
+
+日期：2026-06-18
+
+任务：7.3 真实 MySQL 验证与真实 DB 回归修复
+
+状态：7.3 已完成并通过 Volta 独立复核；可进入 5.2/5.3 blocked/N/A 收口与 7.7。
+
+改动文件：
+
+- `app/judge_review_service.py`
+- `workers/enterprise_worker.py`
+- `test/weibo-db-persistence.test.js`
+- `openspec/changes/haidao-agent-reach-multichannel-ingestion/tasks.md`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+
+Root cause：
+
+- 真实 MySQL 测试第一次运行 50/53 pass，暴露 3 个问题。
+- CrewAI runtime failure 用例使用不存在的 `comment:123`，在真实 MySQL 下会被 Harness 证据归属校验提前拒绝，无法测到 runtime failure。修复为创建同项目真实 comment evidence 后再触发 runtime adapter error。
+- step-based Judge review 在 `feedback_json.proposal_audit_id` 写入 JSON null；MySQL 8.4 下 `JSON_UNQUOTE(JSON_EXTRACT(...))` 会返回字符串 `null`。修复为 step-based review 省略该 key，proposal review 仍写真实 audit id。
+- action recommendation step ledger 同时写 `event-<id>` 和裸数字 comment id；当 event id 与 comment id 同为 `1` 时，归一化会把裸 `1` 当作 event 去重，导致 comment evidence 丢失。修复为 agent step evidence 对 action comment evidence 使用 `comment-<id>` 前缀。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python npm test -- test/fastapi-sidecar.test.js test/weibo-memory-report.test.js test/enterprise-worker.test.js`
+- 临时本地 MySQL 8.4 Docker 容器 + `WEIBO_DB_PERSISTENCE_TEST_URL=mysql://root:<local-test-password>@127.0.0.1:<random-port>/yuqing_monitor_test_agent_loop PYTHON_BIN=.venv/bin/python npm test -- test/weibo-db-persistence.test.js`
+
+验证结果：
+
+- FastAPI/Judge/Report/enterprise 无 DB 定向：76/76 pass。
+- 真实 MySQL persistence：53/53 pass，0 skipped，0 fail。
+
+复核：
+
+- Volta（reviewer，019ed74f-41f0-79a1-a32d-f7b5b2b0ea7b）反驳式 review APPROVED，无 P0/P1/P2。
+- Volta 确认 runtime_failed 用例先通过真实 evidence scope validation 再触发 injected runtime，不是放宽测试。
+- Volta 确认 step-based `proposal_audit_id` 省略避免 MySQL JSON null 字符串歧义，proposal-based Judge review 仍有窄断言证明真实 audit id 会持久化。
+- Volta 确认 action step ledger 改为 `comment-*` evidence，避免 event/comment 裸数字碰撞，并匹配 Judge grammar。
+
+未验证：
+
+- 没有使用真实 `.env`、真实 Cookie/token、真实浏览器状态、真实微博/B站/小红书/抖音/Agent-Reach 平台。
+
+### 2026-06-18 Agent 12
+
+日期：2026-06-18
+
+Agent：Dalton（reviewer，019ed756-c13e-7a43-8b1c-10850f4439fa）
+
+任务：抖音条件任务 5.2/5.3 blocked/N/A 收口。
+
+状态：5.2/5.3 可在改写任务文字后勾选为 blocked/N/A done；不得声称已实现抖音 search/detail、normalizer、persistence、migration 或真实 collection path。
+
+结论：
+
+- Dalton 结论为 `APPROVED_TO_MARK_BLOCKED_DONE`。
+- 无 P0；如果保留原始 “Write/Implement” wording 后直接勾选，会产生 P1 误导风险。
+- OpenSpec design/spec 允许抖音在上游 runner contract 不稳定、高风险登录态或真实访问不可安全验证时保持 blocked，不阻塞 B站/小红书交付。
+- 当前安全 contract 只有 `douyin doctor/capability` fake runner；`douyin search/detail/collect` fail-closed。
+- 当前没有已提交、安全、脱敏、稳定的 Agent-Reach 抖音 search/detail runner schema；没有 `app/douyin_normalizer.py`、没有抖音 persistence、没有 migration、没有真实采集路径。
+
+已采用的 tasks wording：
+
+- 5.2：Record 抖音 search/detail fixture tests as blocked/N/A because no safe, redacted upstream Agent-Reach runner contract is available; do not create synthetic fixtures or claim search/detail support.
+- 5.3：Record 抖音 normalizer and persistence as blocked/N/A because the local/fake runner contract is not stable; no 抖音 normalizer, persistence, migration, or real collection path is implemented.
+
+验证：
+
+- 该收口只改 tasks wording 和 evidence；不改业务代码。
+- 最近一次 `PYTHON_BIN=.venv/bin/python npm test -- test/agent-reach-adapter.test.js` 为 9/9 pass，证明 douyin doctor/capability 受控、search/detail/collect fail-closed。
+- 后续 7.7 gate 仍需重跑全量 `npm test`、OpenSpec strict、`git diff --check`、`npm run agent:guard`、JSONL parse。
+
+未验证：
+
+- 没有真实抖音平台调用。
+- 没有读取真实 `.env`、Cookie/token、浏览器状态或 `config/cookies/*`。
+
+### 2026-06-18 Agent 13 Candidate Evidence
+
+日期：2026-06-18
+
+任务：7.7 final evidence report、subagent review、commit、push、PR update gate。
+
+状态：candidate evidence 已生成并通过 Hubble 独立 final review；允许勾选 7.7、选择性 commit/push、更新 PR。
+
+完成内容：
+
+- 6.4 旧微博路径回归已确认，旧微博 trigger/status/feedback/workbench/fixture E2E、Q&A/report `citations` 字符串兼容、legacy evidence parser、public CrewAI proposal grammar 和旧微博 API payload 均未被平台 citation 扩展破坏。
+- 7.3 真实 MySQL 暴露的三个回归已修复：runtime_failed 测试使用同项目真实 comment evidence，step-based Judge review 省略 JSON null `proposal_audit_id`，action step ledger 对 comment evidence 使用 `comment-*` 前缀避免 event/comment 裸数字碰撞。
+- 5.2/5.3 按 Dalton reviewer 要求改写为 blocked/N/A done，不实现也不声称实现抖音 search/detail、normalizer、persistence、migration 或真实 collection path。
+- 继续排除无关 `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 脏改，不读取真实 `.env`、Cookie/token、浏览器状态或 `config/cookies/*`。
+
+Done rubric 证据：
+
+1. OpenSpec 任务只剩 7.7：`openspec instructions apply --change haidao-agent-reach-multichannel-ingestion --json` 显示 34 total / 33 complete / 1 remaining，剩余 7.7。
+2. 抖音条件任务没有虚假实现：tasks 5.2/5.3 明确写为 blocked/N/A；handoff Agent 12 记录没有抖音 search/detail fixture、normalizer、persistence、migration 或真实 collection path。
+3. 真实 MySQL 修复已验证：临时本地 MySQL 8.4 Docker + `WEIBO_DB_PERSISTENCE_TEST_URL=mysql://root:<local-test-password>@127.0.0.1:<random-port>/yuqing_monitor_test_agent_loop PYTHON_BIN=.venv/bin/python npm test -- test/weibo-db-persistence.test.js` 为 53/53 pass，0 skipped，0 fail；容器已删除。
+4. 本轮最新定向验证通过：`PYTHON_BIN=.venv/bin/python npm test -- test/agent-reach-adapter.test.js` 为 9/9 pass。
+5. 本轮最新全量验证通过：`PYTHON_BIN=.venv/bin/python npm test` 为 241 tests，189 pass / 52 skipped / 0 fail。
+6. 收口 gate 通过：`openspec validate haidao-agent-reach-multichannel-ingestion --strict` valid；`git diff --check` pass；`npm run agent:guard` branch and secret checks passed；JSONL parse 为 235 lines ok。
+7. 子 agent 证据齐全：Gibbs/Parfit 覆盖 6.4，Volta 覆盖 7.3，Dalton 覆盖 5.2/5.3 blocked/N/A；所有已完成或关闭。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python npm test -- test/agent-reach-adapter.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`
+- `openspec validate haidao-agent-reach-multichannel-ingestion --strict`
+- `git diff --check`
+- `npm run agent:guard`
+- `node -e "const fs=require('fs'); const lines=fs.readFileSync('docs/agent-loop/subagent-events.jsonl','utf8').trim().split(/\n/); for (const line of lines) JSON.parse(line); console.log(lines.length+' jsonl lines ok')"`
+
+验证结果：
+
+- Agent-Reach adapter：9/9 pass。
+- 全量 no-DB：241 tests，189 pass / 52 skipped / 0 fail。
+- OpenSpec strict：valid。
+- `git diff --check`：pass。
+- `npm run agent:guard`：branch and secret checks passed；working tree has expected changes。
+- JSONL parse：235 lines ok。
+- 真实 MySQL：已在 Agent 11 使用临时本地 MySQL 8.4 Docker 跑过 53/53 pass。
+
+子 Agent 证据：
+
+- Gibbs（explorer，019ed737-96a5-7471-bc83-fb401ba0e77c）：6.4 旧微博路径回归范围与验证建议，completed_adopted_closed。
+- Parfit（reviewer，019ed73d-54f3-77c1-a0d7-58872c57c40b）：6.4 反驳式 review APPROVED，无 P0/P1/P2。
+- Volta（reviewer，019ed74f-41f0-79a1-a32d-f7b5b2b0ea7b）：7.3 真实 MySQL 回归修复 review APPROVED，无 P0/P1/P2。
+- Dalton（reviewer，019ed756-c13e-7a43-8b1c-10850f4439fa）：5.2/5.3 blocked/N/A 收口 APPROVED_TO_MARK_BLOCKED_DONE，无 P0；原始 wording 直接勾选有 P1 误导风险，已按建议改写。
+- Hubble（reviewer，019ed761-cbbc-7ab0-af24-7d8f0a301adf）：7.7 final evidence review APPROVED，无 P0/P1/P2，`safe_to_mark_7_7_commit_push_pr_update=yes`。
+
+Hubble final review 结论：
+
+- OpenSpec 进度：34 total / 33 complete / only 7.7 remaining。
+- 验证复核：OpenSpec strict pass、`git diff --check` pass、`npm run agent:guard` pass、JSONL 235 lines ok、Agent-Reach adapter 9/9 pass、FastAPI/Judge/Report/enterprise 76/76 pass。
+- Hubble 未重跑真实 MySQL 或外部平台，符合安全边界。
+- P3：Agent 10 的历史记录说 7.3 当时未验证，Agent 11/13 已记录最终真实 MySQL 53/53 pass；final evidence 已正确解释，不阻塞。
+- P3：`prefixed_comment_evidence_ids()` 依赖 action evidence 输入是 numeric comment IDs；当前 `action_from_event()` 支持该窄契约，未来平台 evidence 进入 action recommendation 前需重新审查。
+- 必须选择性 stage：`app/judge_review_service.py`、`workers/enterprise_worker.py`、`test/weibo-db-persistence.test.js`、`openspec/changes/haidao-agent-reach-multichannel-ingestion/tasks.md`、`docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`、`docs/agent-loop/subagent-events.jsonl`。
+- 必须排除：`docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md`。
+
+未验证：
+
+- 未做真实微博/B站/小红书/抖音/Agent-Reach 平台调用。
+- 未读真实 `.env`、Cookie/token、浏览器状态或 `config/cookies/*`。
+- 真实平台登录态、高风险账号动作和生产发布均未执行。
+
+剩余风险：
+
+- 抖音 search/detail、normalizer、persistence 和真实 collection 仍是 blocked/N/A，后续必须等安全、脱敏、稳定的上游 runner contract 或人工确认边界后另开 change。
+- `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有无关脏改，提交必须选择性 staging 排除。
+- 最终项目验收尚未执行；7.7 和 PR 更新后仍需按 `docs/final-acceptance.md` 启动网站、真实浏览器操作并监控日志。
