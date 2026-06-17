@@ -156,3 +156,52 @@ Agent：Jason（worker，019ed620-6089-7302-8aee-4af7b35b53b5）
 
 - 真实小红书登录态、Spider_XHS 真实采集、persistence、FastAPI endpoint、抖音均不在 4.1/4.2 范围内。
 - 提交必须选择性 stage，排除无关 `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 脏改。
+
+### 2026-06-17 Agent 3
+
+日期：2026-06-17
+
+Agent：Lorentz（worker，019ed64b-b733-7ac0-8dba-a2e2ed3c62a9）
+
+任务：小红书 auth-required/login-state boundary 4.3/4.4
+
+状态：worker 已完成最小切片；未更新 OpenSpec tasks，未 commit/push。
+
+改动文件：
+
+- `app/xiaohongshu_collection_service.py`
+- `test/xiaohongshu-collection-service.test.js`
+- `docs/agent-loop/subagent-events.jsonl`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+
+新增接口：
+
+- `XiaohongshuCollectionService(runner=None, login_state_provider=None)`
+- `collect(public_request)` 返回小红书专属 public result；缺 private login provider 或 provider 空值时 fail-closed 为 `platform_auth_required`，runner 不执行。
+
+安全边界：
+
+- public request 只白名单透传 `project_id`、`query`、`keywords`、`limit`、`cursor`、`raw_artifact_ref`，不接受 caller `command`，也不接受 public `cookie` / `token` / `storageState` / `browserState` 作为登录态。
+- service-owned runner command 固定为 `xiaohongshu_collect`。
+- injected private login state 只放入 runner request 的 `private.login_state`，不进入 public result。
+- public result 对 summary、content_items、evidence_summaries 分别使用字段白名单；`stdout`、`stderr`、`step_output`、`log_output` 无 public 输出路径。
+
+TDD 证据：
+
+- RED：`PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-collection-service.test.js` 初次运行 5/5 fail，失败原因为 `ModuleNotFoundError: No module named 'app.xiaohongshu_collection_service'`。
+- GREEN：同命令复跑 5/5 pass。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-collection-service.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test test/xiaohongshu-collection-service.test.js test/xiaohongshu-normalizer.test.js test/agent-reach-adapter.test.js test/bilibili-collection-step.test.js`
+
+验证结果：
+
+- 小红书 collection service 5/5 pass。
+- 小红书 collection + normalizer + Agent-Reach adapter + B站 collection step 21/21 pass。
+
+遗留问题：
+
+- 本切片不做真实登录、真实小红书/Agent-Reach/Spider_XHS 调用、persistence/MySQL、FastAPI endpoint、CrewAI/Judge/Report、抖音。
+- 仍需主控/后续 reviewer 做反驳式 review 后再决定 tasks 勾选、commit/push。

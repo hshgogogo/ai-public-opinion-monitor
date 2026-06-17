@@ -31,7 +31,7 @@ class XiaohongshuNormalizer:
 
     def normalize_search_fixture(self, path, raw_artifact_ref):
         fixture = _read_json(path)
-        safe_artifact_ref = _safe_artifact_ref(raw_artifact_ref)
+        safe_artifact_ref = safe_xiaohongshu_artifact_ref(raw_artifact_ref)
         notes = _search_notes(fixture)
         evidence_summaries = [
             self._item_evidence_summary(note, safe_artifact_ref)
@@ -52,7 +52,7 @@ class XiaohongshuNormalizer:
 
     def normalize_detail_fixture(self, path, raw_artifact_ref):
         fixture = _read_json(path)
-        safe_artifact_ref = _safe_artifact_ref(raw_artifact_ref)
+        safe_artifact_ref = safe_xiaohongshu_artifact_ref(raw_artifact_ref)
         note = _detail_note(fixture)
         evidence_summaries = self._detail_evidence_summaries(
             note,
@@ -294,7 +294,7 @@ def _safe_public(value):
     return sanitize_agent_reach_public(value)
 
 
-def _safe_artifact_ref(value):
+def safe_xiaohongshu_artifact_ref(value):
     safe = sanitize_agent_reach_public(value)
     if not isinstance(safe, str):
         return None
@@ -313,6 +313,10 @@ def _safe_artifact_ref(value):
     if any(marker in compact for marker in SENSITIVE_ARTIFACT_REF_MARKERS):
         return None
     return safe
+
+
+def _safe_artifact_ref(value):
+    return safe_xiaohongshu_artifact_ref(value)
 
 
 def _safe_id_part(value):

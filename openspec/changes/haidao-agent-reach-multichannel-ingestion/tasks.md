@@ -25,8 +25,8 @@
 
 - [x] 4.1 Write 小红书 fixture tests for note/search/detail normalization.
 - [x] 4.2 Implement 小红书 normalizer with source account and note/comment evidence mapping.
-- [ ] 4.3 Write auth-required tests proving missing local login state returns `platform_auth_required` without fake success.
-- [ ] 4.4 Implement login-state boundary so credentials are only available inside the controlled runner.
+- [x] 4.3 Write auth-required tests proving missing local login state returns `platform_auth_required` without fake success.
+- [x] 4.4 Implement login-state boundary so credentials are only available inside the controlled runner.
 - [ ] 4.5 Add persistence tests and idempotent writes for 小红书 evidence.
 
 ## 5. 抖音 Final Slice

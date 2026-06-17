@@ -57,3 +57,21 @@ Apply:
 
 Verification:
 - 测试同时覆盖 `summary.stdout`、caller `payload.command`、missing/cross-project `agentLoopRunId`、source-account-only/zero durable content partial。
+
+## 平台 artifact ref 只做通用脱敏但不做 allowlist
+
+When:
+- 平台 normalizer、collection service 或 persistence writer 要把 `artifact_ref` / `raw_artifact_ref` 暴露给 public payload、runner payload、step output 或 evidence summary。
+
+Symptom:
+- 普通 secret sanitizer 能删掉明显 Cookie/token 字段，但 path-safe 名称如 `raw_stdout_collector_transcript.json`、`raw-stdout-collector-transcript.json`、`collector_transcript` 或 `storage-state` 仍可能作为 artifact path 进入 public output 或被传给 runner。
+
+Root cause:
+- Artifact reference 是路径语义，不是普通字符串；只做递归 sanitizer 无法表达“只允许当前平台受控 artifacts 目录下的安全文件名”。
+
+Apply:
+- 每个平台必须有专用 artifact allowlist helper，并在所有入口复用：public request、runner output、content item、evidence summary、step output 和 persistence payload。
+- Caller-controlled artifact ref 不能直接透传；只有通过平台 allowlist 后才允许进入 runner payload。
+
+Verification:
+- 测试同时覆盖 top-level artifact、content/evidence raw artifact、caller raw artifact，包含 `raw_stdout`、`raw-stdout`、`collector_transcript`、Cookie/token/storage marker、绝对路径、`..`、反斜杠、冒号、wrong prefix 和 safe path 保留。
