@@ -3117,6 +3117,9 @@ def weibo_actions_build_payload(payload_json="{}"):
             "projectId": project["id"],
             "events_considered": len(rows),
             "actions": actions,
+            "recommendations": action_step_recommendations(actions),
+            "knowledge_references": action_step_knowledge_references(actions),
+            "knowledge_reference_details": action_step_knowledge_reference_details(actions),
             "persisted_actions": persisted,
             "deepseek": {"status": "not_run", "reason": "deterministic_strategy_slice"},
         }
@@ -3127,7 +3130,17 @@ def weibo_actions_build_payload(payload_json="{}"):
             result,
             attachment,
             status=status,
-            output_json=agent_step_output("weibo-actions-build", result, ["events_considered", "persisted_actions", "deepseek"]),
+            output_json=agent_step_output(
+                "weibo-actions-build",
+                result,
+                [
+                    "events_considered",
+                    "persisted_actions",
+                    "recommendations",
+                    "knowledge_references",
+                    "knowledge_reference_details",
+                ],
+            ),
             evidence_ids=evidence_ids,
             error_type=error_type,
             error_message="No evidence-backed Weibo actions were recommended." if error_type else None,
@@ -5416,6 +5429,70 @@ def action_step_evidence_ids(actions):
             evidence_ids.append(f"event-{action['related_event_id']}")
         evidence_ids.extend(action.get("evidence_ids") or [])
     return unique_evidence_ids(evidence_ids)
+
+
+def action_step_recommendations(actions):
+    recommendations = []
+    for action in actions:
+        recommendation = compact_dict({
+            "text": action.get("content_summary"),
+            "reason": action.get("reason"),
+            "owner": action.get("owner_suggestion"),
+            "priority": action.get("priority"),
+            "check_after": action.get("recommended_check_after_at"),
+            "action_type": action.get("action_type"),
+            "evidence_ids": prefixed_comment_evidence_ids(action.get("evidence_ids") or []),
+            "related_event_id": f"event-{action['related_event_id']}" if action.get("related_event_id") else None,
+        })
+        if recommendation:
+            recommendations.append(recommendation)
+    return recommendations
+
+
+def action_step_knowledge_references(actions):
+    references = []
+    for action in actions:
+        for item in public_action_knowledge_references(action.get("raw_json")):
+            card_id = item.get("card_id")
+            if card_id:
+                references.append(f"knowledge-card-{card_id}")
+    return unique_evidence_ids(references)
+
+
+def action_step_knowledge_reference_details(actions):
+    details = []
+    for action in actions:
+        for item in public_action_knowledge_references(action.get("raw_json")):
+            card_id = item.get("card_id")
+            if not card_id:
+                continue
+            details.append(compact_dict({
+                "id": f"knowledge-card-{card_id}",
+                "reliability_level": item.get("reliability_level"),
+                "usage": item.get("citation_role"),
+            }))
+    return details
+
+
+def prefixed_comment_evidence_ids(values):
+    evidence_ids = []
+    for value in values:
+        numeric = numeric_id(value)
+        if numeric:
+            evidence_ids.append(f"comment-{numeric}")
+            continue
+        text = str(value or "").strip()
+        if text:
+            evidence_ids.append(text)
+    return unique_evidence_ids(evidence_ids)
+
+
+def compact_dict(values):
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not None and value != "" and value != []
+    }
 
 
 def create_agent_loop_run(project_id, platform="weibo", trigger_mode="manual", target_id=None, status="running", current_step=None, input_json=None, summary_json=None, error_type=None, error_message=None):

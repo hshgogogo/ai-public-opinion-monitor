@@ -1176,6 +1176,352 @@ print(json.dumps({
 );
 
 test(
+  "FastAPI Judge review endpoint maps action recommendation step output without fixtureOutputs",
+  { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
+  () => {
+    resetTestDatabase();
+    assert.equal(runWorker(["migrate"]).ok, true);
+    const projectId = queryRows("SELECT id FROM monitor_projects ORDER BY id LIMIT 1")[0].id;
+    const otherProjectId = createProject("Judge action step output cross-project fixture");
+    const commentId = createEvidenceComment(projectId, "judge-step-output-action-comment");
+    const eventId = createKnowledgeActionEvent(projectId, "judge-step-output-action-event", [commentId]);
+    const actionId = createAction(projectId, "judge-step-output-action-record");
+
+    const loop = runWorker([
+      "weibo-agent-loop-run",
+      "--payload-json",
+      JSON.stringify({
+        projectId,
+        triggerMode: "manual",
+        input: { source: "judge-action-step-output-review-test" }
+      })
+    ]);
+    assert.equal(loop.ok, true, loop);
+    const agentLoopRunId = loop.run.id;
+
+    const actions = runWorker([
+      "weibo-actions-build",
+      "--payload-json",
+      JSON.stringify({ projectId, agentLoopRunId, now: "2026-06-10T12:00:00Z" })
+    ]);
+    assert.equal(actions.ok, true, actions);
+    assert.equal(actions.agentStepRun.step_name, "action_recommendation", actions);
+    assert.equal(actions.agentStepRun.evidence_ids.includes(`event-${eventId}`), true, actions);
+    assert.equal(actions.agentStepRun.evidence_ids.includes(commentId), true, actions);
+    assert.deepEqual(actions.agentStepRun.output_json.recommendations, [{
+      text: actions.actions[0].content_summary,
+      reason: actions.actions[0].reason,
+      owner: "宣发负责人",
+      priority: actions.actions[0].priority,
+      check_after: actions.actions[0].recommended_check_after_at,
+      action_type: actions.actions[0].action_type,
+      evidence_ids: actions.actions[0].evidence_ids.map((id) => `comment-${id}`),
+      related_event_id: `event-${eventId}`
+    }], actions.agentStepRun.output_json);
+    for (const forbidden of ["raw_json", "deepseek", "knowledge_fit", "source_id", "source_identity", "match_reasons", "judge_questions", "token", "cookie", "stderr"]) {
+      assert.equal(JSON.stringify(actions.agentStepRun.output_json).includes(forbidden), false, actions.agentStepRun.output_json);
+    }
+
+    const result = runPythonSnippet(`
+import json
+import os
+from app.main import create_app
+from fastapi.testclient import TestClient
+from workers import enterprise_worker as worker
+
+project_id = int(os.environ["PROJECT_ID"])
+other_project_id = int(os.environ["OTHER_PROJECT_ID"])
+loop_id = int(os.environ["LOOP_ID"])
+action_step_id = int(os.environ["ACTION_STEP_ID"])
+event_id = int(os.environ["EVENT_ID"])
+comment_id = int(os.environ["COMMENT_ID"])
+action_id = int(os.environ["ACTION_ID"])
+
+missing_evidence_step = worker.record_agent_step_run(
+    loop_run_id=loop_id,
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="action_recommendation",
+    status="partial",
+    output_json={
+        "command": "weibo-actions-build",
+        "events_considered": 0,
+        "persisted_actions": 0,
+    },
+    evidence_ids=[],
+)
+action_only_step = worker.record_agent_step_run(
+    loop_run_id=loop_id,
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="action_recommendation",
+    status="succeeded",
+    output_json={
+        "command": "weibo-actions-build",
+        "events_considered": 1,
+        "persisted_actions": 1,
+    },
+    evidence_ids=[f"action-{action_id}"],
+)
+vague_action_step = worker.record_agent_step_run(
+    loop_run_id=loop_id,
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="action_recommendation",
+    status="succeeded",
+    output_json={
+        "command": "weibo-actions-build",
+        "events_considered": 1,
+        "persisted_actions": 1,
+        "summary": "建议继续关注，加强沟通。",
+        "recommendations": [{"text": "继续关注，加强沟通。"}],
+    },
+    evidence_ids=[f"event-{event_id}", f"comment-{comment_id}"],
+)
+causal_step = worker.record_agent_step_run(
+    loop_run_id=loop_id,
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="action_recommendation",
+    status="succeeded",
+    output_json={
+        "command": "weibo-actions-build",
+        "events_considered": 1,
+        "persisted_actions": 1,
+        "summary": "这次宣发行动单独导致负面评论下降，行动效果已经确定。",
+        "recommendations": [{
+            "owner": "PR",
+            "priority": "high",
+            "check_after": "24h",
+            "text": f"Use comment-{comment_id} as the monitoring signal."
+        }],
+    },
+    evidence_ids=[f"event-{event_id}", f"comment-{comment_id}"],
+)
+bot_step = worker.record_agent_step_run(
+    loop_run_id=loop_id,
+    project_id=project_id,
+    agent_name="QA Agent",
+    step_name="evidence_qa",
+    status="succeeded",
+    output_json={
+        "command": "weibo-bot-message",
+        "conversationId": 123,
+        "answer": {"summary": "bot answer is not in this Judge retry slice"},
+    },
+    evidence_ids=[f"comment-{comment_id}"],
+)
+same_project_other_loop = worker.create_agent_loop_run(
+    project_id=project_id,
+    trigger_mode="manual",
+    current_step="action_recommendation",
+    input_json={"source": "judge-action-step-output-other-run"},
+)
+same_project_other_step = worker.record_agent_step_run(
+    loop_run_id=same_project_other_loop["id"],
+    project_id=project_id,
+    agent_name="Strategy Agent",
+    step_name="action_recommendation",
+    status="succeeded",
+    output_json={
+        "command": "weibo-actions-build",
+        "events_considered": 1,
+        "persisted_actions": 1,
+    },
+    evidence_ids=[f"event-{event_id}", f"comment-{comment_id}"],
+)
+other_project_loop = worker.create_agent_loop_run(
+    project_id=other_project_id,
+    trigger_mode="manual",
+    current_step="action_recommendation",
+    input_json={"source": "judge-action-step-output-other-project"},
+)
+other_project_step = worker.record_agent_step_run(
+    loop_run_id=other_project_loop["id"],
+    project_id=other_project_id,
+    agent_name="Strategy Agent",
+    step_name="action_recommendation",
+    status="succeeded",
+    output_json={
+        "command": "weibo-actions-build",
+        "events_considered": 1,
+        "persisted_actions": 1,
+    },
+    evidence_ids=[f"event-{event_id}"],
+)
+
+client = TestClient(create_app())
+
+def post(step_id):
+    response = client.post(
+        f"/api/weibo/agent-runs/{loop_id}/judge/reviews",
+        json={
+            "projectId": project_id,
+            "stepRunId": step_id,
+            "maxAttempts": 3,
+        },
+    )
+    return {"status": response.status_code, "payload": response.json()}
+
+print(json.dumps({
+    "loop_id": loop_id,
+    "action_step_id": action_step_id,
+    "missing_step_id": missing_evidence_step["id"],
+    "action_only_step_id": action_only_step["id"],
+    "vague_step_id": vague_action_step["id"],
+    "causal_step_id": causal_step["id"],
+    "response": post(action_step_id),
+    "missing": post(missing_evidence_step["id"]),
+    "action_only": post(action_only_step["id"]),
+    "vague": post(vague_action_step["id"]),
+    "causal": post(causal_step["id"]),
+    "bot": post(bot_step["id"]),
+    "wrong_run": post(same_project_other_step["id"]),
+    "cross_project": post(other_project_step["id"]),
+}, ensure_ascii=False, default=str))
+`, {
+      PROJECT_ID: String(projectId),
+      OTHER_PROJECT_ID: String(otherProjectId),
+      LOOP_ID: String(agentLoopRunId),
+      ACTION_STEP_ID: String(actions.agentStepRun.id),
+      EVENT_ID: String(eventId),
+      COMMENT_ID: String(commentId),
+      ACTION_ID: String(actionId)
+    });
+
+    assert.equal(result.response.status, 200, result.response);
+    assert.equal(result.response.payload.ok, true, result.response);
+    assert.equal(result.response.payload.proposalAuditId, null, result.response);
+    assert.equal(result.response.payload.stepRunId, result.action_step_id, result.response);
+    assert.equal(result.response.payload.review.status, "passed", result.response);
+    assert.deepEqual(result.response.payload.review.evidence_errors, [], result.response);
+
+    assert.equal(result.missing.status, 200, result.missing);
+    assert.equal(result.missing.payload.review.status, "failed", result.missing);
+    assert.equal(result.missing.payload.review.evidence_errors.some((item) => item.error_type === "missing_evidence_ids"), true, result.missing);
+
+    assert.equal(result.action_only.status, 200, result.action_only);
+    assert.equal(result.action_only.payload.review.status, "failed", result.action_only);
+    assert.equal(result.action_only.payload.review.evidence_errors.some((item) => item.error_type === "action_recommendation_source_evidence_required"), true, result.action_only);
+
+    assert.equal(result.vague.status, 200, result.vague);
+    assert.equal(result.vague.payload.review.status, "failed", result.vague);
+    assert.equal(result.vague.payload.review.evidence_errors.some((item) => item.error_type === "vague_action_without_operational_fields"), true, result.vague);
+
+    assert.equal(result.causal.status, 200, result.causal);
+    assert.equal(result.causal.payload.review.status, "failed", result.causal);
+    assert.equal(result.causal.payload.review.evidence_errors.some((item) => item.error_type === "single_cause_overclaim"), true, result.causal);
+
+    assert.equal(result.bot.status, 404, result.bot);
+    assert.equal(result.bot.payload.error_type, "judge_review_source_not_found", result.bot);
+    assert.equal(result.wrong_run.status, 404, result.wrong_run);
+    assert.equal(result.wrong_run.payload.error_type, "judge_review_source_not_found", result.wrong_run);
+    assert.equal(result.cross_project.status, 404, result.cross_project);
+    assert.equal(result.cross_project.payload.error_type, "judge_review_source_not_found", result.cross_project);
+
+    assert.deepEqual(queryRows(
+      `
+      SELECT
+        step_run_id,
+        status,
+        passed,
+        retry_count,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.evidence_ids[0]')) AS first_evidence_id,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.evidence_ids[1]')) AS second_evidence_id,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.summary')) AS summary,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.deepseek.status')) AS deepseek_status,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.recommendations[0].text')) AS recommendation_text,
+        JSON_UNQUOTE(JSON_EXTRACT(feedback_json, '$.failed_output_summary.recommendations[0].owner')) AS recommendation_owner,
+        JSON_UNQUOTE(JSON_EXTRACT(evidence_errors, '$[0].error_type')) AS first_error_type
+      FROM judge_reviews
+      WHERE loop_run_id=%s AND project_id=%s
+      ORDER BY id
+      `,
+      [result.loop_id, projectId]
+    ), [
+      {
+        step_run_id: result.action_step_id,
+        status: "passed",
+        passed: 1,
+        retry_count: 0,
+        first_evidence_id: `event-${eventId}`,
+        second_evidence_id: `comment-${commentId}`,
+        summary: "weibo-actions-build persisted 1 action(s) from 1 candidate event(s).",
+        deepseek_status: null,
+        recommendation_text: actions.actions[0].content_summary,
+        recommendation_owner: "宣发负责人",
+        first_error_type: null
+      },
+      {
+        step_run_id: result.missing_step_id,
+        status: "failed",
+        passed: 0,
+        retry_count: 0,
+        first_evidence_id: null,
+        second_evidence_id: null,
+        summary: "weibo-actions-build persisted 0 action(s) from 0 candidate event(s).",
+        deepseek_status: null,
+        recommendation_text: null,
+        recommendation_owner: null,
+        first_error_type: "missing_evidence_ids"
+      },
+      {
+        step_run_id: result.action_only_step_id,
+        status: "failed",
+        passed: 0,
+        retry_count: 0,
+        first_evidence_id: "action-" + actionId,
+        second_evidence_id: null,
+        summary: "weibo-actions-build persisted 1 action(s) from 1 candidate event(s).",
+        deepseek_status: null,
+        recommendation_text: null,
+        recommendation_owner: null,
+        first_error_type: "action_recommendation_source_evidence_required"
+      },
+      {
+        step_run_id: result.vague_step_id,
+        status: "failed",
+        passed: 0,
+        retry_count: 0,
+        first_evidence_id: `event-${eventId}`,
+        second_evidence_id: `comment-${commentId}`,
+        summary: "建议继续关注，加强沟通。",
+        deepseek_status: null,
+        recommendation_text: "继续关注，加强沟通。",
+        recommendation_owner: null,
+        first_error_type: "vague_action_without_operational_fields"
+      },
+      {
+        step_run_id: result.causal_step_id,
+        status: "failed",
+        passed: 0,
+        retry_count: 0,
+        first_evidence_id: `event-${eventId}`,
+        second_evidence_id: `comment-${commentId}`,
+        summary: "这次宣发行动单独导致负面评论下降，行动效果已经确定。",
+        deepseek_status: null,
+        recommendation_text: `Use comment-${commentId} as the monitoring signal.`,
+        recommendation_owner: "PR",
+        first_error_type: "single_cause_overclaim"
+      }
+    ]);
+
+    const serializedReviews = JSON.stringify(queryRows(
+      "SELECT feedback_json FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s ORDER BY id",
+      [result.loop_id, projectId]
+    ));
+    for (const forbidden of ["raw_json", "deepseek", "knowledge_fit", "source_id", "source_identity", "match_reasons", "judge_questions", "token", "cookie", "stderr"]) {
+      assert.equal(serializedReviews.includes(forbidden), false, serializedReviews);
+    }
+
+    assert.deepEqual(queryRows(
+      "SELECT COUNT(*) AS count FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s",
+      [result.loop_id, projectId]
+    )[0], { count: 5 });
+  }
+);
+
+test(
   "FastAPI Judge review endpoint resolves owned evidence IDs and rejects cross-project analysis IDs",
   { skip: testMysqlUrl ? false : "set WEIBO_DB_PERSISTENCE_TEST_URL to run real MySQL persistence tests" },
   () => {

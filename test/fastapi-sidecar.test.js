@@ -1115,6 +1115,351 @@ assert wrong_command["error_type"] == "judge_review_source_not_found", wrong_com
 `);
 });
 
+test("JudgeReviewService maps weibo-actions-build step output into Rule Judge input", () => {
+  runPython(`
+import json
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+class SourceRepository:
+    def __init__(
+        self,
+        evidence_ids=None,
+        command="weibo-actions-build",
+        output_json=None,
+    ):
+        self.calls = []
+        self.output_calls = []
+        self.evidence_ids = evidence_ids if evidence_ids is not None else ["event-7", "123", "memory-9"]
+        self.command = command
+        self.output_json = output_json
+
+    def has_sources(self, run_id, project_id, proposal_audit_id=None, step_run_id=None):
+        self.calls.append((run_id, project_id, proposal_audit_id, step_run_id))
+        return run_id == 10 and project_id == 2 and proposal_audit_id is None and step_run_id == 54
+
+    def step_output_for_review(self, run_id, project_id, step_run_id):
+        self.output_calls.append((run_id, project_id, step_run_id))
+        output_json = self.output_json or {
+            "command": self.command,
+            "events_considered": 2,
+            "persisted_actions": 1,
+            "candidate_events": 2,
+            "deepseek": {"status": "not_run", "secret": "must-not-leak"},
+            "actions": [{"raw_json": {"internal": "must-not-leak"}}],
+            "recommendations": [{
+                "text": "Use comment-123 as the monitoring signal.",
+                "owner": "PR",
+                "priority": "medium",
+                "check_after": "24h",
+                "evidence_ids": ["comment-123"],
+                "raw_json": {"token": "secret-token"},
+                "token": "secret-token",
+                "cookie": "SUB=secret",
+                "stderr": "secret stderr",
+                "source_id": 999,
+                "source_identity": "internal-source",
+                "knowledge_fit": [{"source_id": 1, "match_reasons": ["internal"]}],
+            }],
+            "knowledge_reference_details": [{
+                "id": "knowledge-card-8",
+                "reliability_level": "A",
+                "usage": "supporting_reference",
+                "source_id": 999,
+                "source_identity": "internal-source",
+                "match_reasons": ["internal"],
+                "judge_questions": ["internal"],
+                "raw_json": {"token": "secret-token"},
+            }],
+            "knowledgeReferences": [{
+                "id": "knowledge-card-8",
+                "reliability_level": "A",
+                "usage": "supporting_reference",
+                "raw_json": {"token": "secret-token"},
+            }],
+        }
+        output_json["command"] = self.command
+        return {
+            "ok": True,
+            "step": {
+                "id": step_run_id,
+                "step_name": "action_recommendation",
+                "status": "succeeded",
+                "output_json": output_json,
+                "evidence_ids": self.evidence_ids,
+            },
+        }
+
+class EvidenceRepository:
+    def __init__(self):
+        self.calls = []
+        self.knowledge_calls = []
+
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        self.calls.append((project_id, list(evidence_ids)))
+        return {"event-7", "comment-123", "memory-9"}.intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        self.knowledge_calls.append((project_id, list(knowledge_ids)))
+        return {"knowledge-card-8"}.intersection(knowledge_ids)
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append({
+            "proposal_audit_id": proposal_audit_id,
+            "step_run_id": step_run_id,
+            "review": persisted,
+            "output": output,
+        })
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        raise AssertionError("single action step-output review should not create handoff")
+
+source_repository = SourceRepository()
+review_repository = ReviewRepository()
+evidence_repository = EvidenceRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=source_repository,
+    review_repository=review_repository,
+    evidence_repository=evidence_repository,
+)
+
+accepted = service.create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert accepted["ok"] is True, accepted
+assert accepted["proposalAuditId"] is None, accepted
+assert accepted["stepRunId"] == 54, accepted
+assert accepted["review"]["status"] == "passed", accepted
+assert accepted["review"]["retry_count"] == 0, accepted
+assert source_repository.calls == [(10, 2, None, 54)], source_repository.calls
+assert source_repository.output_calls == [(10, 2, 54)], source_repository.output_calls
+assert evidence_repository.calls == [(2, ["event-7", "comment-123", "memory-9"])], evidence_repository.calls
+assert len(review_repository.records) == 1, review_repository.records
+recorded = review_repository.records[0]
+assert recorded["proposal_audit_id"] is None, recorded
+assert recorded["step_run_id"] == 54, recorded
+assert recorded["output"]["command"] == "weibo-actions-build", recorded
+assert recorded["output"]["evidence_ids"] == ["event-7", "comment-123", "memory-9"], recorded
+assert recorded["output"]["summary"] == "weibo-actions-build persisted 1 action(s) from 2 candidate event(s).", recorded
+assert recorded["output"]["persisted_actions"] == 1, recorded
+assert recorded["output"]["candidate_events"] == 2, recorded
+assert "deepseek" not in recorded["output"], recorded
+assert "actions" not in recorded["output"], recorded
+assert recorded["output"]["recommendations"] == [{
+    "text": "Use comment-123 as the monitoring signal.",
+    "owner": "PR",
+    "priority": "medium",
+    "check_after": "24h",
+    "evidence_ids": ["comment-123"],
+}], recorded
+assert recorded["output"]["knowledge_references"] == ["knowledge-card-8"], recorded
+assert recorded["output"]["knowledge_reference_details"] == [{
+    "id": "knowledge-card-8",
+    "reliability_level": "A",
+    "usage": "supporting_reference",
+}], recorded
+serialized_output = json.dumps(recorded["output"], ensure_ascii=False)
+serialized_review = json.dumps(recorded["review"]["feedback_json"], ensure_ascii=False)
+for forbidden in [
+    "secret-token",
+    "SUB=secret",
+    "secret stderr",
+    "raw_json",
+    "source_id",
+    "source_identity",
+    "knowledge_fit",
+    "match_reasons",
+    "judge_questions",
+]:
+    assert forbidden not in serialized_output, serialized_output
+    assert forbidden not in serialized_review, serialized_review
+
+missing_evidence_reviews = ReviewRepository()
+missing_evidence = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=[]),
+    review_repository=missing_evidence_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert missing_evidence["review"]["status"] == "failed", missing_evidence
+assert missing_evidence["review"]["passed"] is False, missing_evidence
+assert any(item["error_type"] == "missing_evidence_ids" for item in missing_evidence["review"]["evidence_errors"]), missing_evidence
+assert len(missing_evidence_reviews.records) == 1, missing_evidence_reviews.records
+
+knowledge_as_evidence_reviews = ReviewRepository()
+knowledge_as_evidence = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=["knowledge-card-8"]),
+    review_repository=knowledge_as_evidence_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert knowledge_as_evidence["review"]["status"] == "failed", knowledge_as_evidence
+knowledge_as_evidence_errors = knowledge_as_evidence["review"]["evidence_errors"]
+assert any(item["error_type"] == "knowledge_card_in_evidence_ids" for item in knowledge_as_evidence_errors), knowledge_as_evidence
+assert len(knowledge_as_evidence_reviews.records) == 1, knowledge_as_evidence_reviews.records
+
+missing_knowledge_reviews = ReviewRepository()
+missing_knowledge = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(
+        evidence_ids=["event-7", "comment-123"],
+        output_json={
+            "command": "weibo-actions-build",
+            "persisted_actions": 1,
+            "events_considered": 2,
+            "knowledge_references": ["knowledge-card-999"],
+        },
+    ),
+    review_repository=missing_knowledge_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert missing_knowledge["review"]["status"] == "failed", missing_knowledge
+assert any(item["error_type"] == "knowledge_reference_not_found" for item in missing_knowledge["review"]["evidence_errors"]), missing_knowledge
+
+inactive_knowledge_reviews = ReviewRepository()
+inactive_knowledge_repo = EvidenceRepository()
+inactive_knowledge_repo.existing_knowledge_card_ids = lambda project_id, knowledge_ids: set()
+inactive_knowledge = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(
+        evidence_ids=["event-7", "comment-123"],
+        output_json={
+            "command": "weibo-actions-build",
+            "persisted_actions": 1,
+            "events_considered": 2,
+            "knowledge_references": ["knowledge-card-8"],
+        },
+    ),
+    review_repository=inactive_knowledge_reviews,
+    evidence_repository=inactive_knowledge_repo,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert inactive_knowledge["review"]["status"] == "failed", inactive_knowledge
+assert any(item["error_type"] == "knowledge_reference_not_found" for item in inactive_knowledge["review"]["evidence_errors"]), inactive_knowledge
+
+action_only_reviews = ReviewRepository()
+action_only = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=["action-6"]),
+    review_repository=action_only_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert action_only["review"]["status"] == "failed", action_only
+assert any(item["error_type"] == "action_recommendation_source_evidence_required" for item in action_only["review"]["evidence_errors"]), action_only
+
+event_with_numeric_fallback_reviews = ReviewRepository()
+event_with_numeric_fallback_evidence = EvidenceRepository()
+event_with_numeric_fallback = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(evidence_ids=["event-7", "7"]),
+    review_repository=event_with_numeric_fallback_reviews,
+    evidence_repository=event_with_numeric_fallback_evidence,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert event_with_numeric_fallback["review"]["status"] == "passed", event_with_numeric_fallback
+assert event_with_numeric_fallback_evidence.calls == [(2, ["event-7"])], event_with_numeric_fallback_evidence.calls
+assert event_with_numeric_fallback_reviews.records[0]["output"]["evidence_ids"] == ["event-7"], event_with_numeric_fallback_reviews.records
+
+vague_action_reviews = ReviewRepository()
+vague_action = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(
+        evidence_ids=["event-7", "comment-123"],
+        output_json={
+            "command": "weibo-actions-build",
+            "persisted_actions": 1,
+            "events_considered": 2,
+            "summary": "建议继续关注，加强沟通。",
+            "recommendations": [{"text": "继续关注，加强沟通。"}],
+        },
+    ),
+    review_repository=vague_action_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert vague_action["review"]["status"] == "failed", vague_action
+assert any(item["error_type"] == "vague_action_without_operational_fields" for item in vague_action["review"]["evidence_errors"]), vague_action
+
+causal_overclaim_reviews = ReviewRepository()
+causal_overclaim = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(
+        evidence_ids=["event-7", "comment-123"],
+        output_json={
+            "command": "weibo-actions-build",
+            "persisted_actions": 1,
+            "events_considered": 2,
+            "summary": "这次宣发行动单独导致负面评论下降，行动效果已经确定。",
+            "recommendations": [{
+                "owner": "PR",
+                "priority": "high",
+                "check_after": "24h",
+                "text": "Use comment-123 as the monitoring signal."
+            }],
+        },
+    ),
+    review_repository=causal_overclaim_reviews,
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert causal_overclaim["review"]["status"] == "failed", causal_overclaim
+assert any(item["error_type"] == "single_cause_overclaim" for item in causal_overclaim["review"]["evidence_errors"]), causal_overclaim
+
+wrong_command = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=SourceRepository(command="weibo-bot-message"),
+    review_repository=ReviewRepository(),
+    evidence_repository=evidence_repository,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 54,
+    "maxAttempts": 3,
+})
+assert wrong_command["ok"] is False, wrong_command
+assert wrong_command["error_type"] == "judge_review_source_not_found", wrong_command
+`);
+});
+
 test("JudgeReviewService runs fixture outputs as a clamped three-attempt rule Judge retry", () => {
   runPython(`
 from app.judge_review_service import JudgeReviewService

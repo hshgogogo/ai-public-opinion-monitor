@@ -382,6 +382,8 @@ def map_step_output_for_review(step):
         return map_comment_analysis_step_output(step)
     if step.get("step_name") == "event_building" and command == "weibo-events-build":
         return map_event_building_step_output(step)
+    if step.get("step_name") == "action_recommendation" and command == "weibo-actions-build":
+        return map_action_recommendation_step_output(step)
     return unsupported_step_output_error()
 
 
@@ -430,10 +432,195 @@ def map_event_building_step_output(step):
     return {"ok": True, "output": output}
 
 
+def map_action_recommendation_step_output(step):
+    if not isinstance(step, dict):
+        return unsupported_step_output_error()
+    output_json = step.get("output_json") if isinstance(step.get("output_json"), dict) else {}
+    if step.get("step_name") != "action_recommendation" or output_json.get("command") != "weibo-actions-build":
+        return unsupported_step_output_error()
+    persisted_actions = integer_or_zero(output_json.get("persisted_actions"))
+    candidate_events = action_candidate_event_count(output_json)
+    output = {
+        "summary": action_step_summary(output_json, persisted_actions, candidate_events),
+        "evidence_ids": normalize_action_recommendation_evidence_ids(step.get("evidence_ids")),
+        "knowledge_references": action_step_knowledge_references(output_json),
+        "_allowed_evidence_prefixes": ["target", "post", "comment", "analysis", "event", "action", "memory"],
+        "_unsupported_evidence_error_type": "unsupported_action_recommendation_evidence_prefix",
+        "_unsupported_evidence_required_change": (
+            "Use only target-*, post-*, comment-*, analysis-*, event-*, action-*, or memory-* evidence IDs "
+            "for action recommendation Judge reviews."
+        ),
+        "_unsupported_evidence_message": "This step output can only use project evidence IDs for action recommendation reviews.",
+        "_required_source_evidence_prefixes": ["target", "post", "comment", "analysis", "event", "memory"],
+        "_source_evidence_error_type": "action_recommendation_source_evidence_required",
+        "_source_evidence_required_change": (
+            "Add at least one real target, post, comment, analysis, event, or memory evidence ID before "
+            "treating an action recommendation output as accepted."
+        ),
+        "command": "weibo-actions-build",
+        "candidate_events": candidate_events,
+        "persisted_actions": persisted_actions,
+    }
+    recommendations = sanitized_action_recommendations(output_json.get("recommendations"))
+    if recommendations:
+        output["recommendations"] = recommendations
+    suggestions = sanitized_action_recommendations(output_json.get("suggestions"))
+    if suggestions:
+        output["suggestions"] = suggestions
+    knowledge_details = sanitized_knowledge_reference_details(output_json.get("knowledge_reference_details"))
+    if knowledge_details:
+        output["knowledge_reference_details"] = knowledge_details
+    return {"ok": True, "output": output}
+
+
+def action_candidate_event_count(output_json):
+    if "candidate_events" in output_json:
+        return integer_or_zero(output_json.get("candidate_events"))
+    return integer_or_zero(output_json.get("events_considered"))
+
+
+def action_step_summary(output_json, persisted_actions, candidate_events):
+    summary = output_json.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    return f"weibo-actions-build persisted {persisted_actions} action(s) from {candidate_events} candidate event(s)."
+
+
+def action_step_knowledge_references(output_json):
+    references = output_json.get("knowledge_references")
+    if references is None:
+        references = output_json.get("knowledgeReferences")
+    return safe_knowledge_reference_list(references)
+
+
+ACTION_RECOMMENDATION_TEXT_KEYS = ("text", "summary", "content", "recommendation", "action", "next_step", "nextStep")
+ACTION_RECOMMENDATION_OWNER_KEYS = ("owner", "owner_suggestion", "ownerSuggestion", "assignee")
+ACTION_RECOMMENDATION_CHECK_AFTER_KEYS = (
+    "check_after",
+    "checkAfter",
+    "recommended_check_after_at",
+    "recommendedCheckAfterAt",
+    "review_after",
+    "reviewAfter",
+)
+
+
+def sanitized_action_recommendations(values):
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        values = [values]
+    recommendations = []
+    for value in values:
+        item = sanitize_action_recommendation(value)
+        if item:
+            recommendations.append(item)
+    return recommendations
+
+
+def sanitize_action_recommendation(value):
+    if isinstance(value, str):
+        text = value.strip()
+        return {"text": text} if text else {}
+    if not isinstance(value, dict):
+        return {}
+    item = {}
+    text = first_non_empty_text(value, ACTION_RECOMMENDATION_TEXT_KEYS)
+    if text:
+        item["text"] = text
+    reason = value.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        item["reason"] = reason.strip()
+    owner = first_non_empty_text(value, ACTION_RECOMMENDATION_OWNER_KEYS)
+    if owner:
+        item["owner"] = owner
+    priority = value.get("priority")
+    if isinstance(priority, str) and priority.strip():
+        item["priority"] = priority.strip()
+    check_after = first_non_empty_text(value, ACTION_RECOMMENDATION_CHECK_AFTER_KEYS)
+    if check_after:
+        item["check_after"] = check_after
+    action_type = value.get("action_type") or value.get("actionType")
+    if isinstance(action_type, str) and action_type.strip():
+        item["action_type"] = action_type.strip()
+    evidence_ids = safe_string_list(value.get("evidence_ids") if "evidence_ids" in value else value.get("evidenceIds"))
+    if evidence_ids:
+        item["evidence_ids"] = evidence_ids
+    related_event_id = value.get("related_event_id") or value.get("relatedEventId")
+    if related_event_id is not None:
+        text_event_id = str(related_event_id).strip()
+        if text_event_id:
+            item["related_event_id"] = text_event_id
+    return item
+
+
+def sanitized_knowledge_reference_details(values):
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        values = [values]
+    details = []
+    for value in values:
+        item = sanitize_knowledge_reference_detail(value)
+        if item:
+            details.append(item)
+    return details
+
+
+def sanitize_knowledge_reference_detail(value):
+    if isinstance(value, str):
+        text = value.strip()
+        return {"id": text} if text else {}
+    if not isinstance(value, dict):
+        return {}
+    item = {}
+    reference_id = value.get("id") or value.get("card_id") or value.get("cardId")
+    if reference_id is not None:
+        text = str(reference_id).strip()
+        if text:
+            if text.isdigit() and not text.startswith("0"):
+                text = f"knowledge-card-{text}"
+            item["id"] = text
+    reliability = value.get("reliability_level") or value.get("reliabilityLevel")
+    if isinstance(reliability, str) and reliability.strip():
+        item["reliability_level"] = reliability.strip()
+    usage = value.get("usage") or value.get("citation_role") or value.get("citationRole") or value.get("role")
+    if isinstance(usage, str) and usage.strip():
+        item["usage"] = usage.strip()
+    return item
+
+
+def first_non_empty_text(values, keys):
+    for key in keys:
+        value = values.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def normalize_event_building_evidence_ids(values):
     normalized = []
     for value in safe_string_list(values):
         if value.isdigit() and not value.startswith("0"):
+            normalized.append(f"comment-{value}")
+            continue
+        normalized.append(value)
+    return normalized
+
+
+def normalize_action_recommendation_evidence_ids(values):
+    normalized = []
+    raw_values = safe_string_list(values)
+    event_suffixes = set()
+    for value in raw_values:
+        if value.startswith("event-"):
+            parsed = parse_judge_evidence_id(value)
+            if not parsed.get("error"):
+                event_suffixes.add(str(parsed["id"]))
+    for value in raw_values:
+        if value.isdigit() and not value.startswith("0"):
+            if value in event_suffixes:
+                continue
             normalized.append(f"comment-{value}")
             continue
         normalized.append(value)
@@ -447,7 +634,7 @@ def unsupported_step_output_error():
         "error_type": "judge_review_source_not_found",
         "message": "Judge review step output is not allowlisted for this slice.",
         "cause": "Only allowlisted Agent Loop step outputs can be reviewed without fixtureOutputs in this change slice.",
-        "fix": "Pass a comment_analysis stepRunId from weibo-comments-analyze, an event_building stepRunId from weibo-events-build, or use fixtureOutputs for service-level tests.",
+        "fix": "Pass a comment_analysis stepRunId from weibo-comments-analyze, an event_building stepRunId from weibo-events-build, an action_recommendation stepRunId from weibo-actions-build, or use fixtureOutputs for service-level tests.",
     }
 
 
@@ -463,6 +650,31 @@ def safe_string_list(values):
         return []
     prepared = []
     for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            prepared.append(text)
+    return prepared
+
+
+def safe_knowledge_reference_list(values):
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        values = [values]
+    prepared = []
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("id") or value.get("card_id") or value.get("cardId")
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text.isdigit() and not text.startswith("0"):
+                text = f"knowledge-card-{text}"
+            if text:
+                prepared.append(text)
+            continue
         if value is None:
             continue
         text = str(value).strip()
@@ -556,9 +768,26 @@ def summarize_failed_output(output):
     if not isinstance(output, dict):
         return {}
     summary = {}
-    for key in ("summary", "evidence_ids", "evidenceIds"):
-        if key in output:
-            summary[key] = output[key]
+    summary_text = output.get("summary")
+    if isinstance(summary_text, str) and summary_text.strip():
+        summary["summary"] = summary_text.strip()
+    evidence_ids = safe_string_list(output.get("evidence_ids") if "evidence_ids" in output else output.get("evidenceIds"))
+    if evidence_ids:
+        summary["evidence_ids"] = evidence_ids
+    recommendations = sanitized_action_recommendations(output.get("recommendations"))
+    if recommendations:
+        summary["recommendations"] = recommendations
+    suggestions = sanitized_action_recommendations(output.get("suggestions"))
+    if suggestions:
+        summary["suggestions"] = suggestions
+    knowledge_references = safe_knowledge_reference_list(
+        output.get("knowledge_references") if "knowledge_references" in output else output.get("knowledgeReferences")
+    )
+    if knowledge_references:
+        summary["knowledge_references"] = knowledge_references
+    knowledge_details = sanitized_knowledge_reference_details(output.get("knowledge_reference_details"))
+    if knowledge_details:
+        summary["knowledge_reference_details"] = knowledge_details
     return summary
 
 

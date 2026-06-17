@@ -33,9 +33,9 @@
 - [x] 4.2 为 comment analysis proposal/step 提供 Judge review 输入映射。
 - [x] 4.3 先写事件 proposal/step review 测试，覆盖无事件证据或 formal event 证据不足被拒绝。
 - [x] 4.4 为 event-building proposal/step 提供 Judge review 输入映射。
-- [ ] 4.5 先写 action proposal/step review 测试，覆盖无 evidence、禁用知识卡、空泛建议或因果过度表述被拒绝。
-- [ ] 4.6 为 action recommendation proposal/step 提供 Judge review 输入映射。
-- [ ] 4.7 明确 `weibo-bot-message` 不在本 change 接入 Judge retry，保持 step attachment 既有行为。
+- [x] 4.5 先写 action proposal/step review 测试，覆盖无 evidence、禁用知识卡、空泛建议或因果过度表述被拒绝。
+- [x] 4.6 为 action recommendation proposal/step 提供 Judge review 输入映射。
+- [x] 4.7 明确 `weibo-bot-message` 不在本 change 接入 Judge retry，保持 step attachment 既有行为。
 
 ## 5. 持久化与状态查询
 
