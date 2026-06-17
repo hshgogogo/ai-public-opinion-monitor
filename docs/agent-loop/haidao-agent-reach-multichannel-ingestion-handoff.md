@@ -271,3 +271,76 @@ TDD 证据：
 - 本切片不做真实小红书采集、登录态 provider、Agent Loop step status、FastAPI endpoint、CrewAI/Judge/Report、抖音、PRD 修改、migration、tasks 勾选、commit 或 push。
 - 真实 MySQL 回归仅在 `WEIBO_DB_PERSISTENCE_TEST_URL` 设置时运行；本 worker 环境未设置该 env，因此只验证了 skip path。
 - 工作区存在非本 worker 范围的 `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 脏改，需后续选择性 staging 排除。
+
+### 2026-06-18 Agent 5
+
+日期：2026-06-18
+
+Agents：
+
+- Averroes（explorer，019ed684-bf46-7522-bc13-52f82b19dff6）
+- Gauss（worker，019ed68b-71ea-7da0-ba23-329454b25831）
+- Galileo（reviewer，019ed694-2333-77c3-b486-223d435f9064）
+- Meitner（worker，019ed699-45ed-74e3-a176-2d7cb2b2275b）
+- Einstein（reviewer，019ed6a1-f927-7890-bba0-f57f5e5225a0）
+
+任务：抖音 doctor/capability fixture contract 5.1，以及 5.2 search/detail gate。
+
+状态：5.1 已完成并通过复审；5.2/5.3/5.4 保持未完成。
+
+改动文件：
+
+- `app/agent_reach_adapter.py`
+- `test/agent-reach-adapter.test.js`
+- `docs/agent-loop/subagent-events.jsonl`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+- `openspec/changes/haidao-agent-reach-multichannel-ingestion/tasks.md`
+
+实现语义：
+
+- `AgentReachAdapter` 现在允许 `douyin` 的 `doctor` 和 `capability` 两个 fake-runner contract 命令。
+- `douyin` 的 `search`、`detail`、`collect` 仍返回 `agent_reach_command_not_allowed`，并说明 runner contract 尚不清楚；runner 不会执行。
+- 抖音 top-level artifact ref 使用 `artifacts/agent-reach/douyin/` 平台 allowlist，只保留 ASCII 安全路径。
+- 抖音 runner summary 内的 `artifact_ref`、`raw_artifact_ref`、`artifactRef`、`rawArtifactRef` 通过 normalized key 进入同一 allowlist。
+- 抖音 doctor/capability runner payload 使用 `sanitize_douyin_runner_payload`，只允许 `projectId`、`project_id`、`safeQuery` 的安全 scalar 值；caller-controlled `command`、artifact refs、Cookie/token/storage/stdout/transcript 字段不会进入 runner。
+
+安全边界：
+
+- 不读取 `.env`、真实 Cookie/token、`config/cookies/*` 或 browser state。
+- 不调用真实抖音、真实 Agent-Reach 或外部平台。
+- 不做抖音 search/detail fixture、normalizer、persistence、migration、FastAPI endpoint、CrewAI/Judge/Report。
+- 真实抖音采集仍为 blocked/unverified，后续需要明确安全 runner schema 或人工确认登录态边界。
+
+TDD / review 证据：
+
+- RED 1：新增抖音 tests 时，旧实现因 `douyin` platform not allowlisted，3 个抖音测试失败。
+- GREEN 1：`douyin doctor/capability` fake runner、`search/detail/collect` fail-closed、artifact allowlist 测试通过。
+- Galileo 初审 P1/P2：runner payload 原样透传 caller-controlled command/artifact/cookie/storage/token；summary camelCase artifact refs 和 ordinary stdout/transcript value 可绕过。
+- RED 2：Meitner 补测试复现 fake runner 收到 unsafe caller payload，public summary 泄漏 `artifactRef` / `rawArtifactRef` 和 `raw_stdout_collector_transcript` value。
+- GREEN 2：runner payload 白名单化，summary normalized-key artifact allowlist，compact value marker 拒绝 stdout/raw_stdout/raw_transcript/collector_transcript。
+- Einstein 复审 APPROVED：无 P0/P1/P2；P3 建议未来可把 hyphenated `artifact-ref` / `raw-artifact-ref` 加进持久回归测试，代码探针已通过。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/agent-reach-adapter.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test test/agent-reach-adapter.test.js test/bilibili-normalizer.test.js test/xiaohongshu-normalizer.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`
+- `openspec validate haidao-agent-reach-multichannel-ingestion --strict`
+- `git diff --check`
+- `npm run agent:guard`
+
+验证结果：
+
+- Agent-Reach adapter 9/9 pass。
+- Agent-Reach adapter + B站/小红书 normalizer 17/17 pass。
+- worker 全量 `npm test`：177 pass / 52 skipped / 0 fail。
+- OpenSpec strict valid。
+- `git diff --check` pass。
+- `npm run agent:guard` pass。
+
+遗留问题：
+
+- 5.2 search/detail fixture tests 未做，因为上游 runner schema 尚不清楚。
+- 5.3 normalizer/persistence 未做，避免固化不稳定抖音 schema。
+- 5.4 真实抖音 validation blocked/unverified 还需要独立 evidence report 后再决定勾选。
+- 工作区存在非本切片范围的 `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 脏改，提交时必须选择性 staging 排除。

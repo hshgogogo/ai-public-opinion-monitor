@@ -31,7 +31,7 @@
 
 ## 5. 抖音 Final Slice
 
-- [ ] 5.1 Write 抖音 doctor/capability fixture tests after B站 and 小红书 slices pass.
+- [x] 5.1 Write 抖音 doctor/capability fixture tests after B站 and 小红书 slices pass.
 - [ ] 5.2 Write 抖音 search/detail fixture tests only after the upstream runner contract is clear.
 - [ ] 5.3 Implement 抖音 normalizer and persistence if local/fake runner contract is stable.
 - [ ] 5.4 If real 抖音 access requires high-risk login or unstable tooling, leave real validation blocked with explicit evidence.
