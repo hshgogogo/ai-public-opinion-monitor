@@ -1,17 +1,17 @@
 ## 1. OpenSpec And Queue
 
-- [ ] 1.1 Create `haidao-agent-reach-multichannel-ingestion` proposal, design, tasks, and spec artifacts.
-- [ ] 1.2 Add the change to `docs/agent-loop-change-queue.md` after the current FastAPI/CrewAI/Judge/report/workbench path.
-- [ ] 1.3 Validate artifacts with `openspec validate haidao-agent-reach-multichannel-ingestion --strict`.
-- [ ] 1.4 Complete subagent planning review before implementation.
+- [x] 1.1 Create `haidao-agent-reach-multichannel-ingestion` proposal, design, tasks, and spec artifacts.
+- [x] 1.2 Add the change to `docs/agent-loop-change-queue.md` after the current FastAPI/CrewAI/Judge/report/workbench path.
+- [x] 1.3 Validate artifacts with `openspec validate haidao-agent-reach-multichannel-ingestion --strict`.
+- [x] 1.4 Complete subagent planning review before implementation.
 
 ## 2. Adapter Foundation
 
-- [ ] 2.1 Write failing tests for Agent-Reach doctor/health with a fake runner.
-- [ ] 2.2 Implement minimal AgentReachAdapter service with command allowlist.
-- [ ] 2.3 Write failing tests rejecting non-whitelisted platforms and commands.
-- [ ] 2.4 Implement sanitized stdout/stderr/error payloads with stable `error_type`.
-- [ ] 2.5 Prove public payloads never expose `.env`, Cookie, token, DB URL, browser state, QR login token, or raw worker stderr.
+- [x] 2.1 Write failing tests for Agent-Reach doctor/health with a fake runner.
+- [x] 2.2 Implement minimal AgentReachAdapter service with command allowlist.
+- [x] 2.3 Write failing tests rejecting non-whitelisted platforms and commands.
+- [x] 2.4 Implement sanitized stdout/stderr/error payloads with stable `error_type`.
+- [x] 2.5 Prove public payloads never expose `.env`, Cookie, token, DB URL, browser state, QR login token, or raw worker stderr.
 
 ## 3. B站 First Slice
 
