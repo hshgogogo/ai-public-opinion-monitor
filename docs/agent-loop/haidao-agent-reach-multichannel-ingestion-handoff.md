@@ -478,3 +478,65 @@ TDD / review 证据：
 - `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有本切片前存在的无关格式化脏改，提交必须选择性 staging 排除，不要回滚用户/既有改动。
 - 本切片不做 6.2 CrewAI evidence-only grammar、6.3 Judge/Report platform citations、6.4 旧微博整体回归确认。
 - 真实 MySQL 测试按 `WEIBO_DB_PERSISTENCE_TEST_URL` env gate 跳过；本切片未改 schema 或 persistence。
+
+### 2026-06-18 Agent 8
+
+日期：2026-06-18
+
+Agents：
+
+- Franklin（explorer，019ed6dc-d4e8-7f82-b0c0-5927b3126d23）
+- Cicero（worker，019ed6e2-f78d-7320-aaed-128733f1d9c6）
+- Poincare（reviewer，019ed6eb-a13e-7460-9350-263c6a7d31e2）
+- Fermat（worker follow-up，019ed6f0-e272-7c90-a200-4b28f3178ff6）
+
+任务：CrewAI evidence-only boundary 6.2
+
+状态：6.2 已完成并通过复审；6.3/6.4 保持未完成。
+
+改动文件：
+
+- `app/crewai_tools.py`
+- `test/crewai-tool-gateway.test.js`
+- `openspec/changes/haidao-agent-reach-multichannel-ingestion/tasks.md`
+- `docs/agent-loop/subagent-events.jsonl`
+- `docs/agent-loop/haidao-agent-reach-multichannel-ingestion-handoff.md`
+
+实现语义：
+
+- `HarnessToolGateway.get_evidence_summary` 现在对 repository 返回值做 CrewAI public-only projection。
+- summary 顶层只保留 `project_id` 与 `evidence`。
+- 每条 evidence 只保留 `id`、`platform`、`label`、`source_type`、`summary`、`citation`、`metrics`。
+- `metrics` 走严格白名单，只保留有限数值公共指标，例如 `view_count`、`like_count`、`comment_count`、`reply_count`、`collect_count` 等。
+- raw artifacts、raw JSON、stdout/stderr、runner output、cookie/token、browser/storage/login/private、command/tool-call 等字段和值不会进入 CrewAI 可读 summary。
+- `ALLOWED_TOOLS` 未新增 Agent-Reach/platform collection 工具；`agent_reach.collect`、`platform_collection`、`bilibili_collect`、`xiaohongshu_collect`、`douyin_collect` 等继续返回 `crewai_tool_not_allowed`。
+- `app/main.py` public `evidenceIds` grammar 与 `crewai_proposal_service.py` proposal scope validation 未放宽；本切片不接 Judge/Report citation。
+
+TDD / review 证据：
+
+- RED 1：旧 `get_evidence_summary` 会把 `raw_artifact_ref`、`raw_json`、`stdout`、`command=agent_reach.collect`、`private` 等字段暴露给 CrewAI。
+- GREEN 1：新增 public projection 后 crewai-tool-gateway 6/6 pass，gateway+runtime+fastapi 52/52 pass。
+- Poincare 初审 P1：`metrics` 作为 allowlisted object，仍可泄漏 `runner`、`logging`、`agentReachCollect`、`agent-reach-collect`、`url`、`raw_url` 等非公共字段。
+- RED 2：Fermat 补 metrics variants 测试，旧实现泄漏 list/object/non-public metrics。
+- GREEN 2：新增 `CREWAI_PUBLIC_METRIC_KEYS` 和 strict numeric metrics projection，crewai-tool-gateway 6/6 pass，gateway+runtime+fastapi 52/52 pass。
+- Poincare 复审 APPROVED：无 P0/P1/P2；确认 P2 production summary repository wiring 不阻塞本切片，真实平台 summary lookup 留给后续 citation/summary integration。
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test test/crewai-tool-gateway.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test test/crewai-tool-gateway.test.js test/crewai-runtime-adapter.test.js test/fastapi-sidecar.test.js`
+- `git diff --check`
+- 后续 commit gate 继续运行全量 `npm test`、OpenSpec strict、agent guard。
+
+验证结果：
+
+- CrewAI tool gateway 6/6 pass。
+- CrewAI gateway + runtime + FastAPI sidecar 52/52 pass。
+- `git diff --check` pass。
+- JSONL parse pass。
+
+遗留问题：
+
+- 真实平台 evidence summary repository 尚未端到端接入 CrewAI runtime；当前完成的是 CrewAI 只能读取 normalized/public summary 的安全边界。后续 6.3 platform citation/summary integration 可继续接真实 lookup。
+- `docs/PRD-Agent-Harness-CrewAI-Knowledge-Base.md` 仍有本切片前存在的无关格式化脏改，提交必须选择性 staging 排除。
+- 本切片不做 Judge/Report citation 展示、不放开 FastAPI public platform evidence grammar、不做抖音 search/detail/normalizer。
