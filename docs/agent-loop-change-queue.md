@@ -41,12 +41,12 @@
 | 4 | haidao-feedback-memory-loop | 用户反馈、人工确认/驳回、偏好写回影响后续建议 | feedback API tests, memory persistence tests, action/event state tests | 1, 3 | 中 | done |
 | 5 | haidao-knowledge-card-rag-mvp | 建立结构化营销知识卡、检索和建议引用，不把知识写死在代码里 | migration/tests, card validation tests, suggestion citation tests | 1 | 中 | done |
 | 6 | haidao-fastapi-sidecar-harness | 新增 FastAPI sidecar 承载新 Agent Harness API，与旧 Node 服务并行 | FastAPI tests, Node proxy/compat tests, health checks | 1, 2, 3, 5 | 中 | done |
-| 7 | haidao-crewai-runtime-adapter | 引入 CrewAI Flow/Agent adapter，但 Agent 只产出 proposal，由 Harness 校验后写库 | unit tests with fake CrewAI tools, failure/fallback tests | 1, 5, 6 | 高 | active |
-| 8 | haidao-judge-agent-retry-loop | 在 FastAPI/CrewAI Harness 上实现 Judge Agent pass/fail 复核，最多 3 次总尝试后进入人工处理 | FastAPI/service contract tests, judge schema tests, retry tests, failed-output persistence tests | 1, 3, 5, 6, 7 | 中 | planned |
-| 9 | haidao-report-backtest-agent-loop | Report Agent 和 Backtest Agent 进入新 Harness loop，日报/回测结果带证据、归因限制和 Judge 状态 | report tests, backtest tests, no-causal-overclaim tests | 6, 7, 8 | 中 | planned |
+| 7 | haidao-crewai-runtime-adapter | 引入 CrewAI Flow/Agent adapter，但 Agent 只产出 proposal，由 Harness 校验后写库 | unit tests with fake CrewAI tools, failure/fallback tests | 1, 5, 6 | 高 | done |
+| 8 | haidao-judge-agent-retry-loop | 在 FastAPI/CrewAI Harness 上实现 Judge Agent pass/fail 复核，最多 3 次总尝试后进入人工处理 | FastAPI/service contract tests, judge schema tests, retry tests, failed-output persistence tests | 1, 3, 5, 6, 7 | 中 | done |
+| 9 | haidao-report-backtest-agent-loop | Report Agent 和 Backtest Agent 进入新 Harness loop，日报/回测结果带证据、归因限制和 Judge 状态 | report tests, backtest tests, no-causal-overclaim tests | 6, 7, 8 | 中 | active |
 | 10 | haidao-agent-workbench-react-shell | 在不推翻旧前端的前提下，引入 React/Vite 工作台 shell 展示 loop 状态、评论、分析、事件、建议、日报和问答 | frontend tests, browser QA, no console errors | 2, 6, 8, 9 | 中 | planned |
 | 11 | haidao-rule-proposal-self-evolution | 用户反馈/Judge 失败生成待审 rule proposal 或知识卡草案 | rule proposal tests, approval-state tests | 4, 5, 6 | 中 | planned |
-| 12 | haidao-agent-reach-multichannel-ingestion | 通过 Agent-Reach 受控接入 B站、小红书和抖音采集，先 B站、再小红书、最后抖音，输出 Harness evidence | adapter tests, fixture normalization tests, secret redaction tests, MySQL tests if persistence changes | 6, 7, 8, 10 | 高 | planned |
+| 12 | haidao-agent-reach-multichannel-ingestion | 通过 Agent-Reach 受控接入 B站、小红书和抖音采集，先 B站、再小红书、最后抖音，输出 Harness evidence | adapter tests, fixture normalization tests, secret redaction tests, MySQL tests if persistence changes | 6, 7, 8 | 高 | done |
 | 13 | haidao-final-acceptance-weibo-agent | 按 `docs/final-acceptance.md` 真实使用工作台并监控日志，发现 P0/P1/P2 回流修复 | browser QA, logs, DB checks, PR acceptance report | 1-12 | 中 | planned |
 
 ## Change: haidao-agent-harness-loop-foundation

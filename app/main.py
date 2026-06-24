@@ -1,7 +1,7 @@
 import os
 import re
 
-os.environ.setdefault("YUQING_SKIP_ENV_FILE", "1")
+os.environ["YUQING_SKIP_ENV_FILE"] = "1"
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -16,6 +16,16 @@ from .legacy_worker import (
     command_not_allowed_error,
     mysql_unavailable_error,
     sanitize_for_public,
+)
+from .report_backtest_agent_service import (
+    ReportBacktestAgentService,
+    action_backtest_public_response,
+    build_action_backtest_service_payload,
+    build_daily_report_service_payload,
+    daily_report_public_response,
+    invalid_action_id_error,
+    validate_action_backtest_payload,
+    validate_daily_report_payload,
 )
 
 
@@ -93,11 +103,18 @@ JUDGE_DANGEROUS_KEYS = {
 CREWAI_EVIDENCE_ID_PATTERN = re.compile(r"^(comment|post|target|event|action|memory|sentiment):[1-9][0-9]*$")
 
 
-def create_app(legacy_adapter=None, crewai_proposal_service=None, judge_review_service=None, platform_collection_services=None):
+def create_app(
+    legacy_adapter=None,
+    crewai_proposal_service=None,
+    judge_review_service=None,
+    platform_collection_services=None,
+    report_backtest_agent_service=None,
+):
     adapter = legacy_adapter or LegacyWorkerAdapter()
     proposal_service = crewai_proposal_service or CrewAIProposalService()
     judge_service = judge_review_service or JudgeReviewService()
     collection_services = platform_collection_services or {}
+    report_backtest_service = report_backtest_agent_service or ReportBacktestAgentService()
     api = FastAPI(title="Yuqing FastAPI Sidecar", version="0.1.0")
 
     @api.get("/health")
@@ -144,7 +161,7 @@ def create_app(legacy_adapter=None, crewai_proposal_service=None, judge_review_s
             worker_payload["projectId"] = project_id
 
         result = sanitize_for_public(adapter.get_agent_run(parsed_id, worker_payload))
-        return JSONResponse(agent_loop_status_response(result), status_code=status_for(result))
+        return JSONResponse(agent_loop_status_response(result, parsed_id), status_code=status_for(result))
 
     @api.post("/api/weibo/agent-runs/{run_id}/crewai/proposals")
     async def create_crewai_proposal(run_id: str, request: Request):
@@ -204,6 +221,70 @@ def create_app(legacy_adapter=None, crewai_proposal_service=None, judge_review_s
 
         service_payload = build_judge_review_service_payload(payload)
         result = sanitize_for_public(judge_service.create_review(parsed_id, service_payload))
+        return JSONResponse(result, status_code=status_for(result))
+
+    @api.post("/api/weibo/agent-runs/{run_id}/reports/daily")
+    async def create_daily_report(run_id: str, request: Request):
+        parsed_id = positive_integer(run_id)
+        if parsed_id is None:
+            return json_error(agent_loop_error(
+                "invalid_agent_run_id",
+                "Agent Loop run id is invalid.",
+                "The path id must be a positive integer.",
+                "Retry with an agentLoopRunId returned by POST /api/weibo/agent-loop/run.",
+            ), 400)
+
+        payload, error = await read_json_object(request, "report_backtest_payload_rejected", "Daily report payload")
+        if error:
+            error["error_type"] = "report_backtest_payload_rejected"
+            return json_error(error, 400)
+
+        validation_error = validate_daily_report_payload(payload)
+        if validation_error:
+            return json_error(validation_error, status_for(validation_error))
+
+        if not report_backtest_service.is_mysql_available():
+            return json_error(mysql_unavailable_error(), 503)
+
+        service_payload = build_daily_report_service_payload(payload)
+        result = daily_report_public_response(
+            report_backtest_service.create_daily_report(parsed_id, service_payload),
+            {**service_payload, "agent_loop_run_id": parsed_id},
+        )
+        return JSONResponse(result, status_code=status_for(result))
+
+    @api.post("/api/weibo/agent-runs/{run_id}/actions/{action_id}/backtests")
+    async def create_action_backtest(run_id: str, action_id: str, request: Request):
+        parsed_id = positive_integer(run_id)
+        if parsed_id is None:
+            return json_error(agent_loop_error(
+                "invalid_agent_run_id",
+                "Agent Loop run id is invalid.",
+                "The path id must be a positive integer.",
+                "Retry with an agentLoopRunId returned by POST /api/weibo/agent-loop/run.",
+            ), 400)
+
+        parsed_action_id = positive_integer(action_id)
+        if parsed_action_id is None:
+            return json_error(invalid_action_id_error(), 400)
+
+        payload, error = await read_json_object(request, "report_backtest_payload_rejected", "Action backtest payload")
+        if error:
+            error["error_type"] = "report_backtest_payload_rejected"
+            return json_error(error, 400)
+
+        validation_error = validate_action_backtest_payload(payload)
+        if validation_error:
+            return json_error(validation_error, status_for(validation_error))
+
+        if not report_backtest_service.is_mysql_available():
+            return json_error(mysql_unavailable_error(), 503)
+
+        service_payload = build_action_backtest_service_payload(payload)
+        result = action_backtest_public_response(
+            report_backtest_service.create_action_backtest(parsed_id, parsed_action_id, service_payload),
+            {**service_payload, "agent_loop_run_id": parsed_id, "action_id": parsed_action_id},
+        )
         return JSONResponse(result, status_code=status_for(result))
 
     @api.post("/api/internal/agent-runs/{run_id}/platform-collections")
@@ -809,12 +890,17 @@ def dangerous_judge_key(key):
 def agent_loop_run_response(payload):
     if payload.get("ok") is False:
         return payload
-    run = payload.get("run") or {}
-    return {
+    raw_run = payload.get("run") or {}
+    response = {
         **payload,
-        "agentLoopRunId": payload.get("agentLoopRunId", run.get("id")),
-        "status": payload.get("status", run.get("status")),
+        "agentLoopRunId": safe_agent_loop_id(payload.get("agentLoopRunId"), raw_run.get("id")),
+        "status": payload.get("status", raw_run.get("status")),
     }
+    if isinstance(raw_run, dict) and raw_run:
+        response["run"] = safe_agent_loop_run(raw_run, response["agentLoopRunId"])
+    elif "run" in response:
+        response.pop("run", None)
+    return response
 
 
 def dangerous_crewai_value_error(field_name):
@@ -832,10 +918,10 @@ def contains_dangerous_crewai_value(value):
     return crewai_sensitive_value(text) or any(marker in lowered for marker in CREWAI_DANGEROUS_MARKERS)
 
 
-def agent_loop_status_response(payload):
+def agent_loop_status_response(payload, fallback_run_id=None):
     if payload.get("ok") is False:
         return payload
-    run = payload.get("run") or {}
+    raw_run = payload.get("run") or {}
     judge_reviews = payload.get("judgeReviews") or []
     manual_handoffs = payload.get("manualHandoffs")
     if manual_handoffs is None:
@@ -844,14 +930,19 @@ def agent_loop_status_response(payload):
             if item.get("feedback_type") == "manual_handoff" or item.get("feedbackType") == "manual_handoff"
         ]
     public_payload = {key: value for key, value in payload.items() if key != "feedbackItems"}
-    return {
+    response = {
         **public_payload,
-        "agentLoopRunId": payload.get("agentLoopRunId", run.get("id")),
-        "status": payload.get("status", run.get("status")),
-        "currentStep": payload.get("currentStep", run.get("current_step") or run.get("currentStep")),
+        "agentLoopRunId": safe_agent_loop_id(payload.get("agentLoopRunId"), raw_run.get("id"), fallback_run_id),
+        "status": payload.get("status", raw_run.get("status")),
+        "currentStep": payload.get("currentStep", raw_run.get("current_step") or raw_run.get("currentStep")),
         "retryCount": payload.get("retryCount", retry_count_from(judge_reviews)),
         "manualHandoffs": manual_handoffs,
     }
+    if isinstance(raw_run, dict) and raw_run:
+        response["run"] = safe_agent_loop_run(raw_run, response["agentLoopRunId"], fallback_run_id)
+    elif "run" in response:
+        response.pop("run", None)
+    return response
 
 
 def retry_count_from(judge_reviews):
@@ -861,6 +952,24 @@ def retry_count_from(judge_reviews):
         if isinstance(count, int) and count > retry_count:
             retry_count = count
     return retry_count
+
+
+def safe_agent_loop_id(*values):
+    for value in values:
+        parsed = positive_integer(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def safe_agent_loop_run(run, *fallback_ids):
+    public_run = dict(run)
+    safe_id = safe_agent_loop_id(run.get("id"), *fallback_ids)
+    if safe_id is None:
+        public_run.pop("id", None)
+    else:
+        public_run["id"] = safe_id
+    return public_run
 
 
 def optional_positive_integer(value):
@@ -891,6 +1000,8 @@ def status_for(payload):
         return 404
     if error_type == "judge_review_source_not_found":
         return 404
+    if error_type == "action_not_found":
+        return 404
     if error_type in {
         "crewai_evidence_rejected",
         "crewai_evidence_required",
@@ -903,6 +1014,7 @@ def status_for(payload):
         "invalid_crewai_proposal_payload",
         "invalid_judge_review_payload",
         "invalid_project_id",
+        "invalid_action_id",
         "invalid_agent_run_id",
         "invalid_legacy_worker_payload",
         "invalid_platform_collection_payload",
@@ -910,10 +1022,14 @@ def status_for(payload):
         "platform_collection_not_allowed",
         "platform_collection_payload_rejected",
         "project_not_found",
+        "report_backtest_evidence_rejected",
+        "report_backtest_payload_rejected",
     }:
         return 400
     if error_type in {"platform_auth_required", "platform_collection_service_unavailable"}:
         return 503
+    if error_type == "report_backtest_runtime_failed":
+        return 502
     if error_type == "legacy_worker_failed":
         return 502
     if isinstance(payload, dict) and payload.get("ok") is False:

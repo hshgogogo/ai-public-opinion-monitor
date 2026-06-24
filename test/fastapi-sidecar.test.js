@@ -155,7 +155,7 @@ test("FastAPI sidecar import sets YUQING_SKIP_ENV_FILE and ignores local .env se
     writeFileSync(join(dir, "config", "cookies", "weibo.json"), "{\"Cookie\":\"SUB=secret\"}");
 
     const env = basePythonEnv();
-    delete env.YUQING_SKIP_ENV_FILE;
+    env.YUQING_SKIP_ENV_FILE = "0";
     runPython(`
 import json
 import os
@@ -166,7 +166,7 @@ repo_root = Path(sys.argv[1])
 tmp_root = Path(sys.argv[2])
 os.chdir(tmp_root)
 sys.path.insert(0, str(repo_root))
-os.environ.pop("YUQING_SKIP_ENV_FILE", None)
+assert os.environ.get("YUQING_SKIP_ENV_FILE") == "0"
 os.environ.pop("SIDECAR_DOTENV_SENTINEL", None)
 os.environ.pop("MYSQL_URL", None)
 
@@ -188,8 +188,47 @@ for forbidden in ["SIDECAR_DOTENV_SENTINEL", "SUB=secret", "config/cookies/weibo
   }
 });
 
+test("Report/backtest service import sets YUQING_SKIP_ENV_FILE before worker helper imports", () => {
+  const dir = mkdtempSync(join(tmpdir(), "report-backtest-env-"));
+  try {
+    writeFileSync(join(dir, ".env"), "REPORT_BACKTEST_DOTENV_SENTINEL=dotenv_was_read\nMYSQL_URL=mysql://dotenv-should-not-load\n", "utf8");
+    const env = basePythonEnv();
+    env.YUQING_SKIP_ENV_FILE = "0";
+    delete env.REPORT_BACKTEST_DOTENV_SENTINEL;
+    delete env.MYSQL_URL;
+    runPython(`
+import os
+import sys
+
+repo_root = sys.argv[1]
+sys.path.insert(0, repo_root)
+assert os.environ.get("YUQING_SKIP_ENV_FILE") == "0"
+os.environ.pop("REPORT_BACKTEST_DOTENV_SENTINEL", None)
+os.environ.pop("MYSQL_URL", None)
+
+from app.report_backtest_agent_service import DeterministicReportBacktestAdapter
+
+adapter = DeterministicReportBacktestAdapter()
+report = adapter.run_daily_report({
+    "project_id": 2,
+    "agent_loop_run_id": 10,
+    "report_date": "2026-06-25",
+    "evidence_ids": ["comment:123"],
+})
+
+assert report["ok"] is True, report
+assert os.environ.get("YUQING_SKIP_ENV_FILE") == "1"
+assert os.environ.get("REPORT_BACKTEST_DOTENV_SENTINEL") is None
+assert os.environ.get("MYSQL_URL") is None
+`, { cwd: dir, env, args: [repoRoot] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("FastAPI sidecar validates Agent Loop run payloads and delegates valid runs to an injected adapter", () => {
   runPython(`
+import json
 from app.main import create_app
 from fastapi.testclient import TestClient
 
@@ -199,15 +238,20 @@ class FakeAdapter:
 
     def run_agent_loop(self, payload):
         self.calls.append(("run", payload))
-        return {"ok": True, "agentLoopRunId": 42, "status": "running"}
+        return {
+            "ok": True,
+            "agentLoopRunId": 42,
+            "status": "running",
+            "run": {"id": "not-a-positive-id", "status": "running"},
+        }
 
     def get_agent_run(self, run_id, payload=None):
         self.calls.append(("status", run_id, payload or {}))
         return {
             "ok": True,
-            "agentLoopRunId": run_id,
+            "agentLoopRunId": "not-a-positive-id",
             "status": "needs_human",
-            "run": {"id": run_id, "status": "needs_human"},
+            "run": {"id": "not-a-positive-id", "status": "needs_human"},
             "steps": [],
             "judgeReviews": [],
             "manualHandoffs": []
@@ -224,7 +268,13 @@ response = client.post("/api/weibo/agent-loop/run", json={
 })
 payload = response.json()
 assert response.status_code == 200, payload
-assert payload == {"ok": True, "agentLoopRunId": 42, "status": "running"}, payload
+assert payload == {
+    "ok": True,
+    "agentLoopRunId": 42,
+    "status": "running",
+    "run": {"id": 42, "status": "running"},
+}, payload
+assert "not-a-positive-id" not in json.dumps(payload), payload
 assert adapter.calls == [("run", {
     "projectId": 1,
     "targetId": 12,
@@ -253,6 +303,8 @@ status_payload = status.json()
 assert status.status_code == 200, status_payload
 assert status_payload["ok"] is True, status_payload
 assert status_payload["agentLoopRunId"] == 42, status_payload
+assert status_payload["run"]["id"] == 42, status_payload
+assert "not-a-positive-id" not in json.dumps(status_payload), status_payload
 assert status_payload["manualHandoffs"] == [], status_payload
 assert adapter.calls[-1] == ("status", 42, {"projectId": 1}), adapter.calls
 
@@ -911,6 +963,619 @@ run_not_found_payload = run_not_found.json()
 assert run_not_found.status_code == 404, run_not_found_payload
 assert run_not_found_payload["error_type"] == "agent_loop_not_found", run_not_found_payload
 assert missing_service.runtime_call_count == 0, missing_service.runtime_call_count
+`);
+});
+
+test("FastAPI sidecar creates daily report Agent Loop steps through an injected Harness service", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class FakeReportBacktestService:
+    def __init__(self):
+        self.calls = []
+        self.runtime_call_count = 0
+
+    def is_mysql_available(self):
+        return True
+
+    def create_daily_report(self, run_id, payload):
+        self.calls.append(("daily_report", run_id, payload))
+        self.runtime_call_count += 1
+        return {
+            "ok": True,
+            "agentLoopRunId": "Authorization: Basic abc123",
+            "step": "daily_report",
+            "status": "succeeded",
+            "report": {
+                "summary": "Daily report used scoped fixture evidence. password=hunter2",
+                "coverage": {"comments": 2, "events": 1, "actions": 1, "backtests": 0, "stdout": 1, "internalPayload": "safe-looking private key"},
+                "evidenceIds": ["comment:123", "event:7"],
+                "markdown": "# private markdown draft",
+                "rawArtifactPath": "/tmp/raw_stdout_report.json",
+            },
+            "evidenceIds": ["comment:123", "event:7"],
+            "judgeReviewStatus": "pending",
+            "stdout": "raw stdout must not leak",
+            "stderr": "raw stderr token=secret",
+            "rawArtifactRef": "../config/cookies/weibo.json",
+            "internalPayload": {"database_url": "mysql://root:secret@localhost/db"},
+        }
+
+service = FakeReportBacktestService()
+client = TestClient(create_app(report_backtest_agent_service=service))
+
+response = client.post("/api/weibo/agent-runs/10/reports/daily", json={
+    "projectId": "2",
+    "reportDate": "2026-06-25",
+    "evidenceIds": ["comment:123", "event:7"],
+})
+payload = response.json()
+
+assert response.status_code == 200, payload
+assert payload == {
+    "ok": True,
+    "agentLoopRunId": 10,
+    "step": "daily_report",
+    "status": "succeeded",
+    "report": {
+        "summary": None,
+        "coverage": {"comments": 2, "events": 1, "actions": 1, "backtests": 0},
+        "reportDate": "2026-06-25",
+    },
+    "evidenceIds": ["comment:123", "event:7"],
+    "judgeReviewStatus": "pending",
+}, payload
+assert service.runtime_call_count == 1, service.runtime_call_count
+assert service.calls == [("daily_report", 10, {
+    "projectId": 2,
+    "reportDate": "2026-06-25",
+    "evidenceIds": ["comment:123", "event:7"],
+})], service.calls
+
+serialized = json.dumps(payload, ensure_ascii=False)
+for forbidden in ["stdout", "stderr", "rawArtifact", "rawArtifactPath", "internalPayload", "database_url", "mysql://", "config/cookies/weibo.json", "# private markdown draft", "token", "password=hunter2"]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI sidecar rejects daily report Agent Loop requests before service runtime on mysql, invalid run id, and unsafe fields", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CountingReportBacktestService:
+    def __init__(self, mysql_available=True):
+        self.mysql_available = mysql_available
+        self.runtime_call_count = 0
+
+    def is_mysql_available(self):
+        return self.mysql_available
+
+    def create_daily_report(self, run_id, payload):
+        self.runtime_call_count += 1
+        return {"ok": True, "agentLoopRunId": run_id, "step": "daily_report", "status": "succeeded"}
+
+invalid_service = CountingReportBacktestService()
+invalid_client = TestClient(create_app(report_backtest_agent_service=invalid_service))
+invalid_run = invalid_client.post("/api/weibo/agent-runs/not-a-number/reports/daily", json={
+    "projectId": 2,
+    "reportDate": "2026-06-25",
+})
+invalid_payload = invalid_run.json()
+assert invalid_run.status_code == 400, invalid_payload
+assert invalid_payload["error_type"] == "invalid_agent_run_id", invalid_payload
+assert invalid_service.runtime_call_count == 0, invalid_service.runtime_call_count
+
+mysql_service = CountingReportBacktestService(mysql_available=False)
+mysql_client = TestClient(create_app(report_backtest_agent_service=mysql_service))
+mysql_unavailable = mysql_client.post("/api/weibo/agent-runs/10/reports/daily", json={
+    "projectId": 2,
+    "reportDate": "2026-06-25",
+})
+mysql_payload = mysql_unavailable.json()
+assert mysql_unavailable.status_code == 503, mysql_payload
+assert mysql_payload["error_type"] == "mysql_unavailable", mysql_payload
+assert mysql_service.runtime_call_count == 0, mysql_service.runtime_call_count
+
+unsafe_service = CountingReportBacktestService()
+unsafe_client = TestClient(create_app(report_backtest_agent_service=unsafe_service))
+cases = [
+    {"projectId": 2, "reportDate": "2026-06-25", "command": "weibo-memory-report-fixture"},
+    {"projectId": 2, "reportDate": "2026-06-25", "fixture": "test/fixtures/weibo-memory-records.json"},
+    {"projectId": 2, "reportDate": "2026-06-25", "rawArtifactRef": "/tmp/raw_stdout_report.json"},
+    {"projectId": 2, "reportDate": "2026-99-99"},
+    {"projectId": 2, "reportDate": "mysql://root:secret@localhost/db"},
+    {"projectId": 2, "reportDate": "2026-06-25", "evidenceIds": ["comment:123", "../config/cookies/weibo.json"]},
+    {"projectId": 2, "reportDate": "2026-06-25", "evidenceIds": ["comment:123"], "Cookie": "SUB=secret"},
+    {"projectId": 2, "reportDate": "2026-06-25", "evidenceIds": ["comment:123"], "token": "Bearer fake-secret-value"},
+    {"projectId": 2, "reportDate": "2026-06-25", "path": "/Users/local/private-state.json"},
+]
+
+for body in cases:
+    response = unsafe_client.post("/api/weibo/agent-runs/10/reports/daily", json=body)
+    payload = response.json()
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 400, (body, payload)
+    assert payload["ok"] is False, (body, payload)
+    assert payload["error_type"] == "report_backtest_payload_rejected", (body, payload)
+    for forbidden in [
+        "weibo-memory-report-fixture",
+        "test/fixtures",
+        "rawArtifactRef",
+        "/tmp/raw_stdout_report.json",
+        "mysql://root:secret",
+        "config/cookies/weibo.json",
+        "SUB=secret",
+        "Bearer fake-secret-value",
+        "/Users/local/private-state.json",
+    ]:
+        assert forbidden not in serialized, (body, serialized)
+
+assert unsafe_service.runtime_call_count == 0, unsafe_service.runtime_call_count
+`);
+});
+
+test("FastAPI sidecar creates action backtest Agent Loop steps and preserves unknown as a partial success", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class FakeReportBacktestService:
+    def __init__(self):
+        self.calls = []
+
+    def is_mysql_available(self):
+        return True
+
+    def create_action_backtest(self, run_id, action_id, payload):
+        self.calls.append(("backtest", run_id, action_id, payload))
+        if action_id == 56:
+            return {
+                "ok": True,
+                "agentLoopRunId": run_id,
+                "step": "action_backtest",
+                "status": "partial",
+                "backtest": {
+                    "actionId": action_id,
+                    "result": "unknown",
+                    "summary": "Action timing is missing.",
+                    "missingDataReason": "missing_effective_at",
+                    "nextRecommendation": "Log effective_at and collect post-action windows.",
+                    "confounders": [],
+                    "evidenceIds": ["action:56"],
+                    "rawArtifactPath": "/tmp/raw_unknown.json",
+                },
+                "evidenceIds": ["action:56"],
+                "judgeReviewStatus": "pending",
+                "stderr": "secret stderr token=secret",
+            }
+        return {
+            "ok": True,
+            "agentLoopRunId": run_id,
+            "step": "action_backtest",
+            "status": "succeeded",
+            "backtest": {
+                "actionId": action_id,
+                "result": "no_signal",
+                "summary": "Authorization: Basic abc123",
+                "missingDataReason": None,
+                "nextRecommendation": "Keep monitoring comment:123 and compare the next window.",
+                "confounders": ["overlapping campaign"],
+                "evidenceIds": ["action:55", "comment:123"],
+                "stdout": "raw stdout must not leak",
+            },
+            "evidenceIds": ["action:55", "comment:123"],
+            "judgeReviewStatus": "pending",
+            "internalPayload": {"database_url": "mysql://root:secret@localhost/db"},
+        }
+
+service = FakeReportBacktestService()
+client = TestClient(create_app(report_backtest_agent_service=service))
+
+success = client.post("/api/weibo/agent-runs/10/actions/55/backtests", json={
+    "projectId": "2",
+    "evidenceIds": ["action:55", "comment:123"],
+})
+success_payload = success.json()
+assert success.status_code == 200, success_payload
+assert success_payload == {
+    "ok": True,
+    "agentLoopRunId": 10,
+    "step": "action_backtest",
+    "status": "succeeded",
+    "backtest": {
+        "actionId": 55,
+        "result": "no_signal",
+        "summary": None,
+        "confounders": ["overlapping campaign"],
+        "nextRecommendation": "Keep monitoring comment:123 and compare the next window.",
+    },
+    "evidenceIds": ["action:55", "comment:123"],
+    "judgeReviewStatus": "pending",
+}, success_payload
+
+unknown = client.post("/api/weibo/agent-runs/10/actions/56/backtests", json={
+    "projectId": 2,
+    "evidenceIds": ["action:56"],
+})
+unknown_payload = unknown.json()
+assert unknown.status_code == 200, unknown_payload
+assert unknown_payload["ok"] is True, unknown_payload
+assert unknown_payload["status"] == "partial", unknown_payload
+assert unknown_payload["backtest"]["result"] == "unknown", unknown_payload
+assert unknown_payload["backtest"]["missingDataReason"] == "missing_effective_at", unknown_payload
+assert unknown_payload["backtest"]["nextRecommendation"] == "Log effective_at and collect post-action windows.", unknown_payload
+assert service.calls == [
+    ("backtest", 10, 55, {"projectId": 2, "evidenceIds": ["action:55", "comment:123"]}),
+    ("backtest", 10, 56, {"projectId": 2, "evidenceIds": ["action:56"]}),
+], service.calls
+
+serialized = json.dumps([success_payload, unknown_payload], ensure_ascii=False)
+for forbidden in ["stdout", "stderr", "rawArtifactPath", "internalPayload", "database_url", "mysql://", "token", "/tmp/raw_unknown.json", "Authorization", "Basic abc123"]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("FastAPI sidecar rejects action backtest requests before unsafe runtime on unknown action, mysql unavailable, and unsafe fields", () => {
+  runPython(`
+import json
+from app.main import create_app
+from fastapi.testclient import TestClient
+
+class CountingReportBacktestService:
+    def __init__(self, mysql_available=True):
+        self.mysql_available = mysql_available
+        self.runtime_call_count = 0
+
+    def is_mysql_available(self):
+        return self.mysql_available
+
+    def create_action_backtest(self, run_id, action_id, payload):
+        self.runtime_call_count += 1
+        if action_id == 999:
+            return {
+                "ok": False,
+                "mode": "weibo-agent-mvp",
+                "error_type": "action_not_found",
+                "message": "Action was not found for this project.",
+                "cause": "Action 999 does not belong to project 2.",
+                "fix": "Retry with an action ID from the same project.",
+            }
+        return {"ok": True, "agentLoopRunId": run_id, "step": "action_backtest", "status": "succeeded"}
+
+unknown_service = CountingReportBacktestService()
+unknown_client = TestClient(create_app(report_backtest_agent_service=unknown_service))
+unknown = unknown_client.post("/api/weibo/agent-runs/10/actions/999/backtests", json={"projectId": 2})
+unknown_payload = unknown.json()
+assert unknown.status_code == 404, unknown_payload
+assert unknown_payload["error_type"] == "action_not_found", unknown_payload
+assert unknown_service.runtime_call_count == 1, unknown_service.runtime_call_count
+
+invalid_action = unknown_client.post("/api/weibo/agent-runs/10/actions/not-a-number/backtests", json={"projectId": 2})
+invalid_action_payload = invalid_action.json()
+assert invalid_action.status_code == 400, invalid_action_payload
+assert invalid_action_payload["error_type"] == "invalid_action_id", invalid_action_payload
+assert unknown_service.runtime_call_count == 1, unknown_service.runtime_call_count
+
+mysql_service = CountingReportBacktestService(mysql_available=False)
+mysql_client = TestClient(create_app(report_backtest_agent_service=mysql_service))
+mysql_unavailable = mysql_client.post("/api/weibo/agent-runs/10/actions/55/backtests", json={"projectId": 2})
+mysql_payload = mysql_unavailable.json()
+assert mysql_unavailable.status_code == 503, mysql_payload
+assert mysql_payload["error_type"] == "mysql_unavailable", mysql_payload
+assert mysql_service.runtime_call_count == 0, mysql_service.runtime_call_count
+
+unsafe_service = CountingReportBacktestService()
+unsafe_client = TestClient(create_app(report_backtest_agent_service=unsafe_service))
+cases = [
+    {"projectId": 2, "command": "weibo-backtest-fixture"},
+    {"projectId": 2, "fixturePath": "test/fixtures/weibo-backtest-scenarios.json"},
+    {"projectId": 2, "rawArtifactRef": "/tmp/raw_stdout_backtest.json"},
+    {"projectId": 2, "database_url": "mysql://root:secret@localhost/db"},
+    {"projectId": 2, "Cookie": "SUB=secret"},
+    {"projectId": 2, "token": "Bearer fake-secret-value"},
+    {"projectId": 2, "path": "../config/cookies/weibo.json"},
+    {"projectId": 2, "evidenceIds": ["action:55", "raw_stdout_collector_transcript.json"]},
+]
+for body in cases:
+    response = unsafe_client.post("/api/weibo/agent-runs/10/actions/55/backtests", json=body)
+    payload = response.json()
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert response.status_code == 400, (body, payload)
+    assert payload["ok"] is False, (body, payload)
+    assert payload["error_type"] == "report_backtest_payload_rejected", (body, payload)
+    for forbidden in [
+        "weibo-backtest-fixture",
+        "test/fixtures",
+        "rawArtifactRef",
+        "/tmp/raw_stdout_backtest.json",
+        "mysql://root:secret",
+        "SUB=secret",
+        "Bearer fake-secret-value",
+        "config/cookies/weibo.json",
+        "raw_stdout_collector_transcript",
+    ]:
+        assert forbidden not in serialized, (body, serialized)
+
+assert unsafe_service.runtime_call_count == 0, unsafe_service.runtime_call_count
+`);
+});
+
+test("ReportBacktestAgentService validates run, action, evidence, and dangerous payload scope before adapter execution", () => {
+  runPython(`
+import json
+from app.report_backtest_agent_service import (
+    ReportBacktestAgentService,
+    action_backtest_public_response,
+    daily_report_public_response,
+)
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+class ActionRepository:
+    def has_action(self, action_id, project_id):
+        return (action_id, project_id) in {(55, 2), (56, 2)}
+
+class EvidenceRepository:
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        existing = {
+            2: {"comment:123", "event:7", "action:55", "action:56"},
+            3: {"comment:999", "action:77"},
+        }
+        return existing.get(project_id, set()).intersection(evidence_ids)
+
+class RuntimeAdapter:
+    def __init__(self):
+        self.calls = []
+
+    def run_daily_report(self, request):
+        self.calls.append(("daily_report", request))
+        return {
+            "ok": True,
+            "summary": "Scoped report summary.",
+            "coverage": {"comments": 1, "events": 1, "actions": 0, "backtests": 0},
+            "evidenceIds": list(request["evidence_ids"]),
+            "stdout": "must not leak",
+            "rawArtifactRef": "/tmp/raw.json",
+        }
+
+    def run_action_backtest(self, request):
+        self.calls.append(("action_backtest", request))
+        if request["action_id"] == 56:
+            return {
+                "ok": True,
+                "result": "unknown",
+                "summary": "Action lacks effective timing.",
+                "missingDataReason": "missing_effective_at",
+                "nextRecommendation": "Log effective_at and collect post-action windows.",
+                "evidenceIds": list(request["evidence_ids"]),
+                "stderr": "must not leak",
+            }
+        return {
+            "ok": True,
+            "result": "no_signal",
+            "summary": "Negative ratio decreased with confounders noted.",
+            "confounders": ["external event"],
+            "nextRecommendation": "Monitor comment:123 in the next window.",
+            "evidenceIds": list(request["evidence_ids"]),
+            "internalPayload": {"database_url": "mysql://root:secret@localhost/db"},
+        }
+
+adapter = RuntimeAdapter()
+service = ReportBacktestAgentService(
+    runtime_adapter=adapter,
+    run_repository=RunRepository(),
+    action_repository=ActionRepository(),
+    evidence_repository=EvidenceRepository(),
+)
+
+report = service.create_daily_report(10, {
+    "projectId": 2,
+    "reportDate": "2026-06-25",
+    "evidenceIds": ["comment:123", "event:7"],
+})
+assert report["ok"] is True, report
+assert report["agentLoopRunId"] == 10, report
+assert report["step"] == "daily_report", report
+assert report["report"]["summary"] == "Scoped report summary.", report
+assert report["evidenceIds"] == ["comment:123", "event:7"], report
+
+backtest = service.create_action_backtest(10, 55, {
+    "projectId": 2,
+    "evidenceIds": ["action:55", "comment:123"],
+})
+assert backtest["ok"] is True, backtest
+assert backtest["status"] == "succeeded", backtest
+assert backtest["backtest"]["result"] == "no_signal", backtest
+assert backtest["evidenceIds"] == ["action:55", "comment:123"], backtest
+
+unknown = service.create_action_backtest(10, 56, {
+    "projectId": 2,
+    "evidenceIds": ["action:56"],
+})
+assert unknown["ok"] is True, unknown
+assert unknown["status"] == "partial", unknown
+assert unknown["backtest"]["result"] == "unknown", unknown
+assert unknown["backtest"]["missingDataReason"] == "missing_effective_at", unknown
+
+invalid_result = action_backtest_public_response({
+    "ok": True,
+    "result": "observed_signal",
+    "status": "running",
+    "summary": "Invalid result enum should not become public contract.",
+    "agentLoopRunId": "password=hunter2",
+    "evidenceIds": ["action:55"],
+}, {"action_id": 55, "agent_loop_run_id": 10})
+assert invalid_result["ok"] is True, invalid_result
+assert invalid_result["agentLoopRunId"] == 10, invalid_result
+assert invalid_result["backtest"]["result"] == "unknown", invalid_result
+assert invalid_result["status"] == "partial", invalid_result
+
+unknown_succeeded = action_backtest_public_response({
+    "ok": True,
+    "result": "unknown",
+    "status": "succeeded",
+    "summary": "Window is missing.",
+    "evidenceIds": ["action:55"],
+}, {"action_id": 55, "agent_loop_run_id": 10})
+assert unknown_succeeded["status"] == "partial", unknown_succeeded
+
+unknown_running = action_backtest_public_response({
+    "ok": True,
+    "result": "unknown",
+    "status": "running",
+    "summary": "Window is missing.",
+    "evidenceIds": ["action:55"],
+}, {"action_id": 55, "agent_loop_run_id": 10})
+assert unknown_running["status"] == "partial", unknown_running
+
+unknown_failed = action_backtest_public_response({
+    "ok": True,
+    "result": "unknown",
+    "status": "failed",
+    "summary": "Window is missing.",
+    "evidenceIds": ["action:55"],
+}, {"action_id": 55, "agent_loop_run_id": 10})
+assert unknown_failed["status"] == "failed", unknown_failed
+
+path_report = daily_report_public_response({
+    "ok": True,
+    "summary": "Raw artifact at /var/log/worker-output.json",
+    "coverage": {"comments": 1},
+    "evidenceIds": ["comment:123"],
+}, {"agent_loop_run_id": 10})
+assert path_report["report"]["summary"] is None, path_report
+
+path_backtest = action_backtest_public_response({
+    "ok": True,
+    "result": "no_signal",
+    "summary": "Trace is at /tmp/raw-stdout-worker-output.json",
+    "nextRecommendation": "Open C:\\\\Users\\\\mini\\\\AppData\\\\Local\\\\worker-output.json",
+    "evidenceIds": ["action:55"],
+}, {"action_id": 55, "agent_loop_run_id": 10})
+assert path_backtest["backtest"]["summary"] is None, path_backtest
+assert path_backtest["backtest"]["nextRecommendation"] is None, path_backtest
+
+assert adapter.calls == [
+    ("daily_report", {
+        "project_id": 2,
+        "agent_loop_run_id": 10,
+        "report_date": "2026-06-25",
+        "evidence_ids": ["comment:123", "event:7"],
+    }),
+    ("action_backtest", {
+        "project_id": 2,
+        "agent_loop_run_id": 10,
+        "action_id": 55,
+        "evidence_ids": ["action:55", "comment:123"],
+    }),
+    ("action_backtest", {
+        "project_id": 2,
+        "agent_loop_run_id": 10,
+        "action_id": 56,
+        "evidence_ids": ["action:56"],
+    }),
+], adapter.calls
+
+invalid_run = service.create_daily_report(999, {"projectId": 2, "reportDate": "2026-06-25"})
+assert invalid_run["ok"] is False, invalid_run
+assert invalid_run["error_type"] == "agent_loop_not_found", invalid_run
+
+cross_project_action = service.create_action_backtest(10, 77, {"projectId": 2, "evidenceIds": ["action:77"]})
+assert cross_project_action["ok"] is False, cross_project_action
+assert cross_project_action["error_type"] == "action_not_found", cross_project_action
+
+cross_project_evidence = service.create_daily_report(10, {"projectId": 2, "evidenceIds": ["comment:999"]})
+assert cross_project_evidence["ok"] is False, cross_project_evidence
+assert cross_project_evidence["error_type"] == "report_backtest_evidence_rejected", cross_project_evidence
+
+unsafe = service.create_action_backtest(10, 55, {
+    "projectId": 2,
+    "command": "weibo-backtest-fixture",
+    "evidenceIds": ["action:55"],
+})
+assert unsafe["ok"] is False, unsafe
+assert unsafe["error_type"] == "report_backtest_payload_rejected", unsafe
+
+assert len(adapter.calls) == 3, adapter.calls
+serialized = json.dumps([report, backtest, unknown, invalid_run, cross_project_action, cross_project_evidence, unsafe], ensure_ascii=False)
+for forbidden in ["stdout", "stderr", "rawArtifact", "internalPayload", "database_url", "mysql://", "/tmp/raw.json", "weibo-backtest-fixture"]:
+    assert forbidden not in serialized, serialized
+`);
+});
+
+test("DeterministicReportBacktestAdapter reuses allowlisted enterprise worker helpers with service-owned inputs", () => {
+  runPython(`
+from app.report_backtest_agent_service import DeterministicReportBacktestAdapter
+
+class WorkerHelpers:
+    def __init__(self):
+        self.daily_calls = []
+        self.backtest_calls = []
+
+    def daily_report(self, records, now):
+        self.daily_calls.append((records, now))
+        return {
+            "dataCoverage": {
+                "comments": len(records["comments"]),
+                "events": len(records["events"]),
+                "actions": len(records["actions"]),
+                "backtests": len(records["backtests"]),
+            },
+            "evidence_ids": ["comment:123", "event:7"],
+            "markdown": "# internal markdown should not be part of adapter contract",
+        }
+
+    def backtest_scenario(self, scenario):
+        self.backtest_calls.append(scenario)
+        return {
+            "result": "no_signal",
+            "confounders": ["external_event_overlap"],
+            "next_recommendation": "Monitor another deterministic window.",
+            "missing_data_reason": None,
+        }
+
+helpers = WorkerHelpers()
+adapter = DeterministicReportBacktestAdapter(worker_module=helpers)
+
+report = adapter.run_daily_report({
+    "project_id": 2,
+    "agent_loop_run_id": 10,
+    "report_date": "2026-06-25",
+    "evidence_ids": ["comment:123", "event:7"],
+})
+assert report["ok"] is True, report
+assert report["coverage"] == {"comments": 1, "events": 1, "actions": 0, "backtests": 0}, report
+assert report["evidenceIds"] == ["comment:123", "event:7"], report
+assert helpers.daily_calls == [({
+    "targets": [],
+    "comments": [{"id": "comment:123", "content": "Scoped Harness evidence comment."}],
+    "events": [{"id": "event:7", "title": "Scoped Harness evidence event."}],
+    "actions": [],
+    "backtests": [],
+    "memory": [],
+}, "2026-06-25")], helpers.daily_calls
+
+backtest = adapter.run_action_backtest({
+    "project_id": 2,
+    "agent_loop_run_id": 10,
+    "action_id": 55,
+    "evidence_ids": ["action:55", "event:7", "comment:123"],
+})
+assert backtest["ok"] is True, backtest
+assert backtest["result"] == "no_signal", backtest
+assert backtest["confounders"] == ["external_event_overlap"], backtest
+assert helpers.backtest_calls[0]["action"]["id"] == 55, helpers.backtest_calls
+assert helpers.backtest_calls[0]["action"]["confirmation_status"] == "confirmed", helpers.backtest_calls
+assert helpers.backtest_calls[0]["action"]["related_event_id"] == "event:7", helpers.backtest_calls
+assert helpers.backtest_calls[0]["baseline"]["mentions"] == 10, helpers.backtest_calls
+assert "fixture" not in helpers.backtest_calls[0], helpers.backtest_calls
 `);
 });
 

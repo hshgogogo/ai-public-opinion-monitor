@@ -75,3 +75,21 @@ Apply:
 
 Verification:
 - 测试同时覆盖 top-level artifact、content/evidence raw artifact、caller raw artifact，包含 `raw_stdout`、`raw-stdout`、`collector_transcript`、Cookie/token/storage marker、绝对路径、`..`、反斜杠、冒号、wrong prefix 和 safe path 保留。
+
+## Public response 顶层 ID 净化但 nested object 仍泄露
+
+When:
+- FastAPI/Node adapter 把 worker/service 的 `run`、`step`、`report`、`backtest` 等子对象展开到 public response，同时又在顶层补 `agentLoopRunId`、`status` 或 summary 字段。
+
+Symptom:
+- 顶层 `agentLoopRunId` 已被强制为正整数，但 nested `run.id`、summary、nextRecommendation 或其他 allowlisted 子字段仍保留非正整数 ID、raw artifact path、stdout/stderr 文件名或 secret-like 字符串。
+
+Root cause:
+- 只净化派生出来的顶层字段，未重写原始子对象；递归 sanitizer 也不能替代字段白名单和类型约束。
+
+Apply:
+- Public response helper 必须先复制并白名单化 nested object，再重写 ID/status/summary 等 public 字段；ID 字段只允许 positive integer，必要时使用 path/request 中已验证过的 ID 作为 fallback。
+- 对允许自由文本的字段，必须把通用 POSIX/Windows 路径、raw/stdout/stderr/trace/transcript/artifact 文件名视为 raw artifact/internal trace 风险。
+
+Verification:
+- Contract tests 同时断言 top-level `agentLoopRunId`、nested `run.id`、report/backtest summary、nextRecommendation；serialized public payload 不含非正整数 ID、secret markers、raw artifact paths、stdout/stderr 或 internal trace markers。
