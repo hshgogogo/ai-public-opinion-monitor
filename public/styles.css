@@ -459,6 +459,20 @@ canvas {
   background: #fff3f1;
 }
 
+.comment-card p {
+  overflow-wrap: anywhere;
+}
+
+.comment-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .status-grid div {
   display: flex;
   justify-content: space-between;

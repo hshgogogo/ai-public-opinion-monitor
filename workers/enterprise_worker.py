@@ -9,13 +9,18 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+if len(sys.argv) > 1 and sys.argv[1] in {"weibo-knowledge-seed", "weibo-knowledge-search", "weibo-knowledge-validate"}:
+    os.environ["YUQING_SKIP_ENV_FILE"] = "1"
+
 from workers import db
+from workers.agents.judge_agent import judge_evidence_citation_detail, judge_evidence_citation_details
 from workers.agents.sentiment_agent import analyze_comment
+from workers.analyzer_core import fallback_analysis
 from workers.collectors import douyin, weibo, xiaohongshu
 
 
@@ -33,6 +38,30 @@ SOURCE_MATCH_UNKNOWN = {
     "source_type": "unknown",
     "source_match_method": "unknown",
     "source_match_confidence": 0.2,
+}
+
+AGENT_LOOP_TERMINAL_STATUSES = {"succeeded", "partial", "failed", "needs_human"}
+FEEDBACK_LEDGER_STATUSES = {"open", "in_review", "resolved", "rejected", "archived"}
+SOURCE_ACCOUNT_TYPES = {"official", "artist", "producer", "marketing", "suspected_matrix", "media", "fan", "organic", "unknown"}
+KNOWLEDGE_SOURCE_TYPES = {"official", "academic", "book", "industry_report", "award_case", "platform_case", "interview", "media_article", "self_media", "other"}
+KNOWLEDGE_RELIABILITY_LEVELS = {"A", "B", "C"}
+KNOWLEDGE_CARD_STATUSES = {"active", "inactive", "draft", "archived"}
+
+AGENT_STEP_ATTACHMENT_CONFIG = {
+    "weibo-comments-analyze": ("Issue Analysis Agent", "comment_analysis"),
+    "weibo-events-build": ("Event Agent", "event_building"),
+    "weibo-actions-build": ("Strategy Agent", "action_recommendation"),
+    "weibo-bot-message": ("QA Agent", "evidence_qa"),
+}
+
+FEEDBACK_TYPES_BY_SOURCE = {
+    "event": {"event_confirmed", "event_rejected", "event_observation_only", "event_note"},
+    "action": {"action_confirmed", "action_rejected", "action_partially_executed", "action_not_executed", "action_note"},
+    "source_account": {"source_type_corrected"},
+    "preference": {"preference_added", "preference_updated"},
+    "loop": {"manual_handoff_resolved", "manual_handoff_note"},
+    "step": {"manual_handoff_resolved", "manual_handoff_note"},
+    "judge_review": {"manual_handoff_resolved", "manual_handoff_note"},
 }
 
 
@@ -71,16 +100,30 @@ def main():
     add_payload_parser(sub, "weibo-target-select")
     add_payload_parser(sub, "weibo-target-ignore")
     add_payload_parser(sub, "weibo-source-account-upsert")
+    add_payload_parser(sub, "weibo-comments")
+    add_payload_parser(sub, "weibo-comments-analyze")
+    add_payload_parser(sub, "weibo-analyses")
     collect_target = add_payload_parser(sub, "weibo-collect-target")
     collect_target.add_argument("--target-id", required=True)
+    add_payload_parser(sub, "weibo-events-build")
     events = add_payload_parser(sub, "weibo-events")
     events.add_argument("--event-id")
+    add_payload_parser(sub, "weibo-actions-build")
     add_payload_parser(sub, "weibo-actions-pending")
     action_confirm = add_payload_parser(sub, "weibo-action-confirm")
     action_confirm.add_argument("--action-id", required=True)
     action_backtest = add_payload_parser(sub, "weibo-action-backtest")
     action_backtest.add_argument("--action-id", required=True)
+    add_payload_parser(sub, "weibo-feedback")
     add_payload_parser(sub, "weibo-bot-message")
+    add_payload_parser(sub, "weibo-agent-loop-run")
+    add_payload_parser(sub, "weibo-agent-loop-status")
+    add_payload_parser(sub, "weibo-agent-loop-step")
+    add_payload_parser(sub, "weibo-agent-loop-judge-review")
+    add_payload_parser(sub, "weibo-agent-loop-handoff")
+    add_payload_parser(sub, "weibo-knowledge-seed")
+    add_payload_parser(sub, "weibo-knowledge-search")
+    add_payload_parser(sub, "weibo-knowledge-validate")
     e2e_fixture = sub.add_parser("weibo-fixture-e2e")
     e2e_fixture.add_argument("--now", required=True)
     search_fixture = sub.add_parser("weibo-parse-search-fixture")
@@ -147,18 +190,46 @@ def main():
             emit(weibo_target_state_payload(args.payload_json, "ignored"))
         elif args.command == "weibo-source-account-upsert":
             emit(weibo_source_account_upsert_payload(args.payload_json))
+        elif args.command == "weibo-comments":
+            emit(weibo_comments_payload(args.payload_json))
+        elif args.command == "weibo-comments-analyze":
+            emit(weibo_comments_analyze_payload(args.payload_json))
+        elif args.command == "weibo-analyses":
+            emit(weibo_analyses_payload(args.payload_json))
         elif args.command == "weibo-collect-target":
             emit(weibo_collect_target_payload(args.payload_json, args.target_id))
+        elif args.command == "weibo-events-build":
+            emit(weibo_events_build_payload(args.payload_json))
         elif args.command == "weibo-events":
-            emit(real_weibo_endpoint_payload("GET /api/weibo/events", args.payload_json, event_id=args.event_id))
+            emit(weibo_events_payload(args.payload_json, args.event_id))
+        elif args.command == "weibo-actions-build":
+            emit(weibo_actions_build_payload(args.payload_json))
         elif args.command == "weibo-actions-pending":
             emit(weibo_actions_pending_payload(args.payload_json))
         elif args.command == "weibo-action-confirm":
             emit(weibo_action_confirm_payload(args.payload_json, args.action_id))
         elif args.command == "weibo-action-backtest":
             emit(real_weibo_endpoint_payload("POST /api/weibo/actions/:id/backtest", args.payload_json, action_id=args.action_id))
+        elif args.command == "weibo-feedback":
+            emit(weibo_feedback_payload(args.payload_json))
         elif args.command == "weibo-bot-message":
-            emit(real_weibo_endpoint_payload("POST /api/weibo/bot/messages", args.payload_json))
+            emit(weibo_bot_message_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-run":
+            emit(weibo_agent_loop_run_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-status":
+            emit(weibo_agent_loop_status_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-step":
+            emit(weibo_agent_loop_step_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-judge-review":
+            emit(weibo_agent_loop_judge_review_payload(args.payload_json))
+        elif args.command == "weibo-agent-loop-handoff":
+            emit(weibo_agent_loop_handoff_payload(args.payload_json))
+        elif args.command == "weibo-knowledge-seed":
+            emit(weibo_knowledge_seed_payload(args.payload_json))
+        elif args.command == "weibo-knowledge-search":
+            emit(weibo_knowledge_search_payload(args.payload_json))
+        elif args.command == "weibo-knowledge-validate":
+            emit(weibo_knowledge_validate_payload(args.payload_json))
         elif args.command == "weibo-fixture-e2e":
             emit(weibo_fixture_e2e(args.now))
         elif args.command == "weibo-parse-search-fixture":
@@ -211,20 +282,20 @@ def health_payload():
     if not weibo_auth:
         weibo_auth = {"platform": "weibo", "cookie_file": os.environ.get("WEIBO_COOKIE_FILE", "config/cookies/weibo.json"), "status": auth_status_from_cookie()}
     weibo_status = normalize_auth_status(weibo_auth.get("status"))
+    public_auth = [public_auth_state(row) for row in auth]
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
         "database": database,
-        "auth": auth,
+        "auth": public_auth,
         "weiboMvp": {
             "database": database,
             "mediacrawler": mediacrawler_health(),
             "cdp": cdp_health(),
             "auth": {
                 "platform": "weibo",
-                "cookie_file": weibo_auth.get("cookie_file"),
                 "status": weibo_status,
-                "error": auth_error(weibo_status),
+                "error": public_auth_error(weibo_status),
             },
         },
         "platforms": list(PLATFORM_LABELS.keys()),
@@ -247,7 +318,7 @@ def snapshot_payload(project_id=None):
 
 
 def empty_snapshot(database, message=None):
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     return {
         "generatedAt": now,
         "config": db.DEFAULT_PROJECT,
@@ -377,7 +448,7 @@ def build_snapshot(project, items, database, strategy):
         "enterprise": {
             "mode": "real-data-only",
             "database": database,
-            "auth": auth_states(),
+            "auth": public_auth_states(),
             "allowedPlatforms": list(PLATFORM_LABELS.keys()),
             "message": "所有指标来自 MySQL 中的真实采集评论；无数据时不使用 mock。",
         },
@@ -471,6 +542,20 @@ def auth_states():
         with conn.cursor() as cur:
             cur.execute("SELECT platform, cookie_file, status, last_checked_at FROM platform_auth_states ORDER BY platform")
             return cur.fetchall()
+
+
+def public_auth_states():
+    return [public_auth_state(row) for row in auth_states()]
+
+
+def public_auth_state(row):
+    status = normalize_auth_status(row.get("status"))
+    return {
+        "platform": row.get("platform"),
+        "status": status,
+        "last_checked_at": iso_or_none(row.get("last_checked_at")),
+        "error": public_auth_error(status),
+    }
 
 
 def upsert_post(project_id, platform, post):
@@ -701,6 +786,21 @@ def auth_error(status):
     return weibo_error(error_type, message, cause, fix)
 
 
+def public_auth_error(status):
+    if status == "configured":
+        return None
+    mapping = {
+        "missing": ("auth_required", "Weibo auth cookie is missing.", "The local Weibo authentication state is not configured.", "Refresh the local Weibo authentication state before real collection."),
+        "invalid": ("auth_invalid", "Weibo auth cookie is invalid.", "The stored local authentication state cannot authenticate Weibo requests.", "Refresh the local Weibo authentication state from a valid browser session."),
+        "expired": ("auth_expired", "Weibo auth cookie is expired.", "The stored local authentication state has expired.", "Refresh the local Weibo authentication state from a valid browser session."),
+        "verification_required": ("platform_verification_required", "Weibo requires account verification.", "The current Weibo session is blocked by a verification challenge.", "Complete verification in the browser before retrying."),
+        "rate_limited": ("platform_rate_limited", "Weibo is rate limited.", "The account or IP is currently throttled by Weibo.", "Wait before retrying and reduce collection frequency."),
+        "unknown": ("auth_unknown", "Weibo auth state is unknown.", "The system could not determine whether authentication is usable.", "Run health again after checking the local authentication state."),
+    }
+    error_type, message, cause, fix = mapping.get(status, mapping["unknown"])
+    return weibo_error(error_type, message, cause, fix)
+
+
 def weibo_error(error_type, message, cause, fix, docs_anchor=None):
     payload = {
         "ok": False,
@@ -825,9 +925,9 @@ def weibo_workbench_payload(payload_json="{}"):
                 (project["id"], project["id"]),
             )
             backtest_count = cur.fetchone()["count"]
-    target_payloads = [target_row_to_payload(row) for row in targets]
+    target_payloads = [target_row_to_payload(row, public=True) for row in targets]
     event_payloads = [event_row_to_payload(row) for row in events]
-    action_payloads = [action_row_to_payload(row) for row in actions]
+    action_payloads = [action_row_to_payload(row, public=True) for row in actions]
     progress = {
         "target_count": len(target_payloads),
         "comment_count": int(comment_count or 0),
@@ -964,6 +1064,599 @@ def workbench_citations(targets, events, actions):
     citations.extend([event.get("id") for event in events[:10]])
     citations.extend([action.get("id") for action in actions[:10]])
     return [item for item in citations if item is not None]
+
+
+def weibo_comments_payload(payload_json="{}"):
+    endpoint = "GET /api/weibo/comments"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=50, maximum=200)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM social_comments
+                WHERE project_id=%s AND platform='weibo'
+                """,
+                (project["id"],),
+            )
+            total = int(cur.fetchone()["count"] or 0)
+            cur.execute(
+                """
+                SELECT
+                  c.*,
+                  p.external_id AS post_external_id,
+                  p.url AS post_url,
+                  p.keyword,
+                  p.engagement AS post_engagement,
+                  p.source_type AS post_source_type
+                FROM social_comments c
+                JOIN social_posts p ON p.id=c.post_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                ORDER BY c.like_count DESC, c.reply_count DESC, c.id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            rows = cur.fetchall()
+    comments = [comment_row_to_payload(row) for row in rows]
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "limit": limit,
+        "total": total,
+        "comments": comments,
+        "citations": [comment["citation"] for comment in comments],
+    }
+
+
+def bounded_limit(value, default=50, maximum=200):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def comment_row_to_payload(row):
+    source_type = row.get("source_type") or row.get("post_source_type") or "unknown"
+    return {
+        "comment_id": row["id"],
+        "external_id": row.get("external_id"),
+        "post_id": row.get("post_id"),
+        "post_external_id": row.get("post_external_id"),
+        "platform": row["platform"],
+        "author_name": row.get("author_name"),
+        "content": row.get("content"),
+        "like_count": int(row.get("like_count") or 0),
+        "reply_count": int(row.get("reply_count") or 0),
+        "comment_weight": float(row.get("comment_weight") or 1),
+        "source_type": source_type,
+        "source_account_external_id": row.get("source_account_external_id"),
+        "source_account_url": row.get("source_account_url"),
+        "keyword": row.get("keyword"),
+        "post_url": row.get("post_url"),
+        "engagement": int(row.get("like_count") or row.get("post_engagement") or 0),
+        "collected_at": iso_or_none(row.get("collected_at")),
+        "citation": f"comment-{row['id']}",
+    }
+
+
+def weibo_comments_analyze_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/comments/analyze"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-comments-analyze")
+    if attachment_error:
+        return attachment_error
+    def run():
+        limit = bounded_limit(payload.get("limit"), default=100, maximum=500)
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        deepseek_context = deepseek_analysis_context(payload)
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT c.*
+                    FROM social_comments c
+                    WHERE c.project_id=%s AND c.platform='weibo'
+                    ORDER BY c.collected_at DESC, c.id DESC
+                    LIMIT %s
+                    """,
+                    (project["id"], limit),
+                )
+                comments = cur.fetchall()
+                persisted = 0
+                analyses = []
+                for row in comments:
+                    comment = comment_db_row_to_analysis_input(row)
+                    analysis = analyze_db_comment(comment, now, deepseek_context, len(analyses))
+                    analyses.append(analysis)
+                    cur.execute(
+                        """
+                        INSERT INTO sentiment_results(
+                          comment_id, model, sentiment, score, confidence, topics, risks,
+                          evidence, stance, issue_summary, intensity, weight_snapshot,
+                          analysis_json, fallback_type, analyzed_at
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                          sentiment=VALUES(sentiment),
+                          score=VALUES(score),
+                          confidence=VALUES(confidence),
+                          topics=VALUES(topics),
+                          risks=VALUES(risks),
+                          evidence=VALUES(evidence),
+                          stance=VALUES(stance),
+                          issue_summary=VALUES(issue_summary),
+                          intensity=VALUES(intensity),
+                          weight_snapshot=VALUES(weight_snapshot),
+                          analysis_json=VALUES(analysis_json),
+                          fallback_type=VALUES(fallback_type),
+                          analyzed_at=VALUES(analyzed_at)
+                        """,
+                        (
+                            row["id"],
+                            analysis["model"],
+                            analysis["sentiment"],
+                            analysis["score"],
+                            analysis["confidence"],
+                            json.dumps(analysis["topics"], ensure_ascii=False),
+                            json.dumps(analysis["risks"], ensure_ascii=False),
+                            analysis["evidence"],
+                            analysis["stance"],
+                            analysis["issue_summary"],
+                            analysis["intensity"],
+                            analysis["weight"],
+                            json.dumps(analysis["analysis_json"], ensure_ascii=False),
+                            analysis["fallback_type"],
+                            mysql_timestamp(now),
+                        ),
+                    )
+                    persisted += 1
+                agent_run = analysis_agent_run(deepseek_context, len(comments))
+                cur.execute(
+                    """
+                    INSERT INTO agent_runs(project_id, agent_name, status, input_json, output_json, finished_at)
+                    VALUES (%s,%s,'succeeded',%s,%s,NOW())
+                    """,
+                    (
+                        project["id"],
+                        agent_run["agent_name"],
+                        json.dumps({"endpoint": endpoint, "limit": limit, "deepseek": deepseek_context["status"]}, ensure_ascii=False),
+                        json.dumps(agent_run, ensure_ascii=False),
+                    ),
+                )
+                agent_run["id"] = cur.lastrowid
+        result = {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "analyzed_comments": len(comments),
+            "persisted_sentiments": persisted,
+            "analyses": analyses[:20],
+            "agent_run": agent_run,
+            "deepseek": deepseek_payload(deepseek_context),
+        }
+        evidence_ids = [f"comment-{row['id']}" for row in comments]
+        status = "succeeded" if persisted > 0 and evidence_ids else "partial"
+        error_type = None if status == "succeeded" else "no_comments_to_analyze"
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json=agent_step_output("weibo-comments-analyze", result, ["analyzed_comments", "persisted_sentiments", "deepseek"]),
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message="No Weibo comments were available for analysis." if error_type else None,
+        )
+    return run_attached_worker_command(attachment, run)
+
+
+def comment_db_row_to_analysis_input(row):
+    return {
+        "id": row["id"],
+        "content": row.get("content") or "",
+        "like_count": int(row.get("like_count") or 0),
+        "reply_count": int(row.get("reply_count") or 0),
+        "collected_at": iso_or_none(row.get("collected_at")),
+    }
+
+
+def deepseek_analysis_context(payload):
+    response_path = payload.get("deepseekResponsePath")
+    simulate_failure = payload.get("simulateDeepSeekFailure")
+    if simulate_failure:
+        return {"status": "failed", "error_type": "deepseek_failed", "reason": str(simulate_failure), "items": []}
+    if response_path:
+        fixture_path, fixture_error = resolve_fixture_path(response_path)
+        if fixture_error:
+            return {"status": "failed", "error_type": fixture_error["error_type"], "reason": fixture_error["message"], "items": []}
+        try:
+            return {"status": "succeeded", "source": "fixture", "items": parse_deepseek_response(Path(fixture_path).read_text(encoding="utf-8"))}
+        except Exception as exc:
+            return {"status": "failed", "error_type": "deepseek_parse_failed", "reason": type(exc).__name__, "items": []}
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return {"status": "live_enabled", "items": None}
+    return {"status": "not_run", "reason": "deepseek_unavailable", "items": []}
+
+
+def analyze_db_comment(comment, now, deepseek_context, index):
+    if deepseek_context.get("status") == "succeeded":
+        model_item = deepseek_item_for_comment(deepseek_context.get("items") or [], comment, index)
+        return analysis_from_deepseek(comment, model_item, now)
+    if deepseek_context.get("status") == "live_enabled":
+        live = analyze_comment(comment.get("content") or "")
+        if live.get("model") == "deepseek-chat":
+            return analysis_from_model_agent(comment, live, now)
+        deepseek_context["status"] = "failed"
+        deepseek_context["error_type"] = "deepseek_failed"
+        deepseek_context["reason"] = live.get("error") or "deepseek_api_unavailable"
+    return analyze_weibo_comment_record_with_local_rules(comment, now)
+
+
+def deepseek_item_for_comment(items, comment, index):
+    by_comment_id = {str(item.get("comment_id")): item for item in items if isinstance(item, dict)}
+    return by_comment_id.get(str(comment.get("id"))) or (items[index] if index < len(items) and isinstance(items[index], dict) else {})
+
+
+def analysis_from_model_agent(comment, model_item, now):
+    analysis = analysis_from_deepseek(comment, model_item, now)
+    analysis["analysis_json"]["source"] = "deepseek_api"
+    if model_item.get("error"):
+        analysis = analyze_weibo_comment_record_with_local_rules(comment, now)
+        analysis["analysis_json"]["deepseek_error_type"] = "deepseek_failed"
+    return analysis
+
+
+def analysis_agent_run(deepseek_context, comment_count):
+    if deepseek_context.get("status") in {"succeeded", "live_enabled"}:
+        return {
+            "agent_name": "DeepSeek Weibo Analysis",
+            "status": "succeeded",
+            "model": "deepseek-chat",
+            "fallback_type": "none",
+            "comment_count": comment_count,
+            "deepseek_status": deepseek_context.get("status"),
+        }
+    if deepseek_context.get("status") == "failed":
+        return {
+            "agent_name": "DeepSeek Weibo Analysis",
+            "status": "succeeded",
+            "model": "local-rules",
+            "fallback_type": "local_rules",
+            "comment_count": comment_count,
+            "deepseek_status": "failed",
+            "error_type": deepseek_context.get("error_type"),
+        }
+    return {
+        "agent_name": "Local Weibo Issue Analysis",
+        "status": "succeeded",
+        "model": "local-rules",
+        "fallback_type": "local_rules",
+        "comment_count": comment_count,
+        "deepseek_status": "not_run",
+    }
+
+
+def deepseek_payload(deepseek_context):
+    if deepseek_context.get("status") == "succeeded":
+        return {"status": "succeeded", "source": deepseek_context.get("source", "api")}
+    if deepseek_context.get("status") == "live_enabled":
+        return {"status": "succeeded", "source": "api"}
+    if deepseek_context.get("status") == "failed":
+        return {
+            "status": "failed",
+            "error_type": deepseek_context.get("error_type", "deepseek_failed"),
+            "fallback_type": "local_rules",
+        }
+    return {"status": "not_run", "reason": deepseek_context.get("reason", "deepseek_unavailable")}
+
+
+def weibo_analyses_payload(payload_json="{}"):
+    endpoint = "GET /api/weibo/analyses"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=50, maximum=200)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT sr.comment_id) AS count
+                FROM sentiment_results sr
+                JOIN social_comments c ON c.id=sr.comment_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                """,
+                (project["id"],),
+            )
+            total = int(cur.fetchone()["count"] or 0)
+            cur.execute(
+                """
+                SELECT *
+                FROM (
+                  SELECT
+                    sr.*,
+                    c.project_id,
+                    c.platform,
+                    c.external_id AS comment_external_id,
+                    c.author_name,
+                    c.content,
+                    c.like_count,
+                    c.reply_count,
+                    p.external_id AS post_external_id,
+                    p.url AS post_url,
+                    p.keyword,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY sr.comment_id
+                      ORDER BY (sr.model='deepseek-chat') DESC, sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                    ) AS preferred_rank
+                  FROM sentiment_results sr
+                  JOIN social_comments c ON c.id=sr.comment_id
+                  JOIN social_posts p ON p.id=c.post_id
+                  WHERE c.project_id=%s AND c.platform='weibo'
+                ) preferred
+                WHERE preferred_rank=1
+                ORDER BY analyzed_at DESC, created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            rows = cur.fetchall()
+    analyses = [analysis_row_to_payload(row) for row in rows]
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "limit": limit,
+        "total": total,
+        "analyses": analyses,
+        "citations": [analysis["citation"] for analysis in analyses],
+    }
+
+
+def analysis_row_to_payload(row):
+    return {
+        "analysis_id": row["id"],
+        "comment_id": row["comment_id"],
+        "comment_external_id": row.get("comment_external_id"),
+        "post_external_id": row.get("post_external_id"),
+        "platform": row["platform"],
+        "author_name": row.get("author_name"),
+        "content": row.get("content"),
+        "sentiment": row["sentiment"],
+        "score": float(row.get("score") or 0),
+        "confidence": float(row.get("confidence") or 0),
+        "topics": db.jloads(row.get("topics"), []),
+        "risks": db.jloads(row.get("risks"), []),
+        "stance": row.get("stance") or "unclear",
+        "issue_summary": row.get("issue_summary"),
+        "intensity": float(row.get("intensity") or 0),
+        "weight_snapshot": float(row.get("weight_snapshot") or 1),
+        "evidence": row.get("evidence"),
+        "fallback_type": row.get("fallback_type") or "none",
+        "model": row.get("model"),
+        "keyword": row.get("keyword"),
+        "post_url": row.get("post_url"),
+        "analyzed_at": iso_or_none(row.get("analyzed_at")),
+        "citation": f"comment-{row['comment_id']}",
+    }
+
+
+def weibo_events_build_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/events/build"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-events-build")
+    if attachment_error:
+        return attachment_error
+    def run():
+        limit = bounded_limit(payload.get("limit"), default=500, maximum=2000)
+        evidence = load_weibo_analysis_evidence(project["id"], limit)
+        if not evidence:
+            result = {
+                "ok": True,
+                "mode": "weibo-agent-mvp",
+                "projectId": project["id"],
+                "events": [],
+                "persisted_events": 0,
+                "data_gap": "no_analysis_evidence",
+                "deepseek": {"status": "not_run", "reason": "no_analysis_evidence"},
+            }
+            return attach_agent_step_run(
+                result,
+                attachment,
+                status="partial",
+                output_json=agent_step_output("weibo-events-build", result, ["persisted_events", "data_gap", "deepseek"]),
+                evidence_ids=[],
+                error_type="no_analysis_evidence",
+                error_message="No analyzed Weibo comment evidence was available for event building.",
+            )
+        grouped = {}
+        for item in evidence:
+            for issue in recall_issue_keys(item):
+                grouped.setdefault(issue, []).append(item)
+        events = []
+        for issue_key, items in grouped.items():
+            for cluster in merge_evidence_window(items):
+                event = build_event_from_evidence(issue_key, cluster)
+                event["event_explanation"] = {"model": "local-rules", "fallback_type": "local_events_slice"}
+                events.append(event)
+        persisted_events = persist_events(project["id"], events)
+        result = {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "evidence_count": len(evidence),
+            "events": events,
+            "persisted_events": persisted_events,
+            "deepseek": {"status": "not_run", "reason": "local_events_slice"},
+        }
+        evidence_ids = event_step_evidence_ids(events)
+        status = "succeeded" if persisted_events > 0 and evidence_ids else "partial"
+        error_type = None if status == "succeeded" else "no_events_built"
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json=agent_step_output("weibo-events-build", result, ["evidence_count", "persisted_events", "deepseek"]),
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message="No evidence-backed Weibo events were built." if error_type else None,
+        )
+    return run_attached_worker_command(attachment, run)
+
+
+def load_weibo_analysis_evidence(project_id, limit):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM (
+                  SELECT
+                    sr.id AS analysis_id,
+                    sr.comment_id,
+                    sr.sentiment,
+                    sr.score,
+                    sr.confidence,
+                    sr.topics,
+                    sr.risks,
+                    sr.evidence,
+                    sr.stance,
+                    sr.issue_summary,
+                    sr.intensity,
+                    sr.weight_snapshot,
+                    sr.analyzed_at,
+                    sr.created_at AS analysis_created_at,
+                    c.content,
+                    c.like_count,
+                    c.reply_count,
+                    c.collected_at,
+                    p.external_id AS post_external_id,
+                    p.url AS post_url,
+                    p.keyword,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY sr.comment_id
+                      ORDER BY (sr.model='deepseek-chat') DESC, sr.analyzed_at DESC, sr.created_at DESC, sr.id DESC
+                    ) AS preferred_rank
+                  FROM sentiment_results sr
+                  JOIN social_comments c ON c.id=sr.comment_id
+                  JOIN social_posts p ON p.id=c.post_id
+                  WHERE c.project_id=%s AND c.platform='weibo'
+                ) preferred
+                WHERE preferred_rank=1
+                ORDER BY analyzed_at DESC, analysis_created_at DESC, analysis_id DESC
+                LIMIT %s
+                """,
+                (project_id, limit),
+            )
+            rows = cur.fetchall()
+    return [analysis_row_to_event_evidence(row) for row in rows]
+
+
+def analysis_row_to_event_evidence(row):
+    seen_at = row.get("analyzed_at") or row.get("analysis_created_at") or row.get("collected_at")
+    return {
+        "id": row.get("analysis_id"),
+        "analysis_id": row.get("analysis_id"),
+        "comment_id": row.get("comment_id"),
+        "post_external_id": row.get("post_external_id"),
+        "post_url": row.get("post_url"),
+        "keyword": row.get("keyword"),
+        "content": row.get("content") or "",
+        "sentiment": row.get("sentiment") or "neutral",
+        "score": float(row.get("score") or 0),
+        "confidence": float(row.get("confidence") or 0),
+        "topics": db.jloads(row.get("topics"), []),
+        "risks": db.jloads(row.get("risks"), []),
+        "stance": row.get("stance") or "unclear",
+        "issue_summary": row.get("issue_summary"),
+        "intensity": float(row.get("intensity") or 0),
+        "weight": float(row.get("weight_snapshot") or 1),
+        "evidence": row.get("evidence"),
+        "like_count": int(row.get("like_count") or 0),
+        "reply_count": int(row.get("reply_count") or 0),
+        "created_at": iso_or_none(seen_at),
+    }
+
+
+def weibo_events_payload(payload_json="{}", event_id=None):
+    endpoint = "GET /api/weibo/events"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database, event_id=event_id)
+    project = project_from_payload(payload)
+    limit = bounded_limit(payload.get("limit"), default=50, maximum=200)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            if event_id:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM artist_public_opinion_events
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    """,
+                    (event_id, project["id"]),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return weibo_error(
+                        "event_not_found",
+                        "Weibo public opinion event was not found.",
+                        "The event id does not match a persisted event for this project.",
+                        "Refresh the Weibo events list and retry.",
+                        docs_anchor="weibo-events",
+                    )
+                return {
+                    "ok": True,
+                    "mode": "weibo-agent-mvp",
+                    "projectId": project["id"],
+                    "event": event_row_to_payload(row),
+                    "citations": [f"event-{row['id']}"],
+                }
+            cur.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM artist_public_opinion_events
+                WHERE project_id=%s AND platform='weibo'
+                """,
+                (project["id"],),
+            )
+            total = int(cur.fetchone()["count"] or 0)
+            cur.execute(
+                """
+                SELECT *
+                FROM artist_public_opinion_events
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                LIMIT %s
+                """,
+                (project["id"], limit),
+            )
+            rows = cur.fetchall()
+    events = [event_row_to_payload(row) for row in rows]
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "projectId": project["id"],
+        "limit": limit,
+        "total": total,
+        "events": events,
+        "citations": [f"event-{event['id']}" for event in events],
+    }
 
 
 def real_weibo_endpoint_payload(endpoint, payload_json="{}", **ids):
@@ -1124,7 +1817,7 @@ def weibo_discovery_payload(payload_json="{}"):
         "status": task_status,
         "database": database,
         "task": task_payload(task_id, "weibo", keyword, "search"),
-        "targets": persisted_targets,
+        "targets": [public_target_payload(target) for target in persisted_targets],
         "persisted_targets": len(persisted_targets),
         "failed_records": failed_records,
     }
@@ -1165,7 +1858,7 @@ def weibo_targets_payload(payload_json="{}"):
         "ok": True,
         "mode": "weibo-agent-mvp",
         "database": database,
-        "targets": [target_row_to_payload(row) for row in rows],
+        "targets": [target_row_to_payload(row, public=True) for row in rows],
     }
 
 
@@ -1208,7 +1901,7 @@ def weibo_target_state_payload(payload_json, selected_status):
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "target": target_row_to_payload(updated),
+        "target": target_row_to_payload(updated, public=True),
     }
 
 
@@ -1283,7 +1976,7 @@ def weibo_collect_target_payload(payload_json, target_id):
                 docs_anchor="weibo-target-selection",
             ),
             "target_selected_state": target["selected_status"],
-            "target": target_row_to_payload(target),
+            "target": target_row_to_payload(target, public=True),
         }
     locator = db.jloads(target.get("target_locator"), {})
     locator_check = validate_weibo_target_locator(locator)
@@ -1461,7 +2154,7 @@ def weibo_collect_target_payload(payload_json, target_id):
         "database": database,
         "status": detail["status"],
         "task": task_payload(task_id, "weibo", keyword, "detail", target["id"]),
-        "target": target_row_to_payload(target),
+        "target": target_row_to_payload(target, public=True),
         "parsed_records": detail["parsed_records"],
         "failed_records": detail["failed_records"],
         "persisted_posts": persisted_posts,
@@ -1897,8 +2590,8 @@ def mediacrawler_cookie_header():
         return None, weibo_error(
             "auth_required",
             "Weibo auth cookie is missing.",
-            "WEIBO_COOKIE_FILE does not point to an existing cookie file.",
-            "Log in to Weibo, export cookies to WEIBO_COOKIE_FILE, and rerun the search task.",
+            "The local Weibo authentication state is not configured.",
+            "Refresh the local Weibo authentication state before retrying real collection.",
             docs_anchor="weibo-discovery",
         )
     try:
@@ -1908,7 +2601,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             f"Cookie file could not be parsed: {type(exc).__name__}.",
-            "Refresh WEIBO_COOKIE_FILE with a valid cookie list or Playwright storageState JSON.",
+            "Refresh the local Weibo authentication state from a valid browser session.",
             docs_anchor="weibo-discovery",
         )
     if isinstance(data, str):
@@ -1916,7 +2609,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             "Raw cookie header strings are not accepted because domains cannot be filtered safely.",
-            "Refresh WEIBO_COOKIE_FILE with a browser cookie list or Playwright storageState JSON.",
+            "Refresh the local Weibo authentication state from a browser-exported cookie list or storage state.",
             docs_anchor="weibo-discovery",
         )
     cookies = data.get("cookies") if isinstance(data, dict) else data
@@ -1925,7 +2618,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             "Cookie file must be a cookie list or a Playwright storageState JSON object.",
-            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            "Refresh the local Weibo authentication state from a valid browser session.",
             docs_anchor="weibo-discovery",
         )
     parts = []
@@ -1944,7 +2637,7 @@ def mediacrawler_cookie_header():
             "auth_invalid",
             "Weibo auth cookie is invalid.",
             "Cookie file did not contain any usable cookie name/value pairs.",
-            "Refresh WEIBO_COOKIE_FILE with a valid exported cookie file.",
+            "Refresh the local Weibo authentication state from a valid browser session.",
             docs_anchor="weibo-discovery",
         )
     return cookie_header, None
@@ -2134,8 +2827,8 @@ def find_discovered_target(project_id, target_id):
             return cur.fetchone()
 
 
-def target_row_to_payload(row):
-    return {
+def target_row_to_payload(row, public=False):
+    payload = {
         "id": row["id"],
         "targetId": str(row["id"]),
         "platform": row["platform"],
@@ -2150,15 +2843,26 @@ def target_row_to_payload(row):
         "keyword": row.get("keyword"),
         "rank": row.get("rank"),
         "hot_score": float(row.get("hot_score") or 0),
-        "target_locator": db.jloads(row.get("target_locator"), {}),
-        "content_fingerprint": row.get("content_fingerprint"),
-        "raw_json": db.jloads(row.get("raw_json"), {}),
-        "recommendation_metadata": db.jloads(row.get("recommendation_metadata"), {}),
         "selected_status": row.get("selected_status"),
         "source_type": row.get("source_type", "unknown"),
         "source_match_method": row.get("source_match_method", "unknown"),
         "source_match_confidence": float(row.get("source_match_confidence") or 0),
     }
+    if not public:
+        payload.update({
+            "target_locator": db.jloads(row.get("target_locator"), {}),
+            "content_fingerprint": row.get("content_fingerprint"),
+            "raw_json": db.jloads(row.get("raw_json"), {}),
+            "recommendation_metadata": db.jloads(row.get("recommendation_metadata"), {}),
+        })
+    return payload
+
+
+def public_target_payload(target):
+    payload = dict(target)
+    for key in ["target_locator", "content_fingerprint", "raw_json", "recommendation_metadata"]:
+        payload.pop(key, None)
+    return payload
 
 
 def collection_task_row_to_payload(row):
@@ -2379,6 +3083,311 @@ def persist_detail_comments(project_id, comments, post_ids_by_external):
     return persisted
 
 
+def weibo_actions_build_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/actions/build"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-actions-build")
+    if attachment_error:
+        return attachment_error
+    def run():
+        limit = bounded_limit(payload.get("limit"), default=20, maximum=100)
+        now = payload.get("now") or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM artist_public_opinion_events
+                    WHERE project_id=%s AND platform='weibo'
+                    ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (project["id"], limit),
+                )
+                rows = cur.fetchall()
+                preference_memories = load_preference_memories(cur, project["id"])
+                knowledge_rows = load_active_knowledge_card_rows(cur)
+        actions = [action_from_event(row, now, preference_memories, project["id"], knowledge_rows) for row in rows]
+        persisted = persist_publicity_actions(project["id"], actions, {"by_external_id": {}, "by_display_name": {}, "all_ids": []}) if actions else 0
+        result = {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "events_considered": len(rows),
+            "actions": actions,
+            "recommendations": action_step_recommendations(actions),
+            "knowledge_references": action_step_knowledge_references(actions),
+            "knowledge_reference_details": action_step_knowledge_reference_details(actions),
+            "persisted_actions": persisted,
+            "deepseek": {"status": "not_run", "reason": "deterministic_strategy_slice"},
+        }
+        evidence_ids = action_step_evidence_ids(actions)
+        status = "succeeded" if persisted > 0 and evidence_ids else "partial"
+        error_type = None if status == "succeeded" else "no_events_for_actions"
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json=agent_step_output(
+                "weibo-actions-build",
+                result,
+                [
+                    "events_considered",
+                    "persisted_actions",
+                    "recommendations",
+                    "knowledge_references",
+                    "knowledge_reference_details",
+                ],
+            ),
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message="No evidence-backed Weibo actions were recommended." if error_type else None,
+        )
+    return run_attached_worker_command(attachment, run)
+
+
+def load_preference_memories(cur, project_id):
+    cur.execute(
+        """
+        SELECT id, memory_identity, title, summary, memory_json, importance
+        FROM bot_memory_items
+        WHERE project_id=%s AND source_kind='preference'
+        ORDER BY importance DESC, updated_at DESC, id DESC
+        LIMIT 20
+        """,
+        (project_id,),
+    )
+    return [preference_memory_payload(row) for row in cur.fetchall()]
+
+
+def preference_memory_payload(row):
+    memory_json = db.jloads(row.get("memory_json"), {})
+    return {
+        "id": row["id"],
+        "memory_identity": row.get("memory_identity"),
+        "title": row.get("title"),
+        "summary": row.get("summary"),
+        "memory_json": memory_json,
+        "preference_type": memory_json.get("preference_type"),
+        "source_of_truth": memory_json.get("source_of_truth"),
+        "importance": float(row.get("importance") or 0),
+    }
+
+
+def action_from_event(row, now, preference_memories=None, project_id=None, knowledge_rows=None):
+    event = event_row_to_payload(row)
+    raw_evidence_ids = event.get("evidence_ids", [])
+    evidence_ids = [numeric_id(item) for item in raw_evidence_ids]
+    if not evidence_ids:
+        evidence_ids = [row["id"]]
+    action_type = recommended_action_type(event)
+    preference_constraint = action_preference_constraint(action_type, preference_memories or [])
+    if preference_constraint:
+        action_type = "monitor_and_prepare_material"
+    knowledge_fit = knowledge_fit_for_action(
+        project_id,
+        event,
+        action_type,
+        evidence_ids if raw_evidence_ids else [],
+        knowledge_rows or [],
+    )
+    raw_json = action_preference_raw_json(preference_constraint)
+    raw_json.update(action_knowledge_raw_json(knowledge_fit))
+    return {
+        "id": f"agent-event-{row['id']}",
+        "source": "agent_recommended",
+        "platform": "weibo",
+        "related_event_id": row["id"],
+        "confirmation_status": "pending",
+        "action_type": action_type,
+        "content_summary": recommended_action_summary(event, action_type),
+        "reason": recommended_action_reason(event, preference_constraint, knowledge_fit),
+        "evidence_ids": evidence_ids,
+        "priority": recommended_action_priority(event),
+        "owner_suggestion": "宣发负责人",
+        "confidence": recommended_action_confidence(event),
+        "observed_at": None,
+        "confirmed_at": None,
+        "effective_at": None,
+        "recommended_check_after_at": now,
+        "raw_json": raw_json,
+    }
+
+
+def load_active_knowledge_card_rows(cur):
+    cur.execute(
+        """
+        SELECT
+          c.*,
+          s.source_identity,
+          s.title AS source_title,
+          s.source_type,
+          s.reliability_level,
+          s.citation_url,
+          s.publisher
+        FROM knowledge_cards c
+        JOIN knowledge_sources s ON s.id=c.source_id
+        WHERE c.status='active'
+        ORDER BY c.id
+        """
+    )
+    return cur.fetchall()
+
+
+def knowledge_fit_for_action(project_id, event, action_type, evidence_ids, knowledge_rows):
+    if not project_id or not evidence_ids or not knowledge_rows:
+        return []
+    evidence_values = [str(item) for item in evidence_ids]
+    evidence_check = validate_knowledge_evidence(project_id, evidence_values, True)
+    if evidence_check.get("failure_reason"):
+        return []
+    context = action_knowledge_context(event, action_type)
+    results = [
+        knowledge_card_validation_result(row, context, evidence_values, evidence_check)
+        for row in knowledge_rows
+    ]
+    passed = [item for item in results if item["passed"] and not item["blocked_by_do_not_apply"]]
+    passed.sort(key=knowledge_result_sort_key)
+    return passed[:3]
+
+
+def action_knowledge_context(event, action_type):
+    text = " ".join(
+        str(part)
+        for part in [
+            event.get("title"),
+            event.get("trigger_summary"),
+            event.get("impact_assessment"),
+            " ".join(event.get("recommended_actions") or []),
+            recommended_action_summary(event, action_type),
+        ]
+        if part
+    )
+    topics = extract_action_knowledge_topics(text)
+    return knowledge_search_context({
+        "platform": "weibo",
+        "actionType": action_type,
+        "query": " ".join([text, *topics]),
+        "topics": topics,
+    })
+
+
+def extract_action_knowledge_topics(text):
+    candidates = [
+        "生活方式",
+        "视觉符号",
+        "自然二创",
+        "二创",
+        "正向讨论",
+        "事实争议",
+        "责任归因",
+        "危机回应",
+        "官宣",
+        "可信度",
+        "搜索",
+        "转发",
+    ]
+    return [term for term in candidates if term in text]
+
+
+def action_knowledge_raw_json(knowledge_fit):
+    if not knowledge_fit:
+        return {}
+    return {
+        "knowledge_card_ids": [item["card_id"] for item in knowledge_fit],
+        "knowledge_fit": [action_knowledge_fit_summary(item) for item in knowledge_fit],
+    }
+
+
+def action_knowledge_fit_summary(item):
+    return {
+        "card_id": item["card_id"],
+        "card_identity": item.get("card_identity"),
+        "title": item.get("framework_or_case"),
+        "source_id": item.get("source_id"),
+        "source_identity": item.get("source_identity"),
+        "reliability_level": item.get("reliability_level"),
+        "citation_role": item.get("citation_role"),
+        "hard_rule_allowed": bool(item.get("hard_rule_allowed")),
+        "match_reasons": item.get("match_reasons", [])[:8],
+        "applicable_scenario": item.get("applicable_scenario"),
+        "do_not_apply_when": item.get("do_not_apply_when"),
+        "judge_questions": item.get("judge_questions", []),
+        "citation_url": item.get("citation_url"),
+    }
+
+
+def recommended_action_type(event):
+    evidence_text = " ".join([event.get("title") or "", event.get("trigger_summary") or "", event.get("impact_assessment") or ""])
+    if "官宣" in evidence_text or "可信度" in evidence_text:
+        return "clarify_official_announcement"
+    if event.get("risk_level") in {"high", "critical"}:
+        return "risk_response_plan"
+    return "monitor_and_prepare_material"
+
+
+def action_preference_constraint(action_type, preference_memories):
+    if action_type != "clarify_official_announcement":
+        return None
+    for memory in preference_memories:
+        preference_type = str(memory.get("preference_type") or "").strip()
+        if preference_type == "avoid_public_clarification":
+            return memory
+    return None
+
+
+def action_preference_raw_json(preference_constraint):
+    if not preference_constraint:
+        return {}
+    return {
+        "preference_memory_ids": [preference_constraint["id"]],
+        "preference_memory_identity": preference_constraint.get("memory_identity"),
+        "preference_type": preference_constraint.get("preference_type"),
+        "preference_constraint_source": preference_constraint.get("source_of_truth") or "user_feedback",
+        "preference_not_external_fact": True,
+    }
+
+
+def recommended_action_summary(event, action_type=None):
+    action_type = action_type or recommended_action_type(event)
+    if action_type == "clarify_official_announcement":
+        return "准备微博官宣节奏澄清素材，明确可公开信息与不回应边界。"
+    if event.get("risk_level") in {"high", "critical"}:
+        return "整理高风险议题回应口径，安排后续评论窗口复查。"
+    return "持续观察该微博议题，并准备低风险生活方式或物料补充。"
+
+
+def recommended_action_reason(event, preference_constraint=None, knowledge_fit=None):
+    evidence_ids = event.get("evidence_ids") or []
+    base = f"{event.get('title') or '微博事件'} 已形成 {len(evidence_ids)} 条证据，当前风险 {event.get('risk_level') or 'unknown'}，建议先进入人工确认队列。"
+    if knowledge_fit:
+        ids = "、".join(f"#{item['card_id']}" for item in knowledge_fit)
+        if all(not item.get("hard_rule_allowed") for item in knowledge_fit):
+            base = f"{base} 参考知识卡 {ids} 的弱启发，但知识卡不能作为硬规则，真实依据仍为微博证据。"
+        else:
+            base = f"{base} 参考知识卡 {ids} 的适用性摘要，但知识卡仅作为宣发参考，真实依据仍为微博证据。"
+    if preference_constraint:
+        base = f"{base} 用户偏好记忆 #{preference_constraint['id']} 要求避免默认公开澄清，本建议改为继续观察并准备材料。"
+    return base
+
+
+def recommended_action_priority(event):
+    if event.get("risk_level") in {"critical", "high"}:
+        return "high"
+    if event.get("risk_level") == "medium":
+        return "medium"
+    return "low"
+
+
+def recommended_action_confidence(event):
+    evidence_count = len(event.get("evidence_ids") or [])
+    score = float(event.get("event_score") or 0)
+    return round(min(0.85, 0.45 + evidence_count * 0.05 + min(score, 8) * 0.02), 4)
+
+
 def weibo_actions_pending_payload(payload_json="{}"):
     endpoint = "GET /api/weibo/actions/pending"
     payload = json.loads(payload_json or "{}")
@@ -2409,8 +3418,226 @@ def weibo_actions_pending_payload(payload_json="{}"):
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "actions": [action_row_to_payload(action) for action in actions],
+        "actions": [action_row_to_payload(action, public=True) for action in actions],
     }
+
+
+def weibo_bot_message_payload(payload_json="{}"):
+    endpoint = "POST /api/weibo/bot/messages"
+    payload = json.loads(payload_json or "{}")
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, attachment, attachment_error = project_and_agent_step_attachment(payload, "weibo-bot-message")
+    if attachment_error:
+        return attachment_error
+    def run():
+        question = str(payload.get("question") or payload.get("message") or "").strip()
+        if not question:
+            error = weibo_error(
+                "question_required",
+                "Weibo bot question is required.",
+                "The request did not include question or message text.",
+                "Ask a concrete question about current Weibo evidence.",
+                docs_anchor="weibo-bot",
+            )
+            return attach_agent_step_run(
+                error,
+                attachment,
+                status="failed",
+                output_json=agent_step_output("weibo-bot-message", error, ["error_type", "message", "cause", "fix"]),
+                evidence_ids=[],
+                error_type=error["error_type"],
+                error_message=error["message"],
+            )
+        records = load_weibo_bot_records(project["id"])
+        answer = answer_weibo_question(records, question)
+        conversation_id = persist_bot_exchange(project["id"], question, answer)
+        result = {
+            "ok": True,
+            "mode": "weibo-agent-mvp",
+            "projectId": project["id"],
+            "conversationId": conversation_id,
+            "question": question,
+            "answer": answer,
+        }
+        evidence_ids = answer_real_evidence_ids(answer)
+        answer_error = answer.get("error") or {}
+        status = "succeeded" if evidence_ids and not answer_error else "partial"
+        error_type = answer_error.get("error_type") if answer_error else (None if status == "succeeded" else "insufficient_evidence")
+        return attach_agent_step_run(
+            result,
+            attachment,
+            status=status,
+            output_json={
+                "command": "weibo-bot-message",
+                "conversationId": conversation_id,
+                "answer_error": answer_error or None,
+                "facts_count": len(answer.get("facts") or []),
+                "inferences_count": len(answer.get("inferences") or []),
+                "recommendations_count": len(answer.get("recommendations") or []),
+                "citation_count": len(answer.get("citations") or []),
+                "evidence_count": len(evidence_ids),
+                "knowledge_reference_count": len(answer.get("knowledge_references") or []),
+            },
+            evidence_ids=evidence_ids,
+            error_type=error_type,
+            error_message=answer_error.get("message") if answer_error else None,
+        )
+    return run_attached_worker_command(attachment, run)
+
+
+def load_weibo_bot_records(project_id):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id, c.content, c.like_count, c.reply_count, c.collected_at, p.external_id AS post_external_id
+                FROM social_comments c
+                JOIN social_posts p ON p.id=c.post_id
+                WHERE c.project_id=%s AND c.platform='weibo'
+                ORDER BY c.like_count DESC, c.reply_count DESC, c.id DESC
+                LIMIT 20
+                """,
+                (project_id,),
+            )
+            comments = [
+                {
+                    "id": f"comment-{row['id']}",
+                    "content": row.get("content") or "",
+                    "like_count": int(row.get("like_count") or 0),
+                    "reply_count": int(row.get("reply_count") or 0),
+                    "post_external_id": row.get("post_external_id"),
+                    "created_at": iso_or_none(row.get("collected_at")),
+                }
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT *
+                FROM artist_public_opinion_events
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY FIELD(risk_level,'critical','high','medium','low','unknown'), event_score DESC, updated_at DESC, id DESC
+                LIMIT 10
+                """,
+                (project_id,),
+            )
+            events = [
+                {
+                    "id": f"event-{row['id']}",
+                    "title": row.get("title"),
+                    "risk_level": row.get("risk_level"),
+                    "status": row.get("status"),
+                    "trigger_summary": row.get("trigger_summary"),
+                    "evidence_ids": [f"comment-{item}" for item in db.jloads(row.get("evidence_ids"), [])],
+                    "recommended_actions": db.jloads(row.get("recommended_actions"), []),
+                }
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT *
+                FROM publicity_actions
+                WHERE project_id=%s AND platform='weibo'
+                ORDER BY confirmation_status='pending' DESC, priority DESC, updated_at DESC, id DESC
+                LIMIT 10
+                """,
+                (project_id,),
+            )
+            actions = [
+                {
+                    "id": f"action-{row['id']}",
+                    "source": row.get("source"),
+                    "confirmation_status": row.get("confirmation_status"),
+                    "action_type": row.get("action_type"),
+                    "content_summary": row.get("content_summary"),
+                    "reason": row.get("reason"),
+                    "evidence_ids": [f"comment-{item}" for item in db.jloads(row.get("evidence_ids"), [])],
+                    "priority": row.get("priority"),
+                }
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT id, source_kind, source_id, memory_identity, title, summary, evidence_ids, memory_json
+                FROM bot_memory_items
+                WHERE project_id=%s
+                ORDER BY source_kind='preference' DESC, importance DESC, updated_at DESC, id DESC
+                LIMIT 20
+                """,
+                (project_id,),
+            )
+            memory = [
+                {
+                    "id": f"memory-{row['id']}",
+                    "source_kind": row.get("source_kind"),
+                    "source_id": row.get("source_id"),
+                    "memory_identity": row.get("memory_identity"),
+                    "title": row.get("title"),
+                    "summary": row.get("summary"),
+                    "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+                    "memory_json": db.jloads(row.get("memory_json"), {}),
+                }
+                for row in cur.fetchall()
+            ]
+            knowledge_cards = load_active_knowledge_card_rows(cur)
+    return {
+        "project_id": project_id,
+        "targets": [],
+        "comments": comments,
+        "events": events,
+        "actions": actions,
+        "backtests": [],
+        "memory": memory,
+        "knowledge_cards": knowledge_cards,
+    }
+
+
+def persist_bot_exchange(project_id, question, answer):
+    citations = answer.get("citations") or []
+    evidence_ids = answer_real_evidence_ids(answer)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bot_conversations(project_id, title)
+                VALUES (%s,%s)
+                """,
+                (project_id, question[:240]),
+            )
+            conversation_id = cur.lastrowid
+            cur.execute(
+                """
+                INSERT INTO bot_messages(conversation_id, project_id, role, content, cited_source_ids, error_type)
+                VALUES (%s,%s,'user',%s,JSON_ARRAY(),NULL)
+                """,
+                (conversation_id, project_id, question),
+            )
+            cur.execute(
+                """
+                INSERT INTO bot_messages(conversation_id, project_id, role, content, cited_source_ids, error_type)
+                VALUES (%s,%s,'assistant',%s,%s,%s)
+                """,
+                (
+                    conversation_id,
+                    project_id,
+                    answer.get("text") or "",
+                    json.dumps(citations, ensure_ascii=False),
+                    (answer.get("error") or {}).get("error_type") if answer.get("error") else None,
+                ),
+            )
+    write_memory_item(
+        project_id,
+        "conversation",
+        conversation_id,
+        f"Weibo Q&A: {question[:80]}",
+        answer.get("text") or "",
+        evidence_ids,
+        {"question": question, "answer": answer},
+        0.45,
+        memory_identity=f"conversation:{conversation_id}",
+    )
+    return conversation_id
 
 
 def weibo_action_confirm_payload(payload_json, action_id):
@@ -2489,12 +3716,13 @@ def weibo_action_confirm_payload(payload_json, action_id):
     return {
         "ok": True,
         "mode": "weibo-agent-mvp",
-        "action": action_row_to_payload(updated),
+        "action": action_row_to_payload(updated, public=True),
     }
 
 
-def action_row_to_payload(row):
-    return {
+def action_row_to_payload(row, public=False):
+    raw_json = db.jloads(row.get("raw_json"), {})
+    payload = {
         "id": row["id"],
         "platform": row["platform"],
         "related_event_id": row.get("related_event_id"),
@@ -2513,8 +3741,38 @@ def action_row_to_payload(row):
         "confirmed_at": iso_or_none(row.get("confirmed_at")),
         "effective_at": iso_or_none(row.get("effective_at")),
         "recommended_check_after_at": iso_or_none(row.get("recommended_check_after_at")),
-        "raw_json": db.jloads(row.get("raw_json"), {}),
     }
+    if public:
+        references = public_action_knowledge_references(raw_json)
+        if references:
+            payload["knowledgeReferences"] = references
+    else:
+        payload["raw_json"] = raw_json
+    return payload
+
+
+def public_action_knowledge_references(raw_json):
+    if not isinstance(raw_json, dict):
+        return []
+    public_source = raw_json.get("raw_json") if isinstance(raw_json.get("raw_json"), dict) else raw_json
+    fit = public_source.get("knowledge_fit")
+    if not isinstance(fit, list):
+        return []
+    references = []
+    for item in fit[:3]:
+        if not isinstance(item, dict) or not item.get("card_id"):
+            continue
+        references.append({
+            "card_id": item.get("card_id"),
+            "title": item.get("title") or item.get("framework_or_case") or item.get("card_identity"),
+            "reliability_level": item.get("reliability_level"),
+            "citation_role": "weak_inspiration" if item.get("citation_role") == "weak_inspiration" else "knowledge_reference",
+            "fact_boundary": "knowledge_reference_not_observed_weibo_fact",
+            "applicable_scenario": item.get("applicable_scenario"),
+            "do_not_apply_when": item.get("do_not_apply_when"),
+            "citation_url": item.get("citation_url"),
+        })
+    return references
 
 
 def source_account_row_to_payload(row):
@@ -2708,9 +3966,9 @@ def persist_source_accounts(project_id, accounts):
                       external_id=VALUES(external_id),
                       profile_url=VALUES(profile_url),
                       display_name=VALUES(display_name),
-                      source_type=VALUES(source_type),
-                      match_confidence=VALUES(match_confidence),
-                      confirmed_by_user=VALUES(confirmed_by_user),
+                      source_type=IF(confirmed_by_user=1 AND VALUES(confirmed_by_user)=0, source_type, VALUES(source_type)),
+                      match_confidence=IF(confirmed_by_user=1 AND VALUES(confirmed_by_user)=0, match_confidence, VALUES(match_confidence)),
+                      confirmed_by_user=GREATEST(confirmed_by_user, VALUES(confirmed_by_user)),
                       raw_json=VALUES(raw_json)
                     """,
                     values,
@@ -2730,21 +3988,46 @@ def persist_publicity_actions(project_id, actions, account_ids):
             for action in actions:
                 source_account_id = account_ids["by_external_id"].get(action.get("source_account_external_id"))
                 related_event_id = int(action["related_event_id"]) if str(action.get("related_event_id") or "").isdigit() else None
+                identity = action.get("action_identity") or publicity_action_identity(action, related_event_id)
+                legacy_identity = existing_pending_clarify_action_identity(cur, project_id, action, related_event_id)
+                if legacy_identity:
+                    identity = legacy_identity
                 cur.execute(
                     """
                     INSERT INTO publicity_actions(
                       project_id, platform, related_event_id, related_target_id, source,
-                      confirmation_status, action_type, content_summary, reason, evidence_ids,
+                      action_identity, confirmation_status, action_type, content_summary, reason, evidence_ids,
                       priority, owner_suggestion, confidence, source_account_id, url,
                       observed_at, confirmed_at, effective_at, recommended_check_after_at, raw_json
                     )
-                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,'weibo',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      related_event_id=IF(confirmation_status='pending', VALUES(related_event_id), related_event_id),
+                      related_target_id=IF(confirmation_status='pending', VALUES(related_target_id), related_target_id),
+                      source=IF(confirmation_status='pending', VALUES(source), source),
+                      confirmation_status=IF(confirmation_status='pending', VALUES(confirmation_status), confirmation_status),
+                      action_type=IF(confirmation_status='pending', VALUES(action_type), action_type),
+                      content_summary=IF(confirmation_status='pending', VALUES(content_summary), content_summary),
+                      reason=IF(confirmation_status='pending', VALUES(reason), reason),
+                      evidence_ids=IF(confirmation_status='pending', VALUES(evidence_ids), evidence_ids),
+                      priority=IF(confirmation_status='pending', VALUES(priority), priority),
+                      owner_suggestion=IF(confirmation_status='pending', VALUES(owner_suggestion), owner_suggestion),
+                      confidence=IF(confirmation_status='pending', VALUES(confidence), confidence),
+                      source_account_id=IF(confirmation_status='pending', VALUES(source_account_id), source_account_id),
+                      url=IF(confirmation_status='pending', VALUES(url), url),
+                      observed_at=IF(confirmation_status='pending', VALUES(observed_at), observed_at),
+                      confirmed_at=IF(confirmation_status='pending', VALUES(confirmed_at), confirmed_at),
+                      effective_at=IF(confirmation_status='pending', VALUES(effective_at), effective_at),
+                      recommended_check_after_at=IF(confirmation_status='pending', VALUES(recommended_check_after_at), recommended_check_after_at),
+                      raw_json=IF(confirmation_status='pending', VALUES(raw_json), raw_json)
                     """,
                     (
                         project_id,
                         related_event_id,
                         numeric_nullable(action.get("related_target_id")),
                         action.get("source"),
+                        identity,
                         action.get("confirmation_status", "pending"),
                         action.get("action_type", "unknown"),
                         action.get("content_summary"),
@@ -2763,19 +4046,59 @@ def persist_publicity_actions(project_id, actions, account_ids):
                     ),
                 )
                 action_id = cur.lastrowid
+                cur.execute("SELECT * FROM publicity_actions WHERE id=%s", (action_id,))
+                persisted_action = action_row_to_payload(cur.fetchone())
                 persisted += 1
                 write_memory_item(
                     project_id,
                     "action",
                     action_id,
-                    f"Weibo action: {action.get('action_type', 'unknown')}",
-                    action.get("content_summary") or action.get("reason") or "Persisted Weibo publicity action.",
-                    action.get("evidence_ids", []),
-                    action,
+                    f"Weibo action: {persisted_action.get('action_type', 'unknown')}",
+                    persisted_action.get("content_summary") or persisted_action.get("reason") or "Persisted Weibo publicity action.",
+                    persisted_action.get("evidence_ids", []),
+                    persisted_action,
                     0.7,
                     memory_identity=f"action:{action.get('id') or action_id}",
                 )
     return persisted
+
+
+def existing_pending_clarify_action_identity(cur, project_id, action, related_event_id):
+    if not related_event_id:
+        return None
+    raw_json = action.get("raw_json") if isinstance(action.get("raw_json"), dict) else {}
+    if not raw_json.get("preference_memory_ids"):
+        return None
+    if action.get("source") != "agent_recommended" or action.get("action_type") != "monitor_and_prepare_material":
+        return None
+    cur.execute(
+        """
+        SELECT action_identity
+        FROM publicity_actions
+        WHERE project_id=%s
+          AND platform='weibo'
+          AND related_event_id=%s
+          AND source='agent_recommended'
+          AND action_type='clarify_official_announcement'
+        ORDER BY FIELD(confirmation_status,'rejected','confirmed','partial','uncertain','pending'), id DESC
+        LIMIT 1
+        """,
+        (project_id, related_event_id),
+    )
+    row = cur.fetchone()
+    return row.get("action_identity") if row else None
+
+
+def publicity_action_identity(action, related_event_id=None):
+    raw = action.get("id") or "|".join(
+        [
+            str(action.get("source") or "unknown"),
+            str(related_event_id or action.get("related_event_id") or "no-event"),
+            str(action.get("action_type") or "unknown"),
+            ",".join(str(item) for item in action.get("evidence_ids", [])),
+        ]
+    )
+    return f"{action.get('source') or 'action'}::{hashlib.sha1(str(raw).encode('utf-8')).hexdigest()[:24]}"
 
 
 def persist_memory_report(project_id, records, report, now):
@@ -2895,6 +4218,147 @@ def mysql_timestamp(value):
     return str(value).replace("T", " ").replace("Z", "")
 
 
+def validated_feedback_effective_at(payload, endpoint):
+    if "effectiveAt" not in payload and "effective_at" not in payload:
+        return None, None
+    value = payload.get("effectiveAt") if "effectiveAt" in payload else payload.get("effective_at")
+    if value is None:
+        return None, None
+    text = str(value).strip()
+    if not text:
+        return None, invalid_feedback_effective_at_error(endpoint, "effectiveAt/effective_at must not be empty.")
+    iso_text = text
+    if iso_text.endswith("Z"):
+        iso_text = f"{iso_text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(iso_text)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None, invalid_feedback_effective_at_error(
+                endpoint,
+                "effectiveAt/effective_at must be an ISO-8601 or MySQL timestamp.",
+            )
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S"), None
+
+
+def invalid_feedback_effective_at_error(endpoint, cause):
+    error = weibo_error(
+        "invalid_feedback_effective_at",
+        "Feedback effectiveAt is invalid.",
+        cause,
+        "Retry with an ISO-8601 timestamp such as 2026-06-10T09:30:00Z or a MySQL timestamp.",
+        docs_anchor="feedback-memory-loop",
+    )
+    error.update({"endpoint": endpoint})
+    return error
+
+
+def validated_source_type_value(payload, endpoint):
+    value = payload.get("sourceTypeValue") if "sourceTypeValue" in payload else payload.get("source_type_value")
+    text = str(value or "").strip()
+    if text not in SOURCE_ACCOUNT_TYPES:
+        error = weibo_error(
+            "invalid_source_type_value",
+            "Source account type correction is invalid.",
+            "sourceTypeValue/source_type_value must be a supported Weibo source account type.",
+            "Retry with official, artist, producer, marketing, suspected_matrix, media, fan, organic, or unknown.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    return text, None
+
+
+def validated_preference_feedback(payload, endpoint):
+    preference = payload.get("preference") if isinstance(payload.get("preference"), dict) else {}
+    preference_type = str(
+        payload.get("preferenceType")
+        or payload.get("preference_type")
+        or preference.get("preferenceType")
+        or preference.get("preference_type")
+        or ""
+    ).strip()
+    summary = str(payload.get("summary") or preference.get("summary") or "").strip()
+    if not preference_type or not summary:
+        error = weibo_error(
+            "invalid_preference_payload",
+            "Preference feedback payload is invalid.",
+            "preferenceType/preference_type and summary are required for preference feedback.",
+            "Pass sourceType preference with preferenceType and summary from a user-confirmed preference.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    preference_id = str(
+        payload.get("preferenceId")
+        or payload.get("preference_id")
+        or preference.get("preferenceId")
+        or preference.get("preference_id")
+        or ""
+    ).strip()
+    reason = payload.get("reason") or preference.get("reason")
+    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else preference.get("tags") if isinstance(preference.get("tags"), list) else []
+    return {
+        "preference_id": preference_id,
+        "preference_type": preference_type,
+        "summary": summary,
+        "reason": reason,
+        "tags": tags,
+        "raw": preference,
+    }, None
+
+
+def preference_identity_slug(value):
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(value or "")).strip("-").lower()
+
+
+def stable_preference_slug(value, empty_prefix):
+    raw = str(value or "")
+    slug = preference_identity_slug(raw)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    if not slug:
+        return f"{empty_prefix}-{digest}"
+    if slug != raw.lower():
+        return f"{slug}-{digest}"
+    return slug
+
+
+def shortened_preference_slug(slug, raw_value, max_length):
+    if len(slug) <= max_length:
+        return slug
+    digest = hashlib.sha1(str(raw_value).encode("utf-8")).hexdigest()[:16]
+    keep = max_length - len(digest) - 1
+    if keep <= 0:
+        return digest[:max_length]
+    return f"{slug[:keep].rstrip('-')}-{digest}".strip("-")[:max_length]
+
+
+def preference_memory_identity(preference):
+    raw_type = preference["preference_type"]
+    raw_stable_id = preference.get("preference_id")
+    if raw_stable_id:
+        stable_slug = stable_preference_slug(raw_stable_id, "id")
+        stable_slug = shortened_preference_slug(stable_slug, raw_stable_id, 320 - len("preference:id:"))
+        return f"preference:id:{stable_slug}"
+    type_slug = stable_preference_slug(raw_type, "type")
+    stable_slug = hashlib.sha1(preference["summary"].encode("utf-8")).hexdigest()[:16]
+    max_type_length = 320 - len("preference:") - len(":") - len(stable_slug)
+    type_slug = shortened_preference_slug(type_slug, raw_type, max_type_length)
+    return f"preference:{type_slug}:{stable_slug}"
+
+
+def preference_memory_title(preference_type):
+    title = f"用户偏好：{preference_type}"
+    if len(title) <= 240:
+        return title
+    digest = hashlib.sha1(str(preference_type).encode("utf-8")).hexdigest()[:16]
+    return f"{title[:220]}-{digest}"[:240]
+
+
 def iso_or_none(value):
     if value is None:
         return None
@@ -2915,6 +4379,2442 @@ def mysql_unavailable_payload(endpoint, database, **ids):
         "request": {key: value for key, value in ids.items() if value is not None},
     })
     return error
+
+
+def default_knowledge_seed_payload():
+    return {
+        "sources": [
+            {
+                "sourceIdentity": "shortyawards:barbie-2024",
+                "title": "Barbie The Movie Marketing Campaign",
+                "sourceType": "award_case",
+                "reliabilityLevel": "B",
+                "citationUrl": "https://shortyawards.com/16th/barbie-the-movie-marketing-campaign",
+                "publisher": "Shorty Awards",
+                "notes": "公开奖项案例；只保存结构化摘要和 citation URL。",
+            },
+            {
+                "sourceIdentity": "dentsu:aisas-2004",
+                "title": "AISAS as a social-era consumer behavior model",
+                "sourceType": "industry_report",
+                "reliabilityLevel": "B",
+                "citationUrl": "https://dentsu-ho.com/en/articles/3100",
+                "publisher": "Dentsu",
+                "notes": "行业方法论来源；用于社媒讨论路径的弱结构化参考。",
+            },
+            {
+                "sourceIdentity": "wikipedia:scct",
+                "title": "Situational Crisis Communication Theory",
+                "sourceType": "other",
+                "reliabilityLevel": "C",
+                "citationUrl": "https://en.wikipedia.org/wiki/Situational_crisis_communication_theory",
+                "publisher": "Wikipedia",
+                "notes": "二手概述来源；只能作为危机回应适配的启发，不作硬规则。",
+            },
+        ],
+        "cards": [
+            {
+                "cardIdentity": "case:barbie:earned-media-lifestyle-symbol",
+                "sourceIdentity": "shortyawards:barbie-2024",
+                "frameworkOrCase": "影视项目的视觉符号与 earned media 扩散",
+                "applicableScenario": "剧集具备清晰视觉符号、生活方式标签、低争议正向讨论或可自然二创素材时。",
+                "doNotApplyWhen": "当前舆情核心是艺人危机、事实争议、道歉澄清或高风险负面情绪时。",
+                "recommendedActions": ["先观察自然二创", "放大低风险生活方式话题", "用轻量物料承接正向讨论"],
+                "riskWarnings": ["商业联动过重会削弱真实讨论感", "负面争议期放大会被理解为转移焦点"],
+                "evidenceRequired": ["正向评论证据", "视觉或生活方式话题证据", "非高风险事件状态"],
+                "judgeQuestions": ["当前微博证据是否支持放大传播，而不是先降温或澄清？"],
+                "tags": ["film-publicity", "earned-media", "lifestyle", "weibo-amplification"],
+            },
+            {
+                "cardIdentity": "framework:aisas:social-sharing-path",
+                "sourceIdentity": "dentsu:aisas-2004",
+                "frameworkOrCase": "AISAS 社媒分享路径",
+                "applicableScenario": "用户已在微博主动搜索、转发、评论或二创，且讨论可以自然进入分享链路时。",
+                "doNotApplyWhen": "讨论停留在小范围争议、证据不足、或用户主要诉求是事实解释时。",
+                "recommendedActions": ["识别搜索触发词", "收集可分享证据点", "避免在证据不足时强推转发"],
+                "riskWarnings": ["把搜索兴趣误判为喜爱会导致过度营销", "转发导向内容不能替代真实口碑"],
+                "evidenceRequired": ["搜索或转发语境", "用户自发表达", "评论情绪和议题证据"],
+                "judgeQuestions": ["当前证据里是否存在从兴趣到分享的连续行为信号？"],
+                "tags": ["social-sharing", "weibo", "behavior-model", "search-interest"],
+            },
+            {
+                "cardIdentity": "framework:scct:risk-response-fit",
+                "sourceIdentity": "wikipedia:scct",
+                "frameworkOrCase": "危机回应与责任感知适配",
+                "applicableScenario": "微博讨论出现责任归因、事实争议、误解扩散或需要判断回应强度时。",
+                "doNotApplyWhen": "当前只是普通剧情讨论、演员好感讨论或轻量玩梗，不涉及责任归因。",
+                "recommendedActions": ["先区分事实争议与情绪表达", "匹配回应强度", "避免把弱启发写成硬性结论"],
+                "riskWarnings": ["C 级来源不能单独驱动正式危机策略", "回应过度会放大原本可观察的轻微风险"],
+                "evidenceRequired": ["负面评论证据", "责任归因或事实争议证据", "传播范围证据"],
+                "judgeQuestions": ["是否有足够微博证据证明这是责任归因问题，而不只是零散不满？"],
+                "tags": ["crisis-response", "risk", "weak-inspiration", "weibo"],
+            },
+        ],
+    }
+
+
+def weibo_knowledge_seed_payload(payload_json="{}"):
+    endpoint = "weibo-knowledge-seed"
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_knowledge_payload",
+            "Knowledge seed payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object with sources and cards.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if not isinstance(payload, dict):
+        error = weibo_error(
+            "invalid_knowledge_payload",
+            "Knowledge seed payload must be a JSON object.",
+            f"Received {type(payload).__name__}.",
+            "Pass a JSON object with sources and cards.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if "sources" not in payload and "cards" not in payload:
+        payload = default_knowledge_seed_payload()
+
+    sources, source_error = validate_knowledge_sources(payload.get("sources"))
+    if source_error:
+        source_error.update({"endpoint": endpoint})
+        return source_error
+    cards, card_error = validate_knowledge_cards(payload.get("cards"), {source["source_identity"] for source in sources})
+    if card_error:
+        card_error.update({"endpoint": endpoint})
+        return card_error
+
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+
+    source_ids = {}
+    card_ids = {}
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                for source in sources:
+                    cur.execute(
+                        """
+                        INSERT INTO knowledge_sources(
+                          source_identity, title, source_type, reliability_level,
+                          citation_url, publisher, published_at, notes, raw_json
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                          id=LAST_INSERT_ID(id),
+                          title=VALUES(title),
+                          source_type=VALUES(source_type),
+                          reliability_level=VALUES(reliability_level),
+                          citation_url=VALUES(citation_url),
+                          publisher=VALUES(publisher),
+                          published_at=VALUES(published_at),
+                          notes=VALUES(notes),
+                          raw_json=VALUES(raw_json)
+                        """,
+                        (
+                            source["source_identity"],
+                            source["title"],
+                            source["source_type"],
+                            source["reliability_level"],
+                            source["citation_url"],
+                            source.get("publisher"),
+                            source.get("published_at"),
+                            source.get("notes"),
+                            json_for_db(source["raw_json"]),
+                        ),
+                    )
+                    source_ids[source["source_identity"]] = cur.lastrowid
+
+                for card in cards:
+                    source_id = source_ids[card["source_identity"]]
+                    cur.execute(
+                        """
+                        INSERT INTO knowledge_cards(
+                          card_identity, source_id, framework_or_case, applicable_scenario,
+                          do_not_apply_when, recommended_actions, risk_warnings,
+                          evidence_required, judge_questions, tags, status, raw_json
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                          id=LAST_INSERT_ID(id),
+                          source_id=VALUES(source_id),
+                          framework_or_case=VALUES(framework_or_case),
+                          applicable_scenario=VALUES(applicable_scenario),
+                          do_not_apply_when=VALUES(do_not_apply_when),
+                          recommended_actions=VALUES(recommended_actions),
+                          risk_warnings=VALUES(risk_warnings),
+                          evidence_required=VALUES(evidence_required),
+                          judge_questions=VALUES(judge_questions),
+                          tags=VALUES(tags),
+                          status=VALUES(status),
+                          raw_json=VALUES(raw_json)
+                        """,
+                        (
+                            card["card_identity"],
+                            source_id,
+                            card["framework_or_case"],
+                            card["applicable_scenario"],
+                            card["do_not_apply_when"],
+                            json_for_db(card["recommended_actions"]),
+                            json_for_db(card["risk_warnings"]),
+                            json_for_db(card["evidence_required"]),
+                            json_for_db(card["judge_questions"]),
+                            json_for_db(card["tags"]),
+                            card["status"],
+                            json_for_db(card["raw_json"]),
+                        ),
+                    )
+                    card_ids[card["card_identity"]] = cur.lastrowid
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": endpoint,
+        "database": database,
+        "seeded": {"sources": len(sources), "cards": len(cards)},
+        "sourceIds": source_ids,
+        "cardIds": card_ids,
+    }
+
+
+def validate_knowledge_sources(raw_sources):
+    if not isinstance(raw_sources, list) or not raw_sources:
+        return None, knowledge_validation_error(
+            "invalid_knowledge_source",
+            "Knowledge seed requires at least one source.",
+            "sources must be a non-empty array.",
+            "Provide one or more knowledge sources with citation URLs.",
+        )
+    sources = []
+    seen = set()
+    for index, raw in enumerate(raw_sources):
+        if not isinstance(raw, dict):
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source must be an object.",
+                f"sources[{index}] is {type(raw).__name__}.",
+                "Provide each source as an object.",
+            )
+        source = {
+            "source_identity": pick_text(raw, "sourceIdentity", "source_identity"),
+            "title": pick_text(raw, "title", "sourceTitle", "source_title"),
+            "source_type": pick_text(raw, "sourceType", "source_type"),
+            "reliability_level": pick_text(raw, "reliabilityLevel", "reliability_level"),
+            "citation_url": pick_text(raw, "citationUrl", "citation_url"),
+            "publisher": pick_text(raw, "publisher"),
+            "published_at": pick_text(raw, "publishedAt", "published_at"),
+            "notes": pick_text(raw, "notes"),
+        }
+        if not source["source_identity"] or source["source_identity"] in seen:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source identity is missing or duplicated.",
+                f"sources[{index}] must have a unique sourceIdentity.",
+                "Use a stable source identity such as shortyawards:barbie-2024.",
+            )
+        seen.add(source["source_identity"])
+        if not source["title"]:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source title is required.",
+                f"sources[{index}] is missing title.",
+                "Add a short source title.",
+            )
+        if source["source_type"] not in KNOWLEDGE_SOURCE_TYPES:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source type is invalid.",
+                f"sources[{index}] sourceType must be one of {sorted(KNOWLEDGE_SOURCE_TYPES)}.",
+                "Use a supported knowledge source type.",
+            )
+        if source["reliability_level"] not in KNOWLEDGE_RELIABILITY_LEVELS:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source reliability level is invalid.",
+                f"sources[{index}] reliabilityLevel must be A, B, or C.",
+                "Classify the source reliability as A, B, or C.",
+            )
+        if not source["citation_url"] or not re.match(r"^https?://", source["citation_url"]):
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source citation URL is required.",
+                f"sources[{index}] must include an http(s) citation URL.",
+                "Add a public citationUrl for the knowledge source.",
+            )
+        raw_json = pick_raw_json(raw) or {
+            "source_identity": source["source_identity"],
+            "summary": source["notes"] or source["title"],
+            "copyright_boundary": "short structured summary only",
+        }
+        if len(json.dumps(raw_json, ensure_ascii=False, default=str)) >= 1800:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_source",
+                "Knowledge source raw_json is too long.",
+                f"sources[{index}] raw_json must stay below 1800 characters.",
+                "Store short structured summaries and citation URLs, not long-form source text.",
+            )
+        source["raw_json"] = raw_json
+        sources.append(source)
+    return sources, None
+
+
+def validate_knowledge_cards(raw_cards, source_identities):
+    if not isinstance(raw_cards, list) or not raw_cards:
+        return None, knowledge_validation_error(
+            "invalid_knowledge_card",
+            "Knowledge seed requires at least one card.",
+            "cards must be a non-empty array.",
+            "Provide one or more structured knowledge cards.",
+        )
+    cards = []
+    seen = set()
+    for index, raw in enumerate(raw_cards):
+        if not isinstance(raw, dict):
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card must be an object.",
+                f"cards[{index}] is {type(raw).__name__}.",
+                "Provide each card as an object.",
+            )
+        card = {
+            "card_identity": pick_text(raw, "cardIdentity", "card_identity"),
+            "source_identity": pick_text(raw, "sourceIdentity", "source_identity"),
+            "framework_or_case": pick_text(raw, "frameworkOrCase", "framework_or_case"),
+            "applicable_scenario": pick_text(raw, "applicableScenario", "applicable_scenario"),
+            "do_not_apply_when": pick_text(raw, "doNotApplyWhen", "do_not_apply_when"),
+            "recommended_actions": pick_list(raw, "recommendedActions", "recommended_actions"),
+            "risk_warnings": pick_list(raw, "riskWarnings", "risk_warnings"),
+            "evidence_required": pick_list(raw, "evidenceRequired", "evidence_required"),
+            "judge_questions": pick_list(raw, "judgeQuestions", "judge_questions"),
+            "tags": pick_list(raw, "tags"),
+            "status": pick_text(raw, "status") or "active",
+        }
+        if not card["card_identity"] or card["card_identity"] in seen:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card identity is missing or duplicated.",
+                f"cards[{index}] must have a unique cardIdentity.",
+                "Use a stable card identity such as case:barbie:earned-media-lifestyle-symbol.",
+            )
+        seen.add(card["card_identity"])
+        if card["source_identity"] not in source_identities:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card source does not exist in this seed payload.",
+                f"cards[{index}] references {card['source_identity'] or 'missing sourceIdentity'}.",
+                "Reference a sourceIdentity included in the same seed payload.",
+            )
+        for key, label in [
+            ("framework_or_case", "frameworkOrCase"),
+            ("applicable_scenario", "applicableScenario"),
+            ("do_not_apply_when", "doNotApplyWhen"),
+        ]:
+            if not card[key]:
+                return None, knowledge_validation_error(
+                    "invalid_knowledge_card",
+                    "Knowledge card is missing a required text field.",
+                    f"cards[{index}] is missing {label}.",
+                    "Add framework/case, applicable scenario, and do-not-apply conditions.",
+                )
+        for key, label in [
+            ("recommended_actions", "recommendedActions"),
+            ("risk_warnings", "riskWarnings"),
+            ("evidence_required", "evidenceRequired"),
+            ("judge_questions", "judgeQuestions"),
+            ("tags", "tags"),
+        ]:
+            if not card[key]:
+                return None, knowledge_validation_error(
+                    "invalid_knowledge_card",
+                    "Knowledge card is missing a required array field.",
+                    f"cards[{index}] is missing {label}.",
+                    "Add non-empty arrays for actions, risks, evidence, Judge questions, and tags.",
+                )
+        if card["status"] not in KNOWLEDGE_CARD_STATUSES:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card status is invalid.",
+                f"cards[{index}] status must be one of {sorted(KNOWLEDGE_CARD_STATUSES)}.",
+                "Use active, inactive, draft, or archived.",
+            )
+        raw_json = pick_raw_json(raw) or {
+            "card_identity": card["card_identity"],
+            "source_identity": card["source_identity"],
+            "summary": card["framework_or_case"],
+            "copyright_boundary": "short structured summary only",
+        }
+        if len(json.dumps(raw_json, ensure_ascii=False, default=str)) >= 1800:
+            return None, knowledge_validation_error(
+                "invalid_knowledge_card",
+                "Knowledge card raw_json is too long.",
+                f"cards[{index}] raw_json must stay below 1800 characters.",
+                "Store structured summaries, not long-form source text.",
+            )
+        card["raw_json"] = raw_json
+        cards.append(card)
+    return cards, None
+
+
+def pick_text(raw, *keys):
+    for key in keys:
+        value = raw.get(key)
+        if value is not None:
+            value = str(value).strip()
+            if value:
+                return value
+    return None
+
+
+def pick_list(raw, *keys):
+    for key in keys:
+        value = raw.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            normalized = [str(item).strip() for item in value if str(item).strip()]
+            return normalized
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+    return []
+
+
+def pick_raw_json(raw):
+    if "rawJson" in raw:
+        return raw.get("rawJson")
+    if "raw_json" in raw:
+        return raw.get("raw_json")
+    return None
+
+
+def knowledge_validation_error(error_type, message, cause, fix):
+    return weibo_error(error_type, message, cause, fix, docs_anchor="knowledge-card-rag")
+
+
+def weibo_knowledge_search_payload(payload_json="{}"):
+    endpoint = "weibo-knowledge-search"
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_knowledge_search_payload",
+            "Knowledge search payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object with query, platform, topics, risks, or actionType.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if not isinstance(payload, dict):
+        error = weibo_error(
+            "invalid_knowledge_search_payload",
+            "Knowledge search payload must be a JSON object.",
+            f"Received {type(payload).__name__}.",
+            "Pass a JSON object with query, platform, topics, risks, or actionType.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+
+    limit = bounded_limit(payload.get("limit"), default=5, maximum=20)
+    context = knowledge_search_context(payload)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  c.*,
+                  s.source_identity,
+                  s.title AS source_title,
+                  s.source_type,
+                  s.reliability_level,
+                  s.citation_url,
+                  s.publisher
+                FROM knowledge_cards c
+                JOIN knowledge_sources s ON s.id=c.source_id
+                WHERE c.status='active'
+                ORDER BY c.updated_at DESC, c.id DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    results = [knowledge_card_search_result(row, context) for row in rows]
+    matched = [item for item in results if item["primary_match_score"] > 0 or item["blocked_by_do_not_apply"]]
+    matched.sort(key=knowledge_result_sort_key)
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": endpoint,
+        "database": database,
+        "query": payload.get("query") or "",
+        "context": {
+            "project": payload.get("project") or payload.get("projectId") or payload.get("project_id"),
+            "platform": payload.get("platform"),
+            "topics": normalize_context_list(payload.get("topics")),
+            "risks": normalize_context_list(payload.get("risks")),
+            "action_type": payload.get("actionType") or payload.get("action_type"),
+        },
+        "results": matched[:limit],
+        "total": len(matched),
+    }
+
+
+def knowledge_search_context(payload):
+    topics = normalize_context_list(payload.get("topics"))
+    risks = normalize_context_list(payload.get("risks"))
+    action_type = payload.get("actionType") or payload.get("action_type")
+    terms = []
+    terms.extend(context_terms("project", payload.get("project") or payload.get("projectId") or payload.get("project_id")))
+    terms.extend(context_terms("platform", payload.get("platform")))
+    terms.extend(context_terms("action_type", action_type))
+    terms.extend(context_terms("query", payload.get("query")))
+    for topic in topics:
+        terms.extend(context_terms("topic", topic))
+    for risk in risks:
+        terms.extend(context_terms("risk", risk))
+    return {"terms": stable_context_terms(terms)}
+
+
+def normalize_context_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def expand_search_terms(value):
+    if value is None:
+        return []
+    text = str(value).strip().lower()
+    if not text:
+        return []
+    terms = [text]
+    terms.extend(re.findall(r"[a-z0-9_+-]{2,}", text))
+    for piece in re.split(r"[\s,，。；;、/|]+", text):
+        piece = piece.strip()
+        if len(piece) >= 2:
+            terms.append(piece)
+    return terms
+
+
+def stable_terms(terms):
+    seen = set()
+    ordered = []
+    for term in terms:
+        normalized = str(term).strip().lower()
+        if len(normalized) < 2 or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def context_terms(source, value):
+    return [{"source": source, "term": term} for term in expand_search_terms(value)]
+
+
+def stable_context_terms(terms):
+    seen = set()
+    ordered = []
+    for item in terms:
+        source = item["source"]
+        term = str(item["term"]).strip().lower()
+        key = (source, term)
+        if len(term) < 2 or key in seen:
+            continue
+        seen.add(key)
+        ordered.append({"source": source, "term": term})
+    return ordered
+
+
+def knowledge_card_search_result(row, context):
+    tags = db.jloads(row.get("tags"), [])
+    recommended_actions = db.jloads(row.get("recommended_actions"), [])
+    risk_warnings = db.jloads(row.get("risk_warnings"), [])
+    evidence_required = db.jloads(row.get("evidence_required"), [])
+    judge_questions = db.jloads(row.get("judge_questions"), [])
+    corpus_parts = [
+        row.get("framework_or_case"),
+        row.get("applicable_scenario"),
+        row.get("do_not_apply_when"),
+        row.get("source_title"),
+        row.get("source_type"),
+        row.get("reliability_level"),
+        *tags,
+        *recommended_actions,
+        *risk_warnings,
+        *evidence_required,
+        *judge_questions,
+    ]
+    corpus = "\n".join(str(part).lower() for part in corpus_parts if part)
+    tag_text = "\n".join(str(tag).lower() for tag in tags)
+    applicable_text = str(row.get("applicable_scenario") or "").lower()
+    framework_text = str(row.get("framework_or_case") or "").lower()
+    do_not_apply_text = str(row.get("do_not_apply_when") or "").lower()
+
+    match_score = 0
+    primary_match_score = 0
+    applicability_match_score = 0
+    match_reasons = []
+    for item in context["terms"]:
+        source = item["source"]
+        term = item["term"]
+        delta = 0
+        location = None
+        if term in tag_text:
+            delta = 8
+            location = "tag"
+        elif term in framework_text:
+            delta = 6
+            location = "framework"
+        elif term in applicable_text:
+            delta = 5
+            location = "applicable"
+        elif term in corpus:
+            delta = 2
+            location = "text"
+        if delta:
+            match_score += delta
+            if source not in {"platform", "project"}:
+                primary_match_score += delta
+                if location in {"tag", "applicable"}:
+                    applicability_match_score += delta
+            match_reasons.append(f"{source}:{term}:{location}")
+
+    blocked_items = [item for item in context["terms"] if term_matches_do_not_apply(item["term"], do_not_apply_text)]
+    blocked_terms = [item["term"] for item in blocked_items]
+    blocked = bool(blocked_terms)
+    if blocked:
+        for item in blocked_items:
+            prefix = "risk_blocked" if item["source"] == "risk" else "blocked_by_do_not_apply"
+            match_reasons.append(f"{prefix}:{item['term']}")
+    reliability = row.get("reliability_level")
+    weak = reliability == "C"
+    citation_role = "blocked_by_do_not_apply" if blocked else ("weak_inspiration" if weak else "supporting_reference")
+    score = match_score + reliability_weight(reliability)
+    return {
+        "id": row.get("id"),
+        "card_id": row.get("id"),
+        "card_identity": row.get("card_identity"),
+        "source_id": row.get("source_id"),
+        "source_identity": row.get("source_identity"),
+        "source_title": row.get("source_title"),
+        "source_type": row.get("source_type"),
+        "reliability_level": reliability,
+        "citation_url": row.get("citation_url"),
+        "card_status": row.get("status"),
+        "framework_or_case": row.get("framework_or_case"),
+        "applicable_scenario": row.get("applicable_scenario"),
+        "do_not_apply_when": row.get("do_not_apply_when"),
+        "tags": tags,
+        "recommended_actions": recommended_actions,
+        "risk_warnings": risk_warnings,
+        "evidence_required": evidence_required,
+        "judge_questions": judge_questions,
+        "score": score,
+        "match_score": match_score,
+        "primary_match_score": primary_match_score,
+        "applicability_match_score": applicability_match_score,
+        "match_reasons": match_reasons,
+        "blocked_by_do_not_apply": blocked,
+        "blocked_terms": blocked_terms,
+        "citation_role": citation_role,
+        "hard_rule_allowed": not blocked and not weak,
+    }
+
+
+def reliability_weight(level):
+    return {"A": 30, "B": 20, "C": 5}.get(level, 0)
+
+
+def term_matches_do_not_apply(term, do_not_apply_text):
+    if not term or term not in do_not_apply_text:
+        return False
+    for prefix in ["不涉及", "不包含", "不是", "并非"]:
+        if f"{prefix}{term}" in do_not_apply_text:
+            return False
+    return True
+
+
+def knowledge_result_sort_key(item):
+    return (
+        1 if item["blocked_by_do_not_apply"] else 0,
+        1 if item["reliability_level"] == "C" else 0,
+        -item["primary_match_score"],
+        -item["match_score"],
+        -reliability_weight(item["reliability_level"]),
+        str(item["card_identity"] or ""),
+    )
+
+
+def weibo_knowledge_validate_payload(payload_json="{}"):
+    endpoint = "weibo-knowledge-validate"
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_knowledge_validate_payload",
+            "Knowledge validator payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object with cardIdentities or cardIds and context fields.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if not isinstance(payload, dict):
+        error = weibo_error(
+            "invalid_knowledge_validate_payload",
+            "Knowledge validator payload must be a JSON object.",
+            f"Received {type(payload).__name__}.",
+            "Pass a JSON object with cardIdentities or cardIds and context fields.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    card_identities = normalize_context_list(payload.get("cardIdentities") or payload.get("card_identities"))
+    card_ids = [item for item in [positive_integer_value(value) for value in normalize_context_list(payload.get("cardIds") or payload.get("card_ids"))] if item]
+    if not card_identities and not card_ids:
+        error = weibo_error(
+            "invalid_knowledge_validate_payload",
+            "Knowledge validator requires card IDs or identities.",
+            "cardIdentities or cardIds must contain at least one card reference.",
+            "Pass the knowledge cards proposed for citation.",
+            docs_anchor="knowledge-card-rag",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+
+    rows = load_knowledge_cards_for_validation(card_identities, card_ids)
+    context = knowledge_search_context(payload)
+    evidence_ids = normalize_context_list(payload.get("evidenceIds") or payload.get("evidence_ids"))
+    require_evidence = bool(payload.get("requireEvidence", True))
+    project_id = positive_integer_value(payload.get("projectId") or payload.get("project_id"))
+    evidence_check = validate_knowledge_evidence(project_id, evidence_ids, require_evidence)
+    results = [knowledge_card_validation_result(row, context, evidence_ids, evidence_check) for row in rows]
+    found_identities = {row.get("card_identity") for row in rows}
+    found_ids = {int(row.get("id")) for row in rows if row.get("id") is not None}
+    for identity in card_identities:
+        if identity not in found_identities:
+            results.append({
+                "card_identity": identity,
+                "passed": False,
+                "status": "not_found",
+                "failure_reasons": ["knowledge_card_not_found"],
+                "judge_questions": [],
+                "citation_role": "missing",
+                "hard_rule_allowed": False,
+            })
+    for card_id in card_ids:
+        if card_id not in found_ids:
+            results.append({
+                "card_id": card_id,
+                "passed": False,
+                "status": "not_found",
+                "failure_reasons": ["knowledge_card_not_found"],
+                "judge_questions": [],
+                "citation_role": "missing",
+                "hard_rule_allowed": False,
+            })
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": endpoint,
+        "database": database,
+        "results": results,
+        "validated": len(results),
+        "evidence_ids": evidence_ids,
+        "evidence_check": evidence_check,
+    }
+
+
+def load_knowledge_cards_for_validation(card_identities, card_ids):
+    reference_conditions = []
+    params = []
+    if card_identities:
+        reference_conditions.append("c.card_identity IN (" + ",".join(["%s"] * len(card_identities)) + ")")
+        params.extend(card_identities)
+    if card_ids:
+        reference_conditions.append("c.id IN (" + ",".join(["%s"] * len(card_ids)) + ")")
+        params.extend(card_ids)
+    reference_clause = " OR ".join(reference_conditions)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                  c.*,
+                  s.source_identity,
+                  s.title AS source_title,
+                  s.source_type,
+                  s.reliability_level,
+                  s.citation_url,
+                  s.publisher
+                FROM knowledge_cards c
+                JOIN knowledge_sources s ON s.id=c.source_id
+                WHERE ({reference_clause})
+                ORDER BY c.id
+                """,
+                params,
+            )
+            return cur.fetchall()
+
+
+def knowledge_card_validation_result(row, context, evidence_ids, evidence_check):
+    result = knowledge_card_search_result(row, context)
+    failure_reasons = []
+    status = "passed"
+    if result["card_status"] != "active":
+        failure_reasons.append("knowledge_card_inactive")
+        status = "inactive"
+    elif result["blocked_by_do_not_apply"]:
+        failure_reasons.append("blocked_by_do_not_apply")
+        status = "rejected"
+    elif result["applicability_match_score"] <= 0:
+        failure_reasons.append("applicable_context_not_matched")
+        status = "no_match"
+
+    if evidence_check["failure_reason"] and evidence_check["failure_reason"] not in failure_reasons:
+        failure_reasons.append(evidence_check["failure_reason"])
+        if status == "passed":
+            status = "needs_evidence"
+
+    passed = not failure_reasons
+    citation_role = result["citation_role"]
+    if not passed and citation_role == "supporting_reference":
+        citation_role = {
+            "inactive": "inactive",
+            "no_match": "not_applicable",
+            "needs_evidence": "needs_evidence",
+        }.get(status, "not_supporting")
+    return {
+        **result,
+        "passed": passed,
+        "status": status if not passed else "passed",
+        "failure_reasons": failure_reasons,
+        "evidence_ids": evidence_ids,
+        "evidence_check": evidence_check,
+        "citation_role": citation_role,
+        "hard_rule_allowed": result["hard_rule_allowed"] if passed else False,
+    }
+
+
+def validate_knowledge_evidence(project_id, evidence_ids, require_evidence):
+    if not require_evidence:
+        return {
+            "status": "not_required",
+            "project_id": project_id,
+            "checked": False,
+            "found": [],
+            "missing": [],
+            "failure_reason": None,
+        }
+    if not evidence_ids:
+        return {
+            "status": "insufficient",
+            "project_id": project_id,
+            "checked": bool(project_id),
+            "found": [],
+            "missing": [],
+            "failure_reason": "evidence_insufficient",
+        }
+    if not project_id:
+        return {
+            "status": "project_required",
+            "project_id": None,
+            "checked": False,
+            "found": [],
+            "missing": [],
+            "failure_reason": "evidence_project_required",
+        }
+
+    references = [parse_knowledge_evidence_reference(value) for value in evidence_ids]
+    found = []
+    missing = []
+    for kind in ["comment", "event", "action", "memory"]:
+        ids = [ref["id"] for ref in references if ref["kind"] == kind]
+        if not ids:
+            continue
+        existing = load_project_evidence_ids(project_id, kind, ids)
+        for ref in [item for item in references if item["kind"] == kind]:
+            if ref["id"] in existing:
+                found.append(ref["raw"])
+            else:
+                missing.append(ref["raw"])
+    missing.extend(ref["raw"] for ref in references if ref["kind"] == "unsupported")
+    return {
+        "status": "ok" if not missing else "missing",
+        "project_id": project_id,
+        "checked": True,
+        "found": found,
+        "missing": missing,
+        "failure_reason": None if not missing else "evidence_not_found",
+    }
+
+
+def parse_knowledge_evidence_reference(value):
+    raw = str(value).strip()
+    match = re.match(r"^(comment|event|action|memory)-([1-9]\d*)$", raw)
+    if match:
+        return {"raw": raw, "kind": match.group(1), "id": int(match.group(2))}
+    numeric = positive_integer_value(raw)
+    if numeric:
+        return {"raw": raw, "kind": "comment", "id": numeric}
+    return {"raw": raw, "kind": "unsupported", "id": None}
+
+
+def load_project_evidence_ids(project_id, kind, ids):
+    table_by_kind = {
+        "comment": "social_comments",
+        "event": "artist_public_opinion_events",
+        "action": "publicity_actions",
+        "memory": "bot_memory_items",
+    }
+    table = table_by_kind[kind]
+    unique_ids = sorted(set(ids))
+    placeholders = ",".join(["%s"] * len(unique_ids))
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id FROM {table} WHERE project_id=%s AND id IN ({placeholders})",
+                [project_id, *unique_ids],
+            )
+            return {int(row["id"]) for row in cur.fetchall()}
+
+
+def prepare_agent_step_attachment(payload, project_id, command):
+    if "agentLoopRunId" not in payload:
+        return None, None
+    loop_run_id = numeric_nullable(payload.get("agentLoopRunId"))
+    if loop_run_id is None or not load_agent_loop_run(project_id, loop_run_id):
+        return None, weibo_error(
+            "agent_loop_not_found",
+            "Agent Loop run was not found for this project.",
+            "The agentLoopRunId does not exist or belongs to another project.",
+            "Check projectId and agentLoopRunId, then retry.",
+            docs_anchor="agent-loop-ledger",
+        )
+    agent_name, step_name = AGENT_STEP_ATTACHMENT_CONFIG[command]
+    return {
+        "loop_run_id": loop_run_id,
+        "project_id": project_id,
+        "agent_name": agent_name,
+        "step_name": step_name,
+        "command": command,
+        "input_json": {
+            "command": command,
+            "payload_keys": sorted(str(key) for key in payload.keys()),
+        },
+    }, None
+
+
+def project_and_agent_step_attachment(payload, command):
+    if "agentLoopRunId" not in payload:
+        return project_from_payload(payload), None, None
+    project, project_error = require_project_from_payload(payload)
+    if project_error:
+        return None, None, project_error
+    attachment, attachment_error = prepare_agent_step_attachment(payload, project["id"], command)
+    return project, attachment, attachment_error
+
+
+def run_attached_worker_command(attachment, run):
+    if not attachment:
+        return run()
+    try:
+        return run()
+    except Exception as exc:
+        error = weibo_error(
+            "worker_execution_failed",
+            f"{attachment['command']} failed during Agent Loop step execution.",
+            type(exc).__name__,
+            "Inspect the worker logs and retry after fixing the underlying data or schema issue.",
+            docs_anchor="agent-loop-step-attachment",
+        )
+        return attach_agent_step_run(
+            error,
+            attachment,
+            status="failed",
+            output_json=agent_step_output(attachment["command"], error, ["error_type", "message", "cause", "fix"]),
+            evidence_ids=[],
+            error_type=error["error_type"],
+            error_message=error["message"],
+        )
+
+
+def attach_agent_step_run(result, attachment, status, output_json=None, evidence_ids=None, error_type=None, error_message=None):
+    if not attachment:
+        return result
+    safe_evidence_ids = unique_evidence_ids(evidence_ids or [])
+    try:
+        step = record_agent_step_run(
+            loop_run_id=attachment["loop_run_id"],
+            project_id=attachment["project_id"],
+            agent_name=attachment["agent_name"],
+            step_name=attachment["step_name"],
+            status=status,
+            input_json=attachment["input_json"],
+            output_json=output_json,
+            evidence_ids=safe_evidence_ids,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        result["agentStepRun"] = agent_step_run_to_payload(step)
+    except Exception as exc:
+        result["agentStepError"] = {
+            "error_type": "agent_step_record_failed",
+            "message": "Agent Loop step could not be recorded.",
+            "cause": type(exc).__name__,
+            "fix": "Check Agent Loop ledger tables and retry the worker command.",
+        }
+    return result
+
+
+def agent_step_output(command, result, keys):
+    output = {"command": command}
+    for key in keys:
+        if key in result:
+            output[key] = result[key]
+    if not result.get("ok"):
+        for key in ["error_type", "message", "cause", "fix", "docs_anchor"]:
+            if key in result:
+                output[key] = result[key]
+    return output
+
+
+def unique_evidence_ids(values):
+    seen = set()
+    unique = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique.append(value)
+    return unique
+
+
+def event_step_evidence_ids(events):
+    evidence_ids = []
+    for event in events:
+        evidence_ids.extend(event.get("evidence_ids") or [])
+    return unique_evidence_ids(evidence_ids)
+
+
+def action_step_evidence_ids(actions):
+    evidence_ids = []
+    for action in actions:
+        if action.get("related_event_id"):
+            evidence_ids.append(f"event-{action['related_event_id']}")
+        evidence_ids.extend(prefixed_comment_evidence_ids(action.get("evidence_ids") or []))
+    return unique_evidence_ids(evidence_ids)
+
+
+def action_step_recommendations(actions):
+    recommendations = []
+    for action in actions:
+        recommendation = compact_dict({
+            "text": action.get("content_summary"),
+            "reason": action.get("reason"),
+            "owner": action.get("owner_suggestion"),
+            "priority": action.get("priority"),
+            "check_after": action.get("recommended_check_after_at"),
+            "action_type": action.get("action_type"),
+            "evidence_ids": prefixed_comment_evidence_ids(action.get("evidence_ids") or []),
+            "related_event_id": f"event-{action['related_event_id']}" if action.get("related_event_id") else None,
+        })
+        if recommendation:
+            recommendations.append(recommendation)
+    return recommendations
+
+
+def action_step_knowledge_references(actions):
+    references = []
+    for action in actions:
+        for item in public_action_knowledge_references(action.get("raw_json")):
+            card_id = item.get("card_id")
+            if card_id:
+                references.append(f"knowledge-card-{card_id}")
+    return unique_evidence_ids(references)
+
+
+def action_step_knowledge_reference_details(actions):
+    details = []
+    for action in actions:
+        for item in public_action_knowledge_references(action.get("raw_json")):
+            card_id = item.get("card_id")
+            if not card_id:
+                continue
+            details.append(compact_dict({
+                "id": f"knowledge-card-{card_id}",
+                "reliability_level": item.get("reliability_level"),
+                "usage": item.get("citation_role"),
+            }))
+    return details
+
+
+def prefixed_comment_evidence_ids(values):
+    evidence_ids = []
+    for value in values:
+        numeric = numeric_id(value)
+        if numeric:
+            evidence_ids.append(f"comment-{numeric}")
+            continue
+        text = str(value or "").strip()
+        if text:
+            evidence_ids.append(text)
+    return unique_evidence_ids(evidence_ids)
+
+
+def compact_dict(values):
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not None and value != "" and value != []
+    }
+
+
+def create_agent_loop_run(project_id, platform="weibo", trigger_mode="manual", target_id=None, status="running", current_step=None, input_json=None, summary_json=None, error_type=None, error_message=None):
+    started_expr = "NOW()" if status != "pending" else "NULL"
+    finished_expr = "NOW()" if status in {"succeeded", "partial", "failed", "needs_human"} else "NULL"
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO agent_loop_runs(
+                    project_id, platform, trigger_mode, target_id, status, current_step,
+                    input_json, summary_json, error_type, error_message, started_at, finished_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,{started_expr},{finished_expr})
+                """,
+                (
+                    project_id,
+                    platform,
+                    trigger_mode,
+                    target_id,
+                    status,
+                    current_step,
+                    json_for_db(input_json, {}),
+                    json_for_db(summary_json) if summary_json is not None else None,
+                    error_type,
+                    error_message,
+                ),
+            )
+            return fetch_agent_loop_run(cur, cur.lastrowid)
+
+
+def record_agent_step_run(loop_run_id, project_id, agent_name, step_name, status="running", input_json=None, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    started_expr = "NOW()" if status != "pending" else "NULL"
+    finished_expr = "NOW()" if status in {"succeeded", "partial", "failed", "needs_human"} else "NULL"
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            if step_run_id:
+                cur.execute(
+                    "SELECT status FROM agent_step_runs WHERE id=%s AND loop_run_id=%s AND project_id=%s",
+                    (step_run_id, loop_run_id, project_id),
+                )
+                existing = cur.fetchone()
+                if not existing:
+                    raise ValueError(f"step_run_id {step_run_id} does not exist for loop_run_id {loop_run_id}")
+                if existing and existing.get("status") in AGENT_LOOP_TERMINAL_STATUSES and existing.get("status") != status:
+                    return fetch_agent_step_run(cur, step_run_id)
+                cur.execute(
+                    f"""
+                    UPDATE agent_step_runs
+                    SET status=%s,
+                        output_json=%s,
+                        evidence_ids=%s,
+                        error_type=%s,
+                        error_message=%s,
+                        finished_at={finished_expr}
+                    WHERE id=%s AND loop_run_id=%s AND project_id=%s
+                    """,
+                    (
+                        status,
+                        json_for_db(output_json) if output_json is not None else None,
+                        json_for_db(evidence_ids, []),
+                        error_type,
+                        error_message,
+                        step_run_id,
+                        loop_run_id,
+                        project_id,
+                    ),
+                )
+                row_id = step_run_id
+            else:
+                cur.execute(
+                    f"""
+                    INSERT INTO agent_step_runs(
+                        loop_run_id, project_id, agent_name, step_name, status,
+                        input_json, output_json, evidence_ids, error_type, error_message,
+                        started_at, finished_at
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,{started_expr},{finished_expr})
+                    """,
+                    (
+                        loop_run_id,
+                        project_id,
+                        agent_name,
+                        step_name,
+                        status,
+                        json_for_db(input_json) if input_json is not None else None,
+                        json_for_db(output_json) if output_json is not None else None,
+                        json_for_db(evidence_ids, []),
+                        error_type,
+                        error_message,
+                    ),
+                )
+                row_id = cur.lastrowid
+            update_loop_from_step(cur, loop_run_id, project_id, step_name, status, error_type, error_message)
+            return fetch_agent_step_run(cur, row_id)
+
+
+def start_agent_step_run(loop_run_id, project_id, agent_name, step_name, input_json=None, evidence_ids=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "running", input_json=input_json, evidence_ids=evidence_ids)
+
+
+def succeed_agent_step_run(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "succeeded", output_json=output_json, evidence_ids=evidence_ids, step_run_id=step_run_id)
+
+
+def partially_complete_agent_step_run(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "partial", output_json=output_json, evidence_ids=evidence_ids, error_type=error_type, error_message=error_message, step_run_id=step_run_id)
+
+
+def fail_agent_step_run(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "failed", output_json=output_json, evidence_ids=evidence_ids, error_type=error_type, error_message=error_message, step_run_id=step_run_id)
+
+
+def mark_agent_step_needs_human(loop_run_id, project_id, agent_name, step_name, output_json=None, evidence_ids=None, error_type=None, error_message=None, step_run_id=None):
+    return record_agent_step_run(loop_run_id, project_id, agent_name, step_name, "needs_human", output_json=output_json, evidence_ids=evidence_ids, error_type=error_type, error_message=error_message, step_run_id=step_run_id)
+
+
+def record_judge_review(loop_run_id, project_id, judge_agent_name, status="pending", step_run_id=None, passed=None, score=None, feedback_json=None, required_changes=None, evidence_errors=None, retry_count=0):
+    if status == "passed" and passed is False:
+        raise ValueError("passed must not be false when Judge review status is passed")
+    if status in {"failed", "needs_human"} and passed is True:
+        raise ValueError("passed must not be true when Judge review status is failed or needs_human")
+    if evidence_errors and (status not in {"failed", "needs_human"} or passed is True):
+        raise ValueError("judge review with evidence_errors must be failed or needs_human")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO judge_reviews(
+                    loop_run_id, step_run_id, project_id, judge_agent_name, status,
+                    score, passed, feedback_json, required_changes, evidence_errors, retry_count
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    loop_run_id,
+                    step_run_id,
+                    project_id,
+                    judge_agent_name,
+                    status,
+                    score,
+                    None if passed is None else int(bool(passed)),
+                    json_for_db(feedback_json) if feedback_json is not None else None,
+                    json_for_db(required_changes, []),
+                    json_for_db(evidence_errors, []),
+                    retry_count,
+                ),
+            )
+            return fetch_judge_review(cur, cur.lastrowid)
+
+
+def record_manual_handoff(project_id, source_type, feedback_type="manual_handoff", source_id=None, note=None, status="open", created_by="agent_harness"):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (project_id, source_type, source_id, feedback_type, note, status, created_by),
+            )
+            return fetch_feedback_item(cur, cur.lastrowid)
+
+
+def weibo_agent_loop_run_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-run"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    run = create_agent_loop_run(
+        project_id=project["id"],
+        platform="weibo",
+        trigger_mode=payload.get("triggerMode") or payload.get("trigger_mode") or "manual",
+        target_id=numeric_nullable(payload.get("targetId") or payload.get("target_id")),
+        status=payload.get("status") or "running",
+        current_step=payload.get("currentStep") or payload.get("current_step"),
+        input_json=payload.get("input") if "input" in payload else payload.get("inputJson"),
+        summary_json=payload.get("summary") if "summary" in payload else payload.get("summaryJson"),
+        error_type=payload.get("errorType") or payload.get("error_type"),
+        error_message=payload.get("errorMessage") or payload.get("error_message"),
+    )
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-run",
+        "database": database,
+        "request": {"projectId": project["id"]},
+        "run": agent_loop_run_to_payload(run),
+    }
+
+
+def weibo_agent_loop_status_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-status"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    loop_run_id = numeric_nullable(payload.get("loopRunId") or payload.get("loop_run_id") or payload.get("runId"))
+    if loop_run_id is None:
+        return weibo_error("invalid_agent_loop_payload", "Agent Loop status requires loopRunId.", "The worker payload did not include a numeric loopRunId.", "Pass loopRunId from weibo-agent-loop-run.", docs_anchor="agent-loop-ledger")
+    status = load_agent_loop_status(project["id"], loop_run_id)
+    if not status:
+        return weibo_error("agent_loop_not_found", "Agent Loop run was not found for this project.", "The loopRunId does not exist or belongs to another project.", "Check projectId and loopRunId, then retry.", docs_anchor="agent-loop-ledger")
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-status",
+        "database": database,
+        **status,
+    }
+
+
+def weibo_agent_loop_step_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-step"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    loop_run_id = numeric_nullable(payload.get("loopRunId") or payload.get("loop_run_id") or payload.get("runId"))
+    if loop_run_id is None:
+        return weibo_error("invalid_agent_loop_payload", "Agent Loop step requires loopRunId.", "The worker payload did not include a numeric loopRunId.", "Create or pass a valid loop run first.", docs_anchor="agent-loop-ledger")
+    if not load_agent_loop_run(project["id"], loop_run_id):
+        return weibo_error("agent_loop_not_found", "Agent Loop run was not found for this project.", "The loopRunId does not exist or belongs to another project.", "Check projectId and loopRunId, then retry.", docs_anchor="agent-loop-ledger")
+    try:
+        step = record_agent_step_run(
+            loop_run_id=loop_run_id,
+            project_id=project["id"],
+            agent_name=payload.get("agentName") or payload.get("agent_name") or "Agent",
+            step_name=payload.get("stepName") or payload.get("step_name") or "unknown_step",
+            status=payload.get("status") or "running",
+            input_json=payload.get("input") if "input" in payload else payload.get("inputJson"),
+            output_json=payload.get("output") if "output" in payload else payload.get("outputJson"),
+            evidence_ids=payload.get("evidenceIds") if "evidenceIds" in payload else payload.get("evidence_ids"),
+            error_type=payload.get("errorType") or payload.get("error_type"),
+            error_message=payload.get("errorMessage") or payload.get("error_message"),
+            step_run_id=numeric_nullable(payload.get("stepRunId") or payload.get("step_run_id")),
+        )
+    except ValueError as exc:
+        return weibo_error("invalid_agent_loop_payload", "Agent Loop step payload is invalid.", str(exc), "Use an existing stepRunId for updates or omit it to create a step.", docs_anchor="agent-loop-ledger")
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-step",
+        "database": database,
+        "step": agent_step_run_to_payload(step),
+    }
+
+
+def weibo_agent_loop_judge_review_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-judge-review"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    loop_run_id = numeric_nullable(payload.get("loopRunId") or payload.get("loop_run_id") or payload.get("runId"))
+    if loop_run_id is None:
+        return weibo_error("invalid_agent_loop_payload", "Judge review requires loopRunId.", "The worker payload did not include a numeric loopRunId.", "Create or pass a valid loop run first.", docs_anchor="agent-loop-ledger")
+    if not load_agent_loop_run(project["id"], loop_run_id):
+        return weibo_error("agent_loop_not_found", "Agent Loop run was not found for this project.", "The loopRunId does not exist or belongs to another project.", "Check projectId and loopRunId, then retry.", docs_anchor="agent-loop-ledger")
+    try:
+        review = record_judge_review(
+            loop_run_id=loop_run_id,
+            step_run_id=numeric_nullable(payload.get("stepRunId") or payload.get("step_run_id")),
+            project_id=project["id"],
+            judge_agent_name=payload.get("judgeAgentName") or payload.get("judge_agent_name") or "Judge Agent",
+            status=payload.get("status") or "pending",
+            passed=payload.get("passed"),
+            score=payload.get("score"),
+            feedback_json=payload.get("feedback") if "feedback" in payload else payload.get("feedbackJson"),
+            required_changes=payload.get("requiredChanges") if "requiredChanges" in payload else payload.get("required_changes"),
+            evidence_errors=payload.get("evidenceErrors") if "evidenceErrors" in payload else payload.get("evidence_errors"),
+            retry_count=int(payload.get("retryCount") or payload.get("retry_count") or 0),
+        )
+    except ValueError as exc:
+        return weibo_error("invalid_agent_loop_payload", "Judge review payload is invalid.", str(exc), "Use failed or needs_human when evidence errors exist.", docs_anchor="agent-loop-ledger")
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-judge-review",
+        "database": database,
+        "review": judge_review_to_payload(review),
+    }
+
+
+def weibo_agent_loop_handoff_payload(payload_json="{}"):
+    endpoint = "worker weibo-agent-loop-handoff"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    source_type = payload.get("sourceType") or payload.get("source_type")
+    source_id = numeric_nullable(payload.get("sourceId") or payload.get("source_id"))
+    if source_type not in {"loop", "step", "judge_review"} or source_id is None:
+        error = weibo_error(
+            "invalid_agent_loop_payload",
+            "Manual handoff requires a status-visible Agent Loop source.",
+            "The handoff payload must identify a loop, step, or judge_review source with sourceId.",
+            "Pass sourceType as loop, step, or judge_review and include the matching sourceId.",
+            docs_anchor="agent-loop-ledger",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database)
+    project, error = require_project_from_payload(payload)
+    if error:
+        return error
+    feedback = record_manual_handoff(
+        project_id=project["id"],
+        source_type=source_type,
+        source_id=source_id,
+        feedback_type=payload.get("feedbackType") or payload.get("feedback_type") or "manual_handoff",
+        note=payload.get("note"),
+        status=payload.get("status") or "open",
+        created_by=payload.get("createdBy") or payload.get("created_by") or "agent_harness",
+    )
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-agent-loop-handoff",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+    }
+
+
+def weibo_feedback_payload(payload_json="{}"):
+    endpoint = "worker weibo-feedback"
+    payload, parse_error = parse_agent_loop_payload(payload_json, endpoint)
+    if parse_error:
+        return parse_error
+    source_type = payload.get("sourceType") or payload.get("source_type")
+    feedback_type = payload.get("feedbackType") or payload.get("feedback_type")
+    project_id, project_id_error = feedback_project_id(payload, endpoint)
+    if project_id_error:
+        return project_id_error
+    source_id = positive_integer_value(payload.get("sourceId") or payload.get("source_id"))
+    feedback_status = normalized_feedback_status(payload)
+    validation_error = validate_feedback_payload(source_type, feedback_type, source_id, endpoint, feedback_status)
+    if validation_error:
+        return validation_error
+    effective_at = None
+    if source_type == "action" and feedback_type == "action_confirmed":
+        effective_at, effective_at_error = validated_feedback_effective_at(payload, endpoint)
+        if effective_at_error:
+            return effective_at_error
+    source_type_value = None
+    if source_type == "source_account":
+        source_type_value, source_type_value_error = validated_source_type_value(payload, endpoint)
+        if source_type_value_error:
+            return source_type_value_error
+    preference = None
+    if source_type == "preference":
+        preference, preference_error = validated_preference_feedback(payload, endpoint)
+        if preference_error:
+            return preference_error
+    database = db.health()
+    if not database.get("connected"):
+        return mysql_unavailable_payload(endpoint, database, source_type=source_type, source_id=source_id)
+    if source_type == "event":
+        return persist_event_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database)
+    if source_type == "action":
+        return persist_action_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, effective_at)
+    if source_type == "source_account":
+        return persist_source_account_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, source_type_value)
+    if source_type == "preference":
+        return persist_preference_feedback_payload(endpoint, payload, project_id, feedback_type, feedback_status, database, preference)
+    if source_type in {"loop", "step", "judge_review"}:
+        return persist_agent_loop_feedback_payload(endpoint, payload, project_id, source_type, source_id, feedback_type, feedback_status, database)
+    return real_weibo_endpoint_payload(endpoint, payload_json, source_type=source_type, source_id=source_id)
+
+
+def persist_event_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM artist_public_opinion_events
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    FOR UPDATE
+                    """,
+                    (source_id, project["id"]),
+                )
+                event = cur.fetchone()
+                if not event:
+                    conn.rollback()
+                    error = weibo_error(
+                        "event_not_found",
+                        "Feedback event was not found.",
+                        "The event sourceId does not exist for this project and platform.",
+                        "Retry with a Weibo event id that belongs to the selected project.",
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": "event", "source_id": source_id})
+                    return error
+
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "event", source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+
+                from_status = event.get("status")
+                to_status = event_feedback_status(feedback_type, from_status)
+                if to_status != from_status:
+                    cur.execute(
+                        "UPDATE artist_public_opinion_events SET status=%s WHERE id=%s AND project_id=%s",
+                        (to_status, source_id, project["id"]),
+                    )
+                if event_feedback_writes_history(feedback_type):
+                    cur.execute(
+                        "INSERT INTO event_status_history(event_id, from_status, to_status, reason) VALUES (%s,%s,%s,%s)",
+                        (source_id, from_status, to_status, event_feedback_reason(feedback_type, note)),
+                    )
+
+                memory_identity = f"feedback:event:{source_id}:{feedback_type}"
+                memory_title = event_feedback_memory_title(feedback_type, event)
+                memory_json = {
+                    "feedback_id": feedback_id,
+                    "feedback_type": feedback_type,
+                    "feedback_status": feedback_status,
+                    "note": note,
+                    "created_by": created_by,
+                    "event_status": to_status,
+                    "event_title": event.get("title"),
+                }
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "event",
+                        source_id,
+                        memory_identity,
+                        memory_title,
+                        note or f"用户反馈：{feedback_type}",
+                        event.get("evidence_ids") or json_for_db([]),
+                        json_for_db(memory_json),
+                        0.8,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {"type": "event", "id": source_id, "status": to_status},
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def persist_action_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, effective_at):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM publicity_actions
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    FOR UPDATE
+                    """,
+                    (source_id, project["id"]),
+                )
+                action = cur.fetchone()
+                if not action:
+                    conn.rollback()
+                    error = weibo_error(
+                        "action_not_found",
+                        "Feedback action was not found.",
+                        "The action sourceId does not exist for this project and platform.",
+                        "Retry with a Weibo action id that belongs to the selected project.",
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": "action", "source_id": source_id})
+                    return error
+
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "action", source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+
+                from_status = action.get("confirmation_status")
+                to_status = action_feedback_status(feedback_type, from_status)
+                status_update_applied = False
+                if feedback_type == "action_confirmed" and from_status == "pending":
+                    cur.execute(
+                        """
+                        UPDATE publicity_actions
+                        SET confirmation_status=%s,
+                            confirmed_at=COALESCE(confirmed_at, NOW()),
+                            effective_at=COALESCE(effective_at, %s)
+                        WHERE id=%s AND project_id=%s AND platform='weibo'
+                        """,
+                        (to_status, effective_at, source_id, project["id"]),
+                    )
+                    status_update_applied = cur.rowcount > 0
+                elif feedback_type != "action_note" and from_status == "pending":
+                    cur.execute(
+                        """
+                        UPDATE publicity_actions
+                        SET confirmation_status=%s
+                        WHERE id=%s AND project_id=%s AND platform='weibo'
+                        """,
+                        (to_status, source_id, project["id"]),
+                    )
+                    status_update_applied = cur.rowcount > 0
+                cur.execute(
+                    "SELECT * FROM publicity_actions WHERE id=%s AND project_id=%s AND platform='weibo'",
+                    (source_id, project["id"]),
+                )
+                updated_action = cur.fetchone()
+
+                memory_identity = f"feedback:action:{source_id}:{feedback_type}"
+                memory_json = {
+                    "feedback_id": feedback_id,
+                    "feedback_type": feedback_type,
+                    "feedback_status": feedback_status,
+                    "note": note,
+                    "created_by": created_by,
+                    "from_confirmation_status": action.get("confirmation_status"),
+                    "confirmation_status": updated_action.get("confirmation_status"),
+                    "status_update_applied": status_update_applied,
+                    "action_type": action.get("action_type"),
+                }
+                if feedback_type == "action_confirmed":
+                    memory_json["effective_at"] = iso_or_none(updated_action.get("effective_at"))
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "action",
+                        source_id,
+                        memory_identity,
+                        action_feedback_memory_title(feedback_type, action),
+                        note or f"用户反馈：{feedback_type}",
+                        action.get("evidence_ids") or json_for_db([]),
+                        json_for_db(memory_json),
+                        0.8,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": "action",
+            "id": source_id,
+            "confirmation_status": updated_action.get("confirmation_status"),
+        },
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def persist_source_account_feedback_payload(endpoint, payload, project_id, source_id, feedback_type, feedback_status, database, source_type_value):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM source_accounts
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    FOR UPDATE
+                    """,
+                    (source_id, project["id"]),
+                )
+                account = cur.fetchone()
+                if not account:
+                    conn.rollback()
+                    error = weibo_error(
+                        "source_account_not_found",
+                        "Feedback source account was not found.",
+                        "The source account sourceId does not exist for this project and platform.",
+                        "Retry with a Weibo source account id that belongs to the selected project.",
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": "source_account", "source_id": source_id})
+                    return error
+
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "source_account", source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+
+                cur.execute(
+                    """
+                    UPDATE source_accounts
+                    SET source_type=%s,
+                        confirmed_by_user=1,
+                        match_confidence=GREATEST(match_confidence, 1)
+                    WHERE id=%s AND project_id=%s AND platform='weibo'
+                    """,
+                    (source_type_value, source_id, project["id"]),
+                )
+                cur.execute(
+                    "SELECT * FROM source_accounts WHERE id=%s AND project_id=%s AND platform='weibo'",
+                    (source_id, project["id"]),
+                )
+                updated_account = cur.fetchone()
+
+                memory_identity = f"feedback:source_account:{source_id}:source_type_corrected"
+                memory_json = {
+                    "feedback_id": feedback_id,
+                    "feedback_type": feedback_type,
+                    "feedback_status": feedback_status,
+                    "note": note,
+                    "created_by": created_by,
+                    "from_source_type": account.get("source_type"),
+                    "source_type_value": source_type_value,
+                    "display_name": account.get("display_name"),
+                    "external_id": account.get("external_id"),
+                }
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "source_account",
+                        source_id,
+                        memory_identity,
+                        f"用户修正账号类型：{account.get('display_name') or source_id}",
+                        note or f"用户将账号类型修正为 {source_type_value}",
+                        json_for_db([]),
+                        json_for_db(memory_json),
+                        0.75,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": "source_account",
+            "id": source_id,
+            "source_type": updated_account.get("source_type"),
+            "confirmed_by_user": bool(updated_account.get("confirmed_by_user")),
+        },
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def persist_preference_feedback_payload(endpoint, payload, project_id, feedback_type, feedback_status, database, preference):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    memory_identity = preference_memory_identity(preference)
+    memory_json = {
+        "feedback_type": feedback_type,
+        "feedback_status": feedback_status,
+        "note": note,
+        "created_by": created_by,
+        "preference_id": preference.get("preference_id"),
+        "preference_type": preference["preference_type"],
+        "summary": preference["summary"],
+        "reason": preference.get("reason"),
+        "tags": preference.get("tags") or [],
+        "source_of_truth": "user_feedback",
+        "not_external_fact": True,
+    }
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], "preference", None, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+                memory_json["feedback_id"] = feedback_id
+                cur.execute(
+                    """
+                    INSERT INTO bot_memory_items(
+                      project_id, source_kind, source_id, memory_identity, title, summary,
+                      evidence_ids, memory_json, importance
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                      id=LAST_INSERT_ID(id),
+                      source_id=VALUES(source_id),
+                      title=VALUES(title),
+                      summary=VALUES(summary),
+                      evidence_ids=VALUES(evidence_ids),
+                      memory_json=VALUES(memory_json),
+                      importance=VALUES(importance)
+                    """,
+                    (
+                        project["id"],
+                        "preference",
+                        None,
+                        memory_identity,
+                        preference_memory_title(preference["preference_type"]),
+                        preference["summary"],
+                        json_for_db([]),
+                        json_for_db(memory_json),
+                        0.82,
+                    ),
+                )
+                memory_id = cur.lastrowid
+                cur.execute("SELECT * FROM bot_memory_items WHERE id=%s", (memory_id,))
+                memory = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": "preference",
+            "preference_type": preference["preference_type"],
+            "memory_identity": memory_identity,
+        },
+        "memory": memory_item_to_payload(memory),
+    }
+
+
+def persist_agent_loop_feedback_payload(endpoint, payload, project_id, source_type, source_id, feedback_type, feedback_status, database):
+    project = get_project(project_id) if project_id else project_from_payload(payload)
+    if not project:
+        error = weibo_error(
+            "project_not_found",
+            "Monitor project was not found.",
+            "The provided projectId does not exist.",
+            "Create the monitor project or retry with a valid projectId.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    config = {
+        "loop": {
+            "table": "agent_loop_runs",
+            "error_type": "loop_not_found",
+            "message": "Feedback loop run was not found.",
+            "fix": "Retry with an Agent Loop run id that belongs to the selected project.",
+        },
+        "step": {
+            "table": "agent_step_runs",
+            "error_type": "step_not_found",
+            "message": "Feedback step run was not found.",
+            "fix": "Retry with an Agent Loop step id that belongs to the selected project.",
+        },
+        "judge_review": {
+            "table": "judge_reviews",
+            "error_type": "judge_review_not_found",
+            "message": "Feedback Judge review was not found.",
+            "fix": "Retry with a Judge review id that belongs to the selected project.",
+        },
+    }[source_type]
+    note = payload.get("note")
+    created_by = payload.get("createdBy") or payload.get("created_by") or "agent_harness"
+    with db.connect() as conn:
+        try:
+            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM {config['table']} WHERE id=%s AND project_id=%s FOR UPDATE",
+                    (source_id, project["id"]),
+                )
+                source = cur.fetchone()
+                if not source:
+                    conn.rollback()
+                    error = weibo_error(
+                        config["error_type"],
+                        config["message"],
+                        "The feedback sourceId does not exist for this project.",
+                        config["fix"],
+                        docs_anchor="feedback-memory-loop",
+                    )
+                    error.update({"endpoint": endpoint, "source_type": source_type, "source_id": source_id})
+                    return error
+                cur.execute(
+                    """
+                    INSERT INTO feedback_items(project_id, source_type, source_id, feedback_type, note, status, created_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (project["id"], source_type, source_id, feedback_type, note, feedback_status, created_by),
+                )
+                feedback_id = cur.lastrowid
+                feedback = fetch_feedback_item(cur, feedback_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "weibo-agent-mvp",
+        "command": "weibo-feedback",
+        "database": database,
+        "feedback": feedback_item_to_payload(feedback),
+        "updatedSource": {
+            "type": source_type,
+            "id": source_id,
+            "status": source.get("status"),
+        },
+        "memory": None,
+    }
+
+
+def action_feedback_status(feedback_type, current_status):
+    return {
+        "action_confirmed": "confirmed",
+        "action_rejected": "rejected",
+        "action_not_executed": "rejected",
+        "action_partially_executed": "partial",
+        "action_note": current_status,
+    }[feedback_type]
+
+
+def action_feedback_memory_title(feedback_type, action):
+    action_label = {
+        "action_confirmed": "确认",
+        "action_rejected": "驳回",
+        "action_not_executed": "标记未执行",
+        "action_partially_executed": "标记部分执行",
+        "action_note": "备注",
+    }[feedback_type]
+    action_name = action.get("content_summary") or action.get("reason") or action.get("action_identity") or action.get("id")
+    return f"用户{action_label}行动：{action_name}"
+
+
+def event_feedback_status(feedback_type, current_status):
+    return {
+        "event_confirmed": "confirmed",
+        "event_rejected": "rejected",
+        "event_observation_only": "observing",
+        "event_note": current_status,
+    }[feedback_type]
+
+
+def event_feedback_writes_history(feedback_type):
+    return feedback_type in {"event_confirmed", "event_rejected", "event_observation_only"}
+
+
+def event_feedback_reason(feedback_type, note):
+    return f"{feedback_type}: {note}" if note else feedback_type
+
+
+def event_feedback_memory_title(feedback_type, event):
+    action = {
+        "event_confirmed": "确认",
+        "event_rejected": "驳回",
+        "event_observation_only": "标记观察",
+        "event_note": "备注",
+    }[feedback_type]
+    return f"用户{action}事件：{event.get('title') or event.get('event_identity') or event.get('id')}"
+
+
+def memory_item_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "source_kind": row.get("source_kind"),
+        "source_id": row.get("source_id"),
+        "memory_identity": row.get("memory_identity"),
+        "title": row.get("title"),
+        "summary": row.get("summary"),
+        "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+        "memory_json": db.jloads(row.get("memory_json"), {}),
+        "importance": float(row["importance"]) if row.get("importance") is not None else None,
+        "created_at": iso_or_none(row.get("created_at")),
+        "updated_at": iso_or_none(row.get("updated_at")),
+    }
+
+
+def feedback_project_id(payload, endpoint):
+    if payload.get("projectId") is None and payload.get("project_id") is None:
+        return None, None
+    project_id = positive_integer_value(payload.get("projectId") or payload.get("project_id"))
+    if project_id is not None:
+        return project_id, None
+    error = weibo_error(
+        "invalid_feedback_project_id",
+        "Feedback projectId is invalid.",
+        "projectId must be a positive integer when provided.",
+        "Pass a positive numeric projectId or omit it to use the default project.",
+        docs_anchor="feedback-memory-loop",
+    )
+    error.update({"endpoint": endpoint})
+    return None, error
+
+
+def validate_feedback_payload(source_type, feedback_type, source_id, endpoint, feedback_status="open"):
+    if source_type not in FEEDBACK_TYPES_BY_SOURCE:
+        error = weibo_error(
+            "invalid_feedback_source_type",
+            "Feedback sourceType is invalid.",
+            "The feedback payload must use event, action, source_account, preference, loop, step, or judge_review.",
+            "Retry with a supported sourceType.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if feedback_type not in FEEDBACK_TYPES_BY_SOURCE[source_type]:
+        error = weibo_error(
+            "invalid_feedback_type",
+            "Feedback type does not match sourceType.",
+            f"{feedback_type or 'missing feedbackType'} is not allowed for sourceType {source_type}.",
+            "Use a feedbackType supported by the selected sourceType.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if source_type != "preference" and source_id is None:
+        error = weibo_error(
+            "invalid_feedback_source_id",
+            "Feedback sourceId is required for this sourceType.",
+            f"sourceType {source_type} must identify a persisted source row.",
+            "Pass a positive numeric sourceId or use sourceType preference for standalone preference feedback.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    if not isinstance(feedback_status, str) or feedback_status not in FEEDBACK_LEDGER_STATUSES:
+        error = weibo_error(
+            "invalid_feedback_status",
+            "Feedback status is invalid.",
+            "Feedback ledger status must be open, in_review, resolved, rejected, or archived.",
+            "Retry with status open, in_review, resolved, rejected, or archived.",
+            docs_anchor="feedback-memory-loop",
+        )
+        error.update({"endpoint": endpoint})
+        return error
+    return None
+
+
+def normalized_feedback_status(payload):
+    return "open" if "status" not in payload or payload.get("status") is None else payload.get("status")
+
+
+def positive_integer_value(value):
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and re.match(r"^[1-9]\d*$", value):
+        return int(value)
+    return None
+
+
+def update_loop_from_step(cur, loop_run_id, project_id, step_name, status, error_type=None, error_message=None):
+    loop_status = status if status in {"partial", "failed", "needs_human"} else "running"
+    finished_expr = "NOW()" if loop_status in {"partial", "failed", "needs_human"} else "finished_at"
+    cur.execute("SELECT status FROM agent_loop_runs WHERE id=%s AND project_id=%s", (loop_run_id, project_id))
+    existing = cur.fetchone()
+    if existing and existing.get("status") in AGENT_LOOP_TERMINAL_STATUSES and existing.get("status") != loop_status:
+        return
+    cur.execute(
+        f"""
+        UPDATE agent_loop_runs
+        SET current_step=%s,
+            status=%s,
+            error_type=%s,
+            error_message=%s,
+            finished_at={finished_expr}
+        WHERE id=%s AND project_id=%s
+        """,
+        (step_name, loop_status, error_type, error_message, loop_run_id, project_id),
+    )
+
+
+def fetch_agent_loop_run(cur, row_id):
+    cur.execute("SELECT * FROM agent_loop_runs WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def fetch_agent_step_run(cur, row_id):
+    cur.execute("SELECT * FROM agent_step_runs WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def fetch_judge_review(cur, row_id):
+    cur.execute("SELECT * FROM judge_reviews WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def fetch_feedback_item(cur, row_id):
+    cur.execute("SELECT * FROM feedback_items WHERE id=%s", (row_id,))
+    return cur.fetchone()
+
+
+def require_project_from_payload(payload):
+    project = strict_project_from_payload(payload)
+    if project:
+        return project, None
+    return None, weibo_error(
+        "project_not_found",
+        "Monitor project was not found.",
+        "The provided projectId does not exist.",
+        "Create the monitor project or retry with a valid projectId.",
+        docs_anchor="agent-loop-ledger",
+    )
+
+
+def parse_agent_loop_payload(payload_json, endpoint):
+    try:
+        parsed = json.loads(payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        error = weibo_error(
+            "invalid_agent_loop_payload",
+            "Agent Loop worker payload must be valid JSON.",
+            str(exc),
+            "Pass a JSON object through --payload-json.",
+            docs_anchor="agent-loop-ledger",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    if not isinstance(parsed, dict):
+        error = weibo_error(
+            "invalid_agent_loop_payload",
+            "Agent Loop worker payload must be a JSON object.",
+            f"Received {type(parsed).__name__}.",
+            "Pass a JSON object through --payload-json.",
+            docs_anchor="agent-loop-ledger",
+        )
+        error.update({"endpoint": endpoint})
+        return None, error
+    return parsed, None
+
+
+def load_agent_loop_run(project_id, loop_run_id):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM agent_loop_runs WHERE id=%s AND project_id=%s", (loop_run_id, project_id))
+            return cur.fetchone()
+
+
+def load_agent_loop_status(project_id, loop_run_id):
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM agent_loop_runs WHERE id=%s AND project_id=%s", (loop_run_id, project_id))
+            run = cur.fetchone()
+            if not run:
+                return None
+            cur.execute("SELECT * FROM agent_step_runs WHERE loop_run_id=%s AND project_id=%s ORDER BY id", (loop_run_id, project_id))
+            steps = cur.fetchall()
+            cur.execute("SELECT * FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s ORDER BY id", (loop_run_id, project_id))
+            reviews = cur.fetchall()
+            cur.execute(
+                """
+                SELECT *
+                FROM feedback_items
+                WHERE project_id=%s
+                  AND (
+                    (source_type='loop' AND source_id=%s)
+                    OR (source_type='step' AND source_id IN (SELECT id FROM agent_step_runs WHERE loop_run_id=%s AND project_id=%s))
+                    OR (source_type='judge_review' AND source_id IN (SELECT id FROM judge_reviews WHERE loop_run_id=%s AND project_id=%s))
+                  )
+                ORDER BY id
+                """,
+                (project_id, loop_run_id, loop_run_id, project_id, loop_run_id, project_id),
+            )
+            feedback = cur.fetchall()
+    return agent_loop_status_summary({
+        "run": agent_loop_run_to_payload(run),
+        "steps": [agent_step_run_to_payload(row) for row in steps],
+        "judgeReviews": [judge_review_to_payload(row) for row in reviews],
+        "feedbackItems": [feedback_item_to_payload(row) for row in feedback],
+    })
+
+
+def agent_loop_status_summary(status):
+    judge_reviews = status.get("judgeReviews") or []
+    feedback_items = status.get("feedbackItems") or []
+    retry_count = 0
+    for review in judge_reviews:
+        count = review.get("retry_count", review.get("retryCount", 0))
+        if isinstance(count, int) and count > retry_count:
+            retry_count = count
+    manual_handoffs = [
+        item for item in feedback_items
+        if item.get("feedback_type") == "manual_handoff" or item.get("feedbackType") == "manual_handoff"
+    ]
+    return {
+        **status,
+        "retryCount": retry_count,
+        "manualHandoffs": manual_handoffs,
+    }
+
+
+def agent_loop_run_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "platform": row.get("platform"),
+        "trigger_mode": row.get("trigger_mode"),
+        "target_id": row.get("target_id"),
+        "status": row.get("status"),
+        "current_step": row.get("current_step"),
+        "input_json": db.jloads(row.get("input_json"), {}),
+        "summary_json": db.jloads(row.get("summary_json"), None),
+        "error_type": row.get("error_type"),
+        "error_message": row.get("error_message"),
+        "started_at": iso_or_none(row.get("started_at")),
+        "finished_at": iso_or_none(row.get("finished_at")),
+        "created_at": iso_or_none(row.get("created_at")),
+        "updated_at": iso_or_none(row.get("updated_at")),
+    }
+
+
+def agent_step_run_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "loop_run_id": row.get("loop_run_id"),
+        "project_id": row.get("project_id"),
+        "agent_name": row.get("agent_name"),
+        "step_name": row.get("step_name"),
+        "status": row.get("status"),
+        "input_json": db.jloads(row.get("input_json"), None),
+        "output_json": db.jloads(row.get("output_json"), None),
+        "evidence_ids": db.jloads(row.get("evidence_ids"), []),
+        "error_type": row.get("error_type"),
+        "error_message": row.get("error_message"),
+        "started_at": iso_or_none(row.get("started_at")),
+        "finished_at": iso_or_none(row.get("finished_at")),
+        "created_at": iso_or_none(row.get("created_at")),
+        "updated_at": iso_or_none(row.get("updated_at")),
+    }
+
+
+def judge_review_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "loop_run_id": row.get("loop_run_id"),
+        "step_run_id": row.get("step_run_id"),
+        "project_id": row.get("project_id"),
+        "judge_agent_name": row.get("judge_agent_name"),
+        "status": row.get("status"),
+        "score": float(row["score"]) if row.get("score") is not None else None,
+        "passed": bool(row["passed"]) if row.get("passed") is not None else None,
+        "feedback_json": db.jloads(row.get("feedback_json"), None),
+        "required_changes": db.jloads(row.get("required_changes"), []),
+        "evidence_errors": db.jloads(row.get("evidence_errors"), []),
+        "retry_count": row.get("retry_count"),
+        "created_at": iso_or_none(row.get("created_at")),
+    }
+
+
+def feedback_item_to_payload(row):
+    return {
+        "id": row.get("id"),
+        "project_id": row.get("project_id"),
+        "source_type": row.get("source_type"),
+        "source_id": row.get("source_id"),
+        "feedback_type": row.get("feedback_type"),
+        "note": row.get("note"),
+        "status": row.get("status"),
+        "created_by": row.get("created_by"),
+        "created_at": iso_or_none(row.get("created_at")),
+        "handled_at": iso_or_none(row.get("handled_at")),
+    }
+
+
+def json_for_db(value, default=None):
+    if value is None:
+        value = default
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def weibo_fixture_e2e(now):
@@ -3395,6 +7295,18 @@ def analyze_weibo_comments_fixture(fixture_path, now):
 def analyze_weibo_comment_record(comment, now):
     content = comment.get("text") or comment.get("content") or ""
     base = analyze_comment(content)
+    return build_weibo_comment_analysis(comment, now, base)
+
+
+def analyze_weibo_comment_record_with_local_rules(comment, now):
+    content = comment.get("text") or comment.get("content") or ""
+    base = fallback_analysis(content)
+    base["model"] = "local-rules"
+    return build_weibo_comment_analysis(comment, now, base)
+
+
+def build_weibo_comment_analysis(comment, now, base):
+    content = comment.get("text") or comment.get("content") or ""
     risks = base.get("risks") or []
     weight = comment_weight(
         int(comment.get("like_count") or 0),
@@ -3466,7 +7378,7 @@ def run_deepseek_fixture(comments_path, now, response_path=None, simulate_failur
                 "message": f"Simulated DeepSeek failure: {simulate_failure}",
             },
             "raw_comments": comments,
-            "analyses": [analyze_weibo_comment_record(comment, now) for comment in comments],
+            "analyses": [analyze_weibo_comment_record_with_local_rules(comment, now) for comment in comments],
             "agent_runs": [
                 {"agent_name": "DeepSeek Weibo Analysis", "status": "running"},
                 {"agent_name": "DeepSeek Weibo Analysis", "status": "failed", "error_type": "deepseek_failed"},
@@ -3519,7 +7431,7 @@ def parse_deepseek_response(text):
 
 def analysis_from_deepseek(comment, model_item, now):
     content = comment.get("text") or comment.get("content") or ""
-    fallback = analyze_weibo_comment_record(comment, now)
+    fallback = analyze_weibo_comment_record_with_local_rules(comment, now)
     like_count = int(comment.get("like_count") or 0)
     reply_count = int(comment.get("reply_count") or 0)
     ignored = {
@@ -4146,29 +8058,201 @@ def load_memory_fixture(path):
 
 def answer_weibo_question(records, question):
     citations = []
-    if not any(records.values()):
+    has_current_evidence = any(records.get(kind) for kind in ["comments", "events", "actions", "backtests"])
+    if not has_current_evidence:
         return {
             "text": "Current real Weibo evidence is insufficient to answer this question.",
+            "facts": [],
+            "inferences": [],
+            "recommendations": [],
             "citations": [],
+            "citationDetails": [],
+            "knowledge_references": [],
             "error": standard_answer_error("insufficient_evidence", "No stored Weibo evidence is available.", "Run Weibo discovery and analysis first."),
         }
+    preference_context = bot_preference_context(records.get("memory", []))
     if any(term in question for term in ["行动", "有效", "效果", "backtest"]):
         if not records.get("backtests"):
             citations = [action["id"] for action in records.get("actions", []) if action.get("id")]
+            citations.extend([item["id"] for item in preference_context if item.get("id")])
+            facts = [f"当前记录了 {len(records.get('actions', []))} 条行动，但还没有可用回测。"] if records.get("actions") else []
             return {
-                "text": "There is no confirmed action/backtest yet, so action effect evidence is insufficient.",
+                "text": "There is no confirmed action/backtest yet, so action effect evidence is insufficient." + preference_answer_suffix(preference_context),
+                "facts": facts,
+                "inferences": ["不能把待确认建议或未回测动作当作已验证效果。"],
+                "recommendations": ["先确认或补充现实动作时间，再采集动作后的评论窗口。"],
                 "citations": citations,
+                "citationDetails": public_citation_details(citations),
+                "preference_context": preference_context,
+                "knowledge_references": [],
                 "error": standard_answer_error("insufficient_backtest_data", "No confirmed action backtest exists.", "Confirm/log an action and collect post-action windows."),
             }
     events = records.get("events", [])
     comments = records.get("comments", [])
-    memory = records.get("memory", [])
-    citations = [item["id"] for item in [*events, *comments, *memory] if item.get("id")]
+    actions = records.get("actions", [])
+    citations = [item["id"] for item in [*events, *comments[:5], *actions[:5]] if item.get("id")]
+    citations.extend([item["id"] for item in preference_context if item.get("id")])
+    knowledge_references = bot_knowledge_references(records, question, citations)
+    citations.extend([item["id"] for item in knowledge_references if item.get("id")])
+    facts = []
+    if events:
+        event = events[0]
+        facts.append(f"{event.get('id')}：{event.get('title')}，风险等级 {event.get('risk_level')}，状态 {event.get('status')}。")
+    if comments:
+        top_comment = comments[0]
+        facts.append(f"{top_comment.get('id')}：高互动评论提到「{str(top_comment.get('content') or '')[:80]}」。")
+    if actions:
+        action = actions[0]
+        facts.append(f"{action.get('id')}：已有 {action.get('source')} 行动项，状态 {action.get('confirmation_status')}。")
+    inferences = [
+        "负面或疑虑主要围绕官宣可信度、非官宣信息和溜粉担忧；这属于基于评论与事件证据的推断，不是外部事实认定。"
+    ]
+    recommendations = []
+    pending_actions = [action for action in actions if action.get("confirmation_status") == "pending"]
+    if pending_actions:
+        recommendations.append(f"优先处理 {pending_actions[0].get('id')}：{pending_actions[0].get('content_summary') or pending_actions[0].get('reason')}")
+    else:
+        recommendations.append("先生成或确认一条可执行行动，再收集动作后的微博评论窗口。")
+    knowledge_text = knowledge_answer_suffix(knowledge_references)
     return {
-        "text": "微博负面升高主要来自官宣可信度、非官宣消息和溜粉担忧，相关评论与事件仍在升级观察中。",
+        "text": "事实/微博证据显示官宣可信度、非官宣消息和溜粉担忧仍是主要讨论点；推断/建议需要在这些证据上生成，不能把知识参考写成当前微博事实。" + knowledge_text + preference_answer_suffix(preference_context),
+        "facts": facts,
+        "inferences": inferences,
+        "recommendations": recommendations,
+        "preference_context": preference_context,
+        "knowledge_references": knowledge_references,
         "citations": citations,
+        "citationDetails": public_citation_details(citations),
         "error": None,
     }
+
+
+def answer_real_evidence_ids(answer):
+    return [
+        citation
+        for citation in unique_evidence_ids(answer.get("citations") or [])
+        if is_real_evidence_reference(citation)
+    ]
+
+
+def is_real_evidence_reference(value):
+    return is_legacy_real_evidence_reference(value) or judge_evidence_citation_detail(value) is not None
+
+
+def is_legacy_real_evidence_reference(value):
+    return bool(re.match(r"^(comment|event|action|memory)-[1-9]\d*$", str(value or "")))
+
+
+def public_citation_details(evidence_ids):
+    return [
+        {
+            "id": item["id"],
+            "platform": item["platform"],
+            "platformLabel": item["platform_label"],
+            "sourceType": item["source_type"],
+            "label": item["label"],
+        }
+        for item in judge_evidence_citation_details(evidence_ids)
+    ]
+
+
+def citation_markdown_label(evidence_id):
+    detail = judge_evidence_citation_detail(evidence_id)
+    if not detail:
+        return str(evidence_id)
+    return f"{detail['label']} {detail['id']}"
+
+
+def bot_knowledge_references(records, question, evidence_ids):
+    project_id = records.get("project_id")
+    knowledge_rows = records.get("knowledge_cards") or []
+    real_evidence_ids = [item for item in unique_evidence_ids(evidence_ids or []) if is_legacy_real_evidence_reference(item)]
+    if not project_id or not knowledge_rows or not real_evidence_ids:
+        return []
+    evidence_check = validate_knowledge_evidence(project_id, real_evidence_ids, True)
+    if evidence_check.get("failure_reason"):
+        return []
+    context = bot_knowledge_context(records, question)
+    results = [
+        knowledge_card_validation_result(row, context, real_evidence_ids, evidence_check)
+        for row in knowledge_rows
+    ]
+    passed = [item for item in results if item["passed"] and not item["blocked_by_do_not_apply"]]
+    passed.sort(key=knowledge_result_sort_key)
+    return [bot_knowledge_reference_summary(item) for item in passed[:3]]
+
+
+def bot_knowledge_context(records, question):
+    parts = [question]
+    for event in records.get("events", [])[:5]:
+        parts.extend([
+            event.get("title"),
+            event.get("trigger_summary"),
+            " ".join(event.get("recommended_actions") or []),
+        ])
+    for comment in records.get("comments", [])[:8]:
+        parts.append(comment.get("content"))
+    for action in records.get("actions", [])[:5]:
+        parts.extend([
+            action.get("action_type"),
+            action.get("content_summary"),
+            action.get("reason"),
+        ])
+    text = " ".join(str(part) for part in parts if part)
+    topics = extract_action_knowledge_topics(text)
+    return knowledge_search_context({
+        "platform": "weibo",
+        "query": " ".join([text, *topics]),
+        "topics": topics,
+    })
+
+
+def bot_knowledge_reference_summary(item):
+    citation_role = "weak_inspiration" if item.get("citation_role") == "weak_inspiration" else "knowledge_reference"
+    return {
+        "id": f"knowledge-card-{item.get('card_id')}",
+        "card_id": item.get("card_id"),
+        "card_identity": item.get("card_identity"),
+        "title": item.get("framework_or_case"),
+        "reliability_level": item.get("reliability_level"),
+        "citation_role": citation_role,
+        "fact_boundary": "knowledge_reference_not_observed_weibo_fact",
+        "applicable_scenario": item.get("applicable_scenario"),
+        "do_not_apply_when": item.get("do_not_apply_when"),
+        "citation_url": item.get("citation_url"),
+    }
+
+
+def knowledge_answer_suffix(knowledge_references):
+    if not knowledge_references:
+        return ""
+    lead = knowledge_references[0]
+    has_weak_inspiration = any(item.get("citation_role") == "weak_inspiration" for item in knowledge_references)
+    if has_weak_inspiration:
+        return f" 知识参考/知识卡：{lead.get('card_identity')} 等引用中包含 C 级来源，只作为弱启发，不作为硬规则，也不作为观察到的微博事实。"
+    return f" 知识参考/知识卡：{lead.get('card_identity')} 只作为适用性参考，不作为观察到的微博事实。"
+
+
+def bot_preference_context(memory_items):
+    preferences = []
+    for item in memory_items or []:
+        if item.get("source_kind") != "preference":
+            continue
+        memory_json = item.get("memory_json") or {}
+        source_of_truth = memory_json.get("source_of_truth") or "user_feedback"
+        preferences.append({
+            "id": item.get("id"),
+            "memory_identity": item.get("memory_identity"),
+            "source_of_truth": source_of_truth,
+            "summary": item.get("summary") or "",
+        })
+    return preferences[:3]
+
+
+def preference_answer_suffix(preference_context):
+    if not preference_context:
+        return ""
+    return f" 团队偏好/人工反馈提示：{preference_context[0]['summary']}；这不是外部事实。"
 
 
 def daily_report(records, now):
@@ -4183,7 +8267,7 @@ def daily_report(records, now):
         f"Events: {len(event_ids)}",
         f"Actions: {len(action_ids)}",
         f"Comments: {len(comment_ids)}",
-        "Evidence: " + (", ".join(evidence_ids) if evidence_ids else "insufficient"),
+        "Evidence: " + (", ".join(citation_markdown_label(item) for item in evidence_ids) if evidence_ids else "insufficient"),
     ])
     return {
         "markdown": markdown,
@@ -4194,6 +8278,7 @@ def daily_report(records, now):
             "backtests": len(records.get("backtests", [])),
         },
         "evidence_ids": evidence_ids,
+        "citationDetails": public_citation_details(evidence_ids),
     }
 
 

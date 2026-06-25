@@ -32,7 +32,8 @@ def load_env_file(path=".env"):
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
-load_env_file()
+if os.environ.get("YUQING_SKIP_ENV_FILE") != "1":
+    load_env_file()
 
 
 def mysql_url():
@@ -74,6 +75,9 @@ def run_migration(sql_path=None):
         Path("migrations/003_weibo_mvp_event_action.sql"),
         Path("migrations/004_weibo_mvp_memory_report.sql"),
         Path("migrations/005_weibo_mvp_sentiment.sql"),
+        Path("migrations/006_agent_harness_loop.sql"),
+        Path("migrations/007_knowledge_card_rag.sql"),
+        Path("migrations/008_agent_reach_bilibili_ingestion.sql"),
     ]
     with connect() as conn:
         with conn.cursor() as cur:

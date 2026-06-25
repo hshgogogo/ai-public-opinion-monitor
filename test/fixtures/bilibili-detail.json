@@ -1,0 +1,78 @@
+{
+  "video": {
+    "bvid": "BV1HDLOG0001",
+    "title": "海岛舒服日志官宣反应混剪",
+    "description": "UP主整理官宣后评论区对刘昊然和李兰迪组合的讨论，并补充站内二创观察。",
+    "url": "https://www.bilibili.com/video/BV1HDLOG0001",
+    "published_at": "2026-05-20T10:20:00+08:00",
+    "author": {
+      "mid": "up1001",
+      "name": "海风剪辑室",
+      "url": "https://space.bilibili.com/1001"
+    },
+    "stat": {
+      "view": 139500,
+      "like": 7100,
+      "reply": 3,
+      "share": 520
+    },
+    "body_text": "UP主补充：站内观众更关心官宣节奏、演员适配度和海岛取景质感。",
+    "debug_payload": "synthetic collector-only diagnostics"
+  },
+  "comments": [
+    {
+      "rpid": "r9001",
+      "member": {
+        "mid": "fan9001",
+        "uname": "岛民A"
+      },
+      "content": {
+        "message": "官宣节奏终于明确了，刘昊然李兰迪组合可以期待。"
+      },
+      "like_count": 96,
+      "reply_count": 4
+    },
+    {
+      "rpid": "r9002",
+      "member": {
+        "mid": "fan9002",
+        "uname": "观剧样本B"
+      },
+      "content": {
+        "message": "担心预告太慢，希望别让非官宣二创盖过正片信息。"
+      },
+      "like_count": 43,
+      "reply_count": 2
+    },
+    {
+      "rpid": "r9003",
+      "member": {
+        "mid": "fan9003",
+        "uname": "角色党C"
+      },
+      "content": {
+        "message": "海岛取景和角色关系讨论度起来了。"
+      },
+      "like_count": 18,
+      "reply_count": 0
+    }
+  ],
+  "subtitles": [
+    {
+      "language": "zh-CN",
+      "body": [
+        {
+          "from": 0,
+          "to": 5,
+          "content": "这条视频主要看演员阵容讨论。"
+        },
+        {
+          "from": 5,
+          "to": 11,
+          "content": "弹幕集中在官宣可信度和角色适配。"
+        }
+      ]
+    }
+  ],
+  "private_runner_note": "synthetic internal collector note not public"
+}

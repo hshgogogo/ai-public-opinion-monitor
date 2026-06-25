@@ -3,6 +3,21 @@ import assert from "node:assert/strict";
 import { server } from "../src/server.js";
 
 test("serves enterprise health and real-data-only snapshot", async (t) => {
+  const originalPython = process.env.PYTHON_BIN;
+  const originalMysqlUrl = process.env.MYSQL_URL;
+  const originalCookieFile = process.env.WEIBO_COOKIE_FILE;
+  process.env.PYTHON_BIN = ".venv/bin/python3";
+  process.env.MYSQL_URL = "";
+  process.env.WEIBO_COOKIE_FILE = "config/cookies/weibo.json";
+  t.after(() => {
+    if (originalPython === undefined) delete process.env.PYTHON_BIN;
+    else process.env.PYTHON_BIN = originalPython;
+    if (originalMysqlUrl === undefined) delete process.env.MYSQL_URL;
+    else process.env.MYSQL_URL = originalMysqlUrl;
+    if (originalCookieFile === undefined) delete process.env.WEIBO_COOKIE_FILE;
+    else process.env.WEIBO_COOKIE_FILE = originalCookieFile;
+  });
+
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const address = server.address();
@@ -18,6 +33,11 @@ test("serves enterprise health and real-data-only snapshot", async (t) => {
   assert.equal(Object.keys(snapshot.sourceCounts).some((source) => ["News", "Bilibili", "Reddit"].includes(source)), false);
   assert.equal(JSON.stringify(snapshot.strategy).includes("小红书"), false);
   assert.equal(JSON.stringify(snapshot.strategy).includes("抖音"), false);
+
+  const publicPayload = JSON.stringify({ health, snapshot });
+  for (const forbidden of ["cookie_file", "config/cookies", "WEIBO_COOKIE_FILE", "SUB=", "token"]) {
+    assert.equal(publicPayload.includes(forbidden), false, `${forbidden} must not appear in public health/snapshot payloads`);
+  }
 });
 
 test("rejects mock item injection in enterprise mode", async (t) => {

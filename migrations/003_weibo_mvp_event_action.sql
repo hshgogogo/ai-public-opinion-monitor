@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS publicity_actions (
   related_event_id BIGINT NULL,
   related_target_id BIGINT NULL,
   source ENUM('agent_recommended','user_confirmed','official_observed','matrix_inferred','manual_log') NOT NULL,
+  action_identity VARCHAR(320) NOT NULL DEFAULT '',
   confirmation_status ENUM('pending','confirmed','rejected','partial','uncertain') NOT NULL DEFAULT 'pending',
   action_type VARCHAR(120) NOT NULL,
   content_summary TEXT NULL,
@@ -88,6 +89,7 @@ CREATE TABLE IF NOT EXISTS publicity_actions (
   raw_json JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_action_project_platform_identity (project_id, platform, action_identity),
   KEY idx_actions_project_status (project_id, confirmation_status),
   KEY idx_actions_effective_time (project_id, effective_at),
   FOREIGN KEY (project_id) REFERENCES monitor_projects(id),
@@ -145,6 +147,26 @@ SET event_identity = CONCAT(title, '::', COALESCE(DATE_FORMAT(first_seen_at, '%Y
 WHERE event_identity = '';
 
 SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE artist_public_opinion_events ADD UNIQUE KEY uniq_event_project_platform_identity (project_id, platform, event_identity)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'artist_public_opinion_events' AND INDEX_NAME = 'uniq_event_project_platform_identity');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+ALTER TABLE artist_public_opinion_events
+  MODIFY COLUMN status ENUM('observing','escalating','stable','resolved','archived','confirmed','rejected') NOT NULL DEFAULT 'observing';
+
+ALTER TABLE source_accounts
+  MODIFY COLUMN source_type ENUM('official','artist','producer','marketing','suspected_matrix','media','fan','organic','unknown') NOT NULL DEFAULT 'unknown';
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE publicity_actions ADD COLUMN action_identity VARCHAR(320) NOT NULL DEFAULT ''''', 'SELECT 1') FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'publicity_actions' AND COLUMN_NAME = 'action_identity');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+UPDATE publicity_actions
+SET action_identity = CONCAT(source, '::', COALESCE(related_event_id, 'no-event'), '::', action_type, '::', COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw_json, '$.id')), id))
+WHERE action_identity = '';
+
+SET @sql = (SELECT IF(COUNT(*) = 0, 'ALTER TABLE publicity_actions ADD UNIQUE KEY uniq_action_project_platform_identity (project_id, platform, action_identity)', 'SELECT 1') FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'publicity_actions' AND INDEX_NAME = 'uniq_action_project_platform_identity');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;

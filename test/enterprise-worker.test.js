@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const python = process.env.PYTHON_BIN || "/Users/mini-002/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3";
 
@@ -183,6 +186,726 @@ test("Weibo MVP sentiment migration extends analysis fields and migration order"
   }
 });
 
+test("Agent Harness loop migration declares ledger tables and migration order", () => {
+  const sql = readText("migrations/006_agent_harness_loop.sql");
+  const dbPy = readText("workers/db.py");
+
+  assert.doesNotMatch(sql, /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i);
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+
+  for (const table of [
+    "agent_loop_runs",
+    "agent_step_runs",
+    "judge_reviews",
+    "feedback_items"
+  ]) {
+    assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`, "i"));
+  }
+
+  for (const token of [
+    "trigger_mode",
+    "current_step",
+    "summary_json",
+    "evidence_ids",
+    "judge_agent_name",
+    "required_changes",
+    "evidence_errors",
+    "feedback_type",
+    "handled_at",
+    "needs_human"
+  ]) {
+    assert.match(sql, new RegExp(token, "i"));
+  }
+
+  const sentimentMigrationIndex = dbPy.indexOf("005_weibo_mvp_sentiment.sql");
+  const harnessMigrationIndex = dbPy.indexOf("006_agent_harness_loop.sql");
+  assert.equal(sentimentMigrationIndex >= 0, true);
+  assert.equal(harnessMigrationIndex > sentimentMigrationIndex, true);
+});
+
+test("Knowledge card RAG migration declares source and card schema", () => {
+  const sql = readText("migrations/007_knowledge_card_rag.sql");
+  const dbPy = readText("workers/db.py");
+
+  assert.doesNotMatch(sql, /ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS/i);
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+
+  for (const table of ["knowledge_sources", "knowledge_cards"]) {
+    assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`, "i"));
+  }
+
+  for (const token of [
+    "source_identity",
+    "card_identity",
+    "citation_url",
+    "reliability_level",
+    "framework_or_case",
+    "applicable_scenario",
+    "do_not_apply_when",
+    "recommended_actions",
+    "risk_warnings",
+    "evidence_required",
+    "judge_questions",
+    "tags",
+    "status",
+    "raw_json",
+    "uniq_knowledge_source_identity",
+    "uniq_knowledge_card_identity"
+  ]) {
+    assert.match(sql, new RegExp(token, "i"));
+  }
+
+  const harnessMigrationIndex = dbPy.indexOf("006_agent_harness_loop.sql");
+  const knowledgeMigrationIndex = dbPy.indexOf("007_knowledge_card_rag.sql");
+  assert.equal(harnessMigrationIndex >= 0, true);
+  assert.equal(knowledgeMigrationIndex > harnessMigrationIndex, true);
+});
+
+test("Feedback memory loop migration declares OpenSpec-compatible enums", () => {
+  const harnessSql = readText("migrations/006_agent_harness_loop.sql");
+  const eventActionSql = readText("migrations/003_weibo_mvp_event_action.sql");
+  const memorySql = readText("migrations/004_weibo_mvp_memory_report.sql");
+
+  assert.deepEqual(enumValuesFromModify(harnessSql, "source_type"), [
+    "loop",
+    "step",
+    "judge_review",
+    "event",
+    "action",
+    "account",
+    "preference",
+    "knowledge",
+    "rule",
+    "other",
+    "source_account"
+  ]);
+  assert.deepEqual(enumValuesFromModify(harnessSql, "feedback_type"), [
+    "manual_handoff",
+    "needs_human",
+    "confirmed",
+    "rejected",
+    "modified",
+    "comment",
+    "preference",
+    "other",
+    "event_confirmed",
+    "event_rejected",
+    "event_observation_only",
+    "event_note",
+    "action_confirmed",
+    "action_rejected",
+    "action_partially_executed",
+    "action_not_executed",
+    "action_note",
+    "source_type_corrected",
+    "preference_added",
+    "preference_updated",
+    "manual_handoff_resolved",
+    "manual_handoff_note"
+  ]);
+  assert.deepEqual(enumValuesFromModify(eventActionSql, "status"), [
+    "observing",
+    "escalating",
+    "stable",
+    "resolved",
+    "archived",
+    "confirmed",
+    "rejected"
+  ]);
+  assert.deepEqual(enumValuesFromModify(eventActionSql, "source_type"), [
+    "official",
+    "artist",
+    "producer",
+    "marketing",
+    "suspected_matrix",
+    "media",
+    "fan",
+    "organic",
+    "unknown"
+  ]);
+  assert.deepEqual(enumValuesFromModify(memorySql, "source_kind"), [
+    "target",
+    "comment",
+    "analysis",
+    "event",
+    "action",
+    "backtest",
+    "report",
+    "preference",
+    "conversation",
+    "source_account"
+  ]);
+});
+
+test("Agent Harness worker ledger commands expose only run/status public HTTP in trigger API slice", () => {
+  const worker = readText("workers/enterprise_worker.py");
+  const server = readText("src/server.js");
+
+  for (const helper of [
+    "create_agent_loop_run",
+    "record_agent_step_run",
+    "start_agent_step_run",
+    "succeed_agent_step_run",
+    "partially_complete_agent_step_run",
+    "fail_agent_step_run",
+    "mark_agent_step_needs_human",
+    "record_judge_review",
+    "record_manual_handoff"
+  ]) {
+    assert.match(worker, new RegExp(`def ${helper}\\(`));
+  }
+
+  for (const command of [
+    "weibo-agent-loop-run",
+    "weibo-agent-loop-status",
+    "weibo-agent-loop-step",
+    "weibo-agent-loop-judge-review",
+    "weibo-agent-loop-handoff"
+  ]) {
+    assert.match(worker, new RegExp(command));
+  }
+
+  assert.match(server, /agent-loop\/run/i);
+  assert.match(server, /agent-runs/i);
+  assert.doesNotMatch(server, /agent-loop\/step|agent-loop\/judge|agent-loop\/handoff/i);
+});
+
+test("Agent Harness worker ledger commands return mysql_unavailable without MySQL", () => {
+  const commands = [
+    "weibo-agent-loop-run",
+    "weibo-agent-loop-status",
+    "weibo-agent-loop-step",
+    "weibo-agent-loop-judge-review",
+    "weibo-agent-loop-handoff"
+  ];
+
+  for (const command of commands) {
+    const payloadJson = command === "weibo-agent-loop-handoff"
+      ? JSON.stringify({ sourceType: "loop", sourceId: 1 })
+      : "{}";
+    const result = spawnSync(python, ["workers/enterprise_worker.py", command, "--payload-json", payloadJson], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        MYSQL_URL: "",
+        WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+      }
+    });
+    assert.equal(result.status, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error_type, "mysql_unavailable");
+    assert.match(payload.endpoint, new RegExp(command));
+  }
+});
+
+test("Agent Harness worker ledger commands return standard errors for malformed JSON", () => {
+  const commands = [
+    "weibo-agent-loop-run",
+    "weibo-agent-loop-status",
+    "weibo-agent-loop-step",
+    "weibo-agent-loop-judge-review",
+    "weibo-agent-loop-handoff"
+  ];
+
+  for (const command of commands) {
+    const result = spawnSync(python, ["workers/enterprise_worker.py", command, "--payload-json", "{"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        MYSQL_URL: "",
+        WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+      }
+    });
+    assert.equal(result.status, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error_type, "invalid_agent_loop_payload");
+    assert.match(payload.endpoint, new RegExp(command));
+    assert.equal(typeof payload.cause, "string");
+    assert.equal(typeof payload.fix, "string");
+  }
+});
+
+test("Judge helper rejects step output with no evidence IDs", () => {
+  const payload = runJudgeHelper({
+    output: {
+      summary: "只给了结论，没有证据。"
+    }
+  });
+
+  assert.equal(payload.review.status, "failed");
+  assert.equal(payload.review.passed, false);
+  assert.match(payload.review.required_changes.join("\n"), /evidence/i);
+  assert.deepEqual(payload.review.evidence_errors, [
+    {
+      error_type: "missing_evidence_ids",
+      message: "Step output must include at least one evidence ID."
+    }
+  ]);
+});
+
+test("Judge helper marks third failed attempt as needs_human", () => {
+  const payload = runJudgeHelper({
+    retryCount: 2,
+    output: {
+      summary: "第三次仍然没有证据。"
+    }
+  });
+
+  assert.equal(payload.review.status, "needs_human");
+  assert.equal(payload.review.passed, false);
+  assert.equal(payload.review.retry_count, 2);
+  assert.match(payload.review.required_changes.join("\n"), /evidence/i);
+  assert.deepEqual(payload.review.evidence_errors, [
+    {
+      error_type: "missing_evidence_ids",
+      message: "Step output must include at least one evidence ID."
+    }
+  ]);
+});
+
+test("Judge helper passes step output with at least one evidence ID", () => {
+  const payload = runJudgeHelper({
+    output: {
+      summary: "评论区对剧情节奏有明确反馈。",
+      evidence_ids: ["comment-1"]
+    }
+  });
+
+  assert.equal(payload.review.status, "passed");
+  assert.equal(payload.review.passed, true);
+  assert.deepEqual(payload.review.required_changes, []);
+  assert.deepEqual(payload.review.evidence_errors, []);
+});
+
+test("Agent Loop status helper exposes Judge retry summary and manual handoffs", () => {
+  const source = readText("workers/enterprise_worker.py");
+  assert.match(source, /def agent_loop_status_summary\(/);
+
+  const result = spawnSync(python, [
+    "-c",
+    [
+      "import json, os, sys",
+      "os.environ['YUQING_SKIP_ENV_FILE'] = '1'",
+      "from workers.enterprise_worker import agent_loop_status_summary",
+      "status = {",
+      "  'judgeReviews': [",
+      "    {'id': 10, 'status': 'failed', 'retry_count': 0},",
+      "    {'id': 11, 'status': 'needs_human', 'retry_count': 2},",
+      "  ],",
+      "  'feedbackItems': [",
+      "    {'id': 77, 'feedback_type': 'manual_handoff', 'source_type': 'judge_review', 'source_id': 11},",
+      "    {'id': 78, 'feedback_type': 'manual_handoff_note', 'source_type': 'judge_review', 'source_id': 11},",
+      "  ]",
+      "}",
+      "sys.stdout.write(json.dumps(agent_loop_status_summary(status), ensure_ascii=False))"
+    ].join("\n")
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      MYSQL_URL: "",
+      YUQING_SKIP_ENV_FILE: "1"
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.retryCount, 2);
+  assert.equal(payload.manualHandoffs.length, 1);
+  assert.equal(payload.manualHandoffs[0].source_id, 11);
+});
+
+test("Feedback memory loop exposes worker/API command and no-DB safety contract", () => {
+  const worker = readText("workers/enterprise_worker.py");
+  const server = readText("src/server.js");
+  const dbPy = readText("workers/db.py");
+
+  assert.match(worker, /weibo-feedback/);
+  assert.match(worker, /def weibo_feedback_payload\(/);
+  assert.match(worker, /event_confirmed/);
+  assert.match(worker, /action_rejected/);
+  assert.match(worker, /source_type_corrected/);
+  assert.match(worker, /preference_added/);
+  assert.match(server, /\/api\/weibo\/feedback/);
+  assert.match(server, /YUQING_SKIP_ENV_FILE/);
+  assert.match(dbPy, /YUQING_SKIP_ENV_FILE/);
+  assert.doesNotMatch(server, /agent-loop\/step|agent-loop\/judge|agent-loop\/handoff/i);
+
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "event",
+      sourceId: 42,
+      feedbackType: "event_confirmed"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "mysql_unavailable");
+  assert.match(payload.endpoint, /weibo-feedback/);
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+});
+
+test("Feedback memory loop rejects source and feedback type mismatch before persistence", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "action",
+      sourceId: 7,
+      feedbackType: "event_confirmed"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_feedback_type");
+  assert.match(payload.message, /feedback/i);
+  assert.equal(typeof payload.cause, "string");
+  assert.equal(typeof payload.fix, "string");
+});
+
+test("Feedback memory loop validates positive project and source ids before persistence", () => {
+  for (const body of [
+    { projectId: 0, sourceType: "event", sourceId: 42, feedbackType: "event_confirmed" },
+    { projectId: 1, sourceType: "event", sourceId: 0, feedbackType: "event_confirmed" },
+    { projectId: 1, sourceType: "event", sourceId: "-7", feedbackType: "event_confirmed" }
+  ]) {
+    const result = spawnSync(python, [
+      "workers/enterprise_worker.py",
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify(body)
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        YUQING_SKIP_ENV_FILE: "1",
+        MYSQL_URL: "",
+        WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+      }
+    });
+    assert.equal(result.status, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.match(payload.error_type, /^invalid_feedback_/);
+    assert.equal(typeof payload.cause, "string");
+    assert.equal(typeof payload.fix, "string");
+  }
+});
+
+test("Feedback memory loop rejects unsupported feedback ledger status before persistence", () => {
+  for (const status of ["done", "", [], {}]) {
+    const result = spawnSync(python, [
+      "workers/enterprise_worker.py",
+      "weibo-feedback",
+      "--payload-json",
+      JSON.stringify({
+        projectId: 1,
+        sourceType: "event",
+        sourceId: 42,
+        feedbackType: "event_confirmed",
+        status
+      })
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        YUQING_SKIP_ENV_FILE: "1",
+        MYSQL_URL: "mysql://root:bad@127.0.0.1:1/missing",
+        WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+      }
+    });
+    assert.equal(result.status, 0);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error_type, "invalid_feedback_status");
+    assert.match(payload.fix, /open/);
+  }
+});
+
+test("Feedback memory loop rejects invalid action effectiveAt before persistence", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "action",
+      sourceId: 42,
+      feedbackType: "action_confirmed",
+      effectiveAt: "not-a-date"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "mysql://root:bad@127.0.0.1:1/missing",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_feedback_effective_at");
+  assert.match(payload.fix, /ISO-8601/);
+});
+
+test("Feedback memory loop ignores effectiveAt validation for non-confirmed action feedback", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "action",
+      sourceId: 42,
+      feedbackType: "action_rejected",
+      effectiveAt: "not-a-date"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "mysql://root:bad@127.0.0.1:1/missing",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "mysql_unavailable");
+});
+
+test("Feedback memory loop rejects invalid source account type correction before persistence", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "source_account",
+      sourceId: 42,
+      feedbackType: "source_type_corrected",
+      sourceTypeValue: "celebrity"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "mysql://root:bad@127.0.0.1:1/missing",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_source_type_value");
+  assert.match(payload.fix, /official/);
+});
+
+test("Feedback memory loop rejects invalid preference payload before persistence", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "preference",
+      feedbackType: "preference_added",
+      preferenceType: "avoid_public_clarification"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "mysql://root:bad@127.0.0.1:1/missing",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_preference_payload");
+  assert.match(payload.fix, /preferenceType/);
+});
+
+test("Feedback memory loop accepts valid preference payload until MySQL health", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-feedback",
+    "--payload-json",
+    JSON.stringify({
+      projectId: 1,
+      sourceType: "preference",
+      feedbackType: "preference_added",
+      preferenceType: "avoid_public_clarification",
+      summary: "团队倾向先观察。"
+    })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "mysql://root:bad@127.0.0.1:1/missing",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "mysql_unavailable");
+});
+
+test("Agent Harness foundation docs preserve compatibility boundaries", () => {
+  const readme = readText("README.md");
+  const server = readText("src/server.js");
+  const frontend = readText("public/app.js");
+  const worker = readText("workers/enterprise_worker.py");
+
+  assert.match(readme, /Agent Harness 基础层/);
+  assert.match(readme, /worker-only 契约/);
+  assert.match(readme, /不新增公开 HTTP endpoint/);
+  assert.match(readme, /不修改前端 workbench/);
+  assert.match(readme, /weibo-comments-analyze/);
+  assert.match(readme, /weibo-events-build/);
+  assert.match(readme, /weibo-actions-build/);
+  assert.match(readme, /weibo-bot-message/);
+  assert.match(readme, /haidao-agent-loop-step-attachment/);
+  assert.match(readme, /haidao-feedback-memory-loop/);
+
+  assert.match(server, /agent-loop\/run/i);
+  assert.match(server, /agent-runs/i);
+  assert.doesNotMatch(server, /agent-loop\/step|agent-loop\/judge|agent-loop\/handoff/i);
+  assert.doesNotMatch(frontend, /agent-loop\/run|agent-runs|weibo-agent-loop/i);
+  for (const command of ["weibo-comments-analyze", "weibo-events-build", "weibo-actions-build", "weibo-bot-message"]) {
+    assert.doesNotMatch(worker, new RegExp(`${command}[\\s\\S]{0,200}agentLoopRunId`));
+  }
+});
+
+test("Agent Loop step attachment preserves standalone worker commands unless exact agentLoopRunId is present", () => {
+  const result = spawnSync(python, [
+    "-c",
+    [
+      "import json, sys",
+      "from workers import enterprise_worker as worker",
+      "calls = []",
+      "project = {'id': 7, 'project_name': 'Standalone'}",
+      "def fake_project_from_payload(payload):",
+      "    calls.append(['project_from_payload', sorted(payload.keys())])",
+      "    return project",
+      "def fake_require_project_from_payload(payload):",
+      "    calls.append(['require_project_from_payload', sorted(payload.keys())])",
+      "    return project, None",
+      "def fake_load_agent_loop_run(project_id, loop_run_id):",
+      "    calls.append(['load_agent_loop_run', project_id, loop_run_id])",
+      "    return {'id': loop_run_id, 'project_id': project_id}",
+      "worker.project_from_payload = fake_project_from_payload",
+      "worker.require_project_from_payload = fake_require_project_from_payload",
+      "worker.load_agent_loop_run = fake_load_agent_loop_run",
+      "cases = []",
+      "for payload in [{'projectId': 7}, {'projectId': 7, 'loopRunId': 42}, {'projectId': 7, 'agent_loop_run_id': 42}]:",
+      "    before = len(calls)",
+      "    resolved_project, attachment, error = worker.project_and_agent_step_attachment(payload, 'weibo-comments-analyze')",
+      "    cases.append({'payload_keys': sorted(payload.keys()), 'project_id': resolved_project['id'], 'attachment': attachment, 'error': error, 'calls': calls[before:]})",
+      "before = len(calls)",
+      "resolved_project, attachment, error = worker.project_and_agent_step_attachment({'projectId': 7, 'agentLoopRunId': 42}, 'weibo-comments-analyze')",
+      "cases.append({'payload_keys': ['agentLoopRunId', 'projectId'], 'project_id': resolved_project['id'], 'attachment': attachment, 'error': error, 'calls': calls[before:]})",
+      "sys.stdout.write(json.dumps(cases, ensure_ascii=False))"
+    ].join("\n")
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PYTHONPATH: process.cwd(),
+      YUQING_SKIP_ENV_FILE: "1",
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const cases = JSON.parse(result.stdout);
+  assert.equal(cases.length, 4);
+
+  for (const item of cases.slice(0, 3)) {
+    assert.equal(item.project_id, 7);
+    assert.equal(item.attachment, null, item.payload_keys.join(","));
+    assert.equal(item.error, null, item.payload_keys.join(","));
+    assert.deepEqual(item.calls.map((call) => call[0]), ["project_from_payload"], item.payload_keys.join(","));
+  }
+
+  const exact = cases[3];
+  assert.equal(exact.error, null);
+  assert.equal(exact.attachment.loop_run_id, 42);
+  assert.equal(exact.attachment.step_name, "comment_analysis");
+  assert.deepEqual(exact.calls.map((call) => call[0]), ["require_project_from_payload", "load_agent_loop_run"]);
+});
+
+test("Agent Harness handoff command requires a status-visible source association", () => {
+  const result = spawnSync(python, [
+    "workers/enterprise_worker.py",
+    "weibo-agent-loop-handoff",
+    "--payload-json",
+    JSON.stringify({ sourceType: "other", feedbackType: "manual_handoff" })
+  ], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      MYSQL_URL: "",
+      WEIBO_COOKIE_FILE: "/tmp/weibo-cookie-does-not-exist.json"
+    }
+  });
+  assert.equal(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error_type, "invalid_agent_loop_payload");
+  assert.match(payload.fix, /sourceType/);
+});
+
 test("OpenSpec tasks include real environment and design pass evidence", () => {
   const tasks = readText("openspec/changes/haidao-weibo-agent-mvp/tasks.md")
     || readText("openspec/changes/archive/2026-06-11-haidao-weibo-agent-mvp/tasks.md");
@@ -220,6 +943,17 @@ test("Weibo event and source account persistence use atomic MySQL upsert", () =>
   assert.match(sourceAccountsSection, /ON DUPLICATE KEY UPDATE/i);
   assert.match(sourceAccountsSection, /LAST_INSERT_ID\(id\)/i);
   assert.doesNotMatch(sourceAccountsSection, /SELECT\s+id\s+FROM\s+source_accounts/i);
+});
+
+test("Weibo publicity action persistence uses atomic MySQL upsert", () => {
+  const sql = readText("migrations/003_weibo_mvp_event_action.sql");
+  const worker = readText("workers/enterprise_worker.py");
+  const actionsSection = worker.match(/def persist_publicity_actions[\s\S]*?\ndef persist_memory_report/)?.[0] || "";
+
+  assert.match(sql, /action_identity/);
+  assert.match(sql, /uniq_action_project_platform_identity/);
+  assert.match(actionsSection, /ON DUPLICATE KEY UPDATE/i);
+  assert.match(actionsSection, /LAST_INSERT_ID\(id\)/i);
 });
 
 test("default project and env example are Weibo MVP scoped", () => {
@@ -274,9 +1008,106 @@ test("fixture hello-world path returns a Weibo workbench shell without real depe
   assert.equal(payload.workbench.pendingActions.length, 0);
 });
 
+test("knowledge worker commands do not auto-load dotenv at process import time", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "knowledge-worker-env-"));
+  const workerPython = python.startsWith(".") ? join(process.cwd(), python) : python;
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(
+    join(tmp, ".env"),
+    "MYSQL_URL=mysql://root:bad@127.0.0.1:1/should_not_be_loaded\n",
+    "utf8"
+  );
+
+  const result = spawnSync(
+    workerPython,
+    [
+      `${process.cwd()}/workers/enterprise_worker.py`,
+      "weibo-knowledge-search",
+      "--payload-json",
+      "{}"
+    ],
+    {
+      cwd: tmp,
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH || "",
+        PYTHONPATH: process.cwd(),
+        YUQING_SKIP_ENV_FILE: ""
+      }
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.error_type, "mysql_unavailable");
+  assert.match(payload.cause, /MYSQL_URL is not configured/);
+});
+
+test("knowledge card RAG remains worker-only without a public knowledge-card API", () => {
+  const server = readText("src/server.js");
+
+  assert.equal(server.includes("/api/knowledge"), false);
+  assert.equal(server.includes("weibo-knowledge-search"), false);
+  assert.equal(server.includes("weibo-knowledge-seed"), false);
+  assert.equal(server.includes("weibo-knowledge-validate"), false);
+});
+
 function readText(path) {
   return spawnSync("node", ["-e", `process.stdout.write(require("fs").readFileSync(${JSON.stringify(path)}, "utf8"))`], {
     cwd: process.cwd(),
     encoding: "utf8"
   }).stdout;
+}
+
+function runJudgeHelper(payload) {
+  const tmp = mkdtempSync(join(tmpdir(), "judge-helper-"));
+  try {
+    writeFileSync(join(tmp, ".env"), "JUDGE_HELPER_DOTENV_SENTINEL=dotenv_was_read\n", "utf8");
+    const env = {
+      ...process.env,
+      MYSQL_URL: "",
+      PYTHONPATH: process.env.PYTHONPATH ? `${process.cwd()}:${process.env.PYTHONPATH}` : process.cwd()
+    };
+    delete env.YUQING_SKIP_ENV_FILE;
+    delete env.JUDGE_HELPER_DOTENV_SENTINEL;
+    const pythonForTmpCwd = python.startsWith("/") ? python : join(process.cwd(), python);
+    const result = spawnSync(pythonForTmpCwd, [
+      "-c",
+      [
+        "import json, os, sys",
+        "from workers.agents.judge_agent import rule_judge_step_output",
+        "payload = json.loads(sys.stdin.read() or '{}')",
+        "review = rule_judge_step_output(payload.get('output'), retry_count=payload.get('retryCount', payload.get('retry_count', 0)))",
+        "sys.stdout.write(json.dumps({'review': review, 'dotenv_sentinel': os.environ.get('JUDGE_HELPER_DOTENV_SENTINEL')}, ensure_ascii=False))"
+      ].join("\n")
+    ], {
+      cwd: tmp,
+      encoding: "utf8",
+      input: JSON.stringify(payload),
+      env
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.dotenv_sentinel, null);
+    return parsed;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function enumValuesFromModify(sql, columnName) {
+  const pattern = new RegExp(`MODIFY\\s+COLUMN\\s+\`?${columnName}\`?\\s+ENUM\\(([^)]*)\\)`, "i");
+  const match = sql.match(pattern);
+  assert.ok(match, `expected MODIFY COLUMN enum for ${columnName}`);
+  return mysqlEnumValues(match[1]);
+}
+
+function mysqlEnumValues(enumBody) {
+  const values = [];
+  const regex = /'((?:''|[^'])*)'/g;
+  let match;
+  while ((match = regex.exec(enumBody)) !== null) {
+    values.push(match[1].replaceAll("''", "'"));
+  }
+  return values;
 }
