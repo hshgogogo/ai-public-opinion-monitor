@@ -1,4 +1,5 @@
 from app.crewai_proposal_service import MySQLAgentRunRepository
+import re
 from workers.agents.judge_agent import (
     judge_evidence_citation_details,
     parse_judge_evidence_id,
@@ -334,6 +335,10 @@ class JudgeReviewService:
                 final_review,
                 output if isinstance(output, dict) else {},
             )
+            final_review = apply_report_backtest_metric_boundary(
+                final_review,
+                output if isinstance(output, dict) else {},
+            )
             final_review = resolve_judge_evidence(
                 final_review,
                 payload["projectId"],
@@ -423,7 +428,58 @@ def map_step_output_for_review(step):
         return map_event_building_step_output(step)
     if step.get("step_name") == "action_recommendation" and command == "weibo-actions-build":
         return map_action_recommendation_step_output(step)
+    if step.get("step_name") == "daily_report" and command == "weibo-daily-report":
+        return map_daily_report_step_output(step)
+    if step.get("step_name") == "action_backtest" and command == "weibo-action-backtest":
+        return map_action_backtest_step_output(step)
     return unsupported_step_output_error()
+
+
+def map_daily_report_step_output(step):
+    if not isinstance(step, dict):
+        return unsupported_step_output_error()
+    output_json = step.get("output_json") if isinstance(step.get("output_json"), dict) else {}
+    if step.get("step_name") != "daily_report" or output_json.get("command") != "weibo-daily-report":
+        return unsupported_step_output_error()
+    output = {
+        "summary": safe_review_text(output_json.get("summary")),
+        "evidence_ids": normalize_report_backtest_evidence_ids(step.get("evidence_ids") or output_json.get("evidenceIds")),
+        "_allowed_evidence_prefixes": ["target", "post", "comment", "analysis", "event", "action", "memory"],
+        "_unsupported_evidence_error_type": "unsupported_daily_report_evidence_prefix",
+        "_unsupported_evidence_required_change": "Use only target, post, comment, analysis, event, action, or memory evidence IDs for daily report Judge reviews.",
+        "_unsupported_evidence_message": "This step output can only use project evidence IDs for daily report reviews.",
+        "command": "weibo-daily-report",
+        "coverage": safe_review_dict(output_json.get("coverage")),
+    }
+    report_date = safe_review_text(output_json.get("reportDate"))
+    if report_date:
+        output["reportDate"] = report_date
+    return {"ok": True, "output": {key: value for key, value in output.items() if value not in (None, [], {})}}
+
+
+def map_action_backtest_step_output(step):
+    if not isinstance(step, dict):
+        return unsupported_step_output_error()
+    output_json = step.get("output_json") if isinstance(step.get("output_json"), dict) else {}
+    if step.get("step_name") != "action_backtest" or output_json.get("command") != "weibo-action-backtest":
+        return unsupported_step_output_error()
+    output = {
+        "summary": safe_review_text(output_json.get("summary")),
+        "evidence_ids": normalize_report_backtest_evidence_ids(step.get("evidence_ids") or output_json.get("evidenceIds")),
+        "_allowed_evidence_prefixes": ["target", "post", "comment", "analysis", "event", "action", "memory"],
+        "_unsupported_evidence_error_type": "unsupported_action_backtest_evidence_prefix",
+        "_unsupported_evidence_required_change": "Use only target, post, comment, analysis, event, action, or memory evidence IDs for action backtest Judge reviews.",
+        "_unsupported_evidence_message": "This step output can only use project evidence IDs for action backtest reviews.",
+        "command": "weibo-action-backtest",
+    }
+    for key in ("result", "missingDataReason", "nextRecommendation", "modelProvidedMetric", "model_provided_metric", "modelOwnedMetric", "model_owned_metric", "observed_signal"):
+        text = safe_review_text(output_json.get(key))
+        if text:
+            output[key] = text
+    confounders = safe_string_list(output_json.get("confounders"))
+    if confounders:
+        output["confounders"] = confounders
+    return {"ok": True, "output": {key: value for key, value in output.items() if value not in (None, [], {})}}
 
 
 def map_comment_analysis_step_output(step):
@@ -692,9 +748,85 @@ def safe_string_list(values):
         if value is None:
             continue
         text = str(value).strip()
-        if text:
+        if text and not unsafe_review_text(text):
             prepared.append(text)
     return prepared
+
+
+def safe_review_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or unsafe_review_text(text):
+        return None
+    return text
+
+
+def safe_review_dict(value):
+    if not isinstance(value, dict):
+        return {}
+    safe = {}
+    for key, item in value.items():
+        text_key = safe_review_text(key)
+        if not text_key:
+            continue
+        if isinstance(item, bool):
+            safe[text_key] = item
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            safe[text_key] = item
+        elif isinstance(item, str):
+            text = safe_review_text(item)
+            if text:
+                safe[text_key] = text
+    return safe
+
+
+def unsafe_review_text(value):
+    text = str(value or "")
+    lowered = text.lower()
+    compact = re.sub(r"[^a-z0-9]", "", lowered)
+    markers = (
+        ".env",
+        "../",
+        "/tmp/",
+        "/users/",
+        "api_key",
+        "authorization",
+        "bearer ",
+        "config/cookies",
+        "cookie",
+        "database_url",
+        "db_url",
+        "mysql://",
+        "password",
+        "raw-stdout",
+        "raw_stderr",
+        "raw_stdout",
+        "secret",
+        "stderr",
+        "stdout",
+        "token",
+        "weibo.json",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+    if re.search(r"(^|[\s=:\"'(\[])(/[^ \t\r\n\"')\]]{2,}|[A-Za-z]:\\[^ \t\r\n\"')\]]+)", text):
+        return True
+    return "raw" in compact and ("stdout" in compact or "stderr" in compact)
+
+
+def normalize_report_backtest_evidence_ids(values):
+    normalized = []
+    for value in safe_string_list(values):
+        text = str(value).strip()
+        if ":" in text:
+            prefix, suffix = text.split(":", 1)
+            if suffix.isdigit() and not suffix.startswith("0"):
+                if prefix == "sentiment":
+                    prefix = "analysis"
+                text = f"{prefix}-{suffix}"
+        normalized.append(text)
+    return normalized
 
 
 def safe_knowledge_reference_list(values):
@@ -803,13 +935,72 @@ def remap_step_unsupported_prefix_errors(evidence_errors, output):
     return remapped
 
 
+REPORT_BACKTEST_MODEL_METRIC_KEYS = {
+    "modelprovidedmetric",
+    "modelownedmetric",
+    "observedsignal",
+}
+
+
+def apply_report_backtest_metric_boundary(review, output):
+    if not isinstance(output, dict):
+        return review
+    errors = []
+    for path, key, value in iter_output_key_values(output):
+        if normalize_review_key(key) in REPORT_BACKTEST_MODEL_METRIC_KEYS and value not in (None, "", [], {}):
+            errors.append({
+                "error_type": "deterministic_metric_overclaim",
+                "path": f"output.{path}",
+                "message": "Report/backtest output must not present model-owned metric fields as deterministic authority.",
+            })
+    if not errors:
+        return review
+    prepared = dict(review)
+    evidence_errors = list(prepared.get("evidence_errors") or [])
+    evidence_errors.extend(errors)
+    required_changes = list(prepared.get("required_changes") or [])
+    required_changes.append(
+        "deterministic_metric_overclaim: Remove model-owned metric authority and cite deterministic calculations or existing records."
+    )
+    feedback_json = dict(prepared.get("feedback_json") or {})
+    boundary_checks = list(feedback_json.get("boundary_checks") or [])
+    boundary_checks.append("deterministic_metric_overclaim")
+    feedback_json["boundary_checks"] = unique_strings(boundary_checks)
+    prepared["feedback_json"] = feedback_json
+    prepared["evidence_errors"] = evidence_errors
+    prepared["required_changes"] = unique_strings(required_changes)
+    prepared["passed"] = False
+    prepared["status"] = "failed"
+    if int(prepared.get("retry_count") or 0) >= 2:
+        prepared["status"] = "needs_human"
+    return prepared
+
+
+def iter_output_key_values(value, path=""):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            child_path = f"{path}.{key_text}" if path else key_text
+            yield child_path, key_text, item
+            yield from iter_output_key_values(item, child_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            child_path = f"{path}[{index}]" if path else f"[{index}]"
+            yield from iter_output_key_values(item, child_path)
+
+
+def normalize_review_key(key):
+    return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+
 def summarize_failed_output(output):
     if not isinstance(output, dict):
         return {}
     summary = {}
     summary_text = output.get("summary")
-    if isinstance(summary_text, str) and summary_text.strip():
-        summary["summary"] = summary_text.strip()
+    summary_text = safe_review_text(summary_text)
+    if summary_text:
+        summary["summary"] = summary_text
     evidence_ids = safe_string_list(output.get("evidence_ids") if "evidence_ids" in output else output.get("evidenceIds"))
     if evidence_ids:
         summary["evidence_ids"] = evidence_ids

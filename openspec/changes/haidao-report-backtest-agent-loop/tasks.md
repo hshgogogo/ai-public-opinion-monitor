@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add FastAPI contract red tests for `POST /api/weibo/agent-runs/{run_id}/reports/daily`, covering success, MySQL unavailable, invalid run ID, and dangerous caller-controlled fields.
 - [x] 1.2 Add FastAPI contract red tests for `POST /api/weibo/agent-runs/{run_id}/actions/{action_id}/backtests`, covering success, `unknown`, cross-project action rejection, MySQL unavailable, and dangerous caller-controlled fields.
-- [ ] 1.3 Add Judge/service red tests proving report/backtest outputs with missing evidence, model-owned metrics, or causal overclaims are rejected with required changes and redacted failed-output summaries.
+- [x] 1.3 Add Judge/service red tests proving report/backtest outputs with missing evidence, model-owned metrics, or causal overclaims are rejected with required changes and redacted failed-output summaries.
 
 ## 2. Harness Service Implementation
 

@@ -147,6 +147,41 @@ class MySQLEvidenceRepository:
         return existing
 
 
+class MySQLAgentStepRepository:
+    def record_step(self, step):
+        from workers import enterprise_worker as worker
+
+        row = worker.record_agent_step_run(
+            loop_run_id=step.get("run_id"),
+            project_id=step.get("project_id"),
+            agent_name=step.get("agent_name"),
+            step_name=step.get("step_name"),
+            status=step.get("status") or "running",
+            input_json=step.get("input_json"),
+            output_json=step.get("output_json"),
+            evidence_ids=step.get("evidence_ids") or [],
+        )
+        return {"id": row.get("id")}
+
+    def update_step_status(self, step_run_id, status, error_type=None, error_message=None):
+        from workers import db
+
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE agent_step_runs
+                    SET status=%s,
+                        error_type=%s,
+                        error_message=%s,
+                        finished_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (status, error_type, error_message, step_run_id),
+                )
+        return {"id": step_run_id}
+
+
 class DeterministicReportBacktestAdapter:
     def __init__(self, worker_module=None):
         self.worker_module = worker_module
@@ -198,11 +233,27 @@ class DeterministicReportBacktestAdapter:
 
 
 class ReportBacktestAgentService:
-    def __init__(self, runtime_adapter=None, run_repository=None, action_repository=None, evidence_repository=None):
+    def __init__(
+        self,
+        runtime_adapter=None,
+        run_repository=None,
+        action_repository=None,
+        evidence_repository=None,
+        step_repository=None,
+        judge_review_service=None,
+    ):
         self.runtime_adapter = runtime_adapter or DeterministicReportBacktestAdapter()
         self.run_repository = run_repository or MySQLAgentRunRepository()
         self.action_repository = action_repository or MySQLActionRepository()
         self.evidence_repository = evidence_repository or MySQLEvidenceRepository()
+        self.step_repository = step_repository
+        if self.step_repository is None and os.environ.get("MYSQL_URL"):
+            self.step_repository = MySQLAgentStepRepository()
+        if judge_review_service is None:
+            from app.judge_review_service import JudgeReviewService
+
+            judge_review_service = JudgeReviewService()
+        self.judge_review_service = judge_review_service
 
     def is_mysql_available(self):
         try:
@@ -235,7 +286,7 @@ class ReportBacktestAgentService:
             result = self.runtime_adapter.run_daily_report(request)
         except Exception:
             return report_backtest_runtime_failed_error("daily report")
-        return daily_report_public_response(result, request)
+        return daily_report_public_response(self.review_and_record_step("daily_report", result, request), request)
 
     def create_action_backtest(self, run_id, action_id, payload):
         validation_error = validate_action_backtest_payload(payload)
@@ -264,7 +315,291 @@ class ReportBacktestAgentService:
             result = self.runtime_adapter.run_action_backtest(request)
         except Exception:
             return report_backtest_runtime_failed_error("action backtest")
-        return action_backtest_public_response(result, request)
+        return action_backtest_public_response(self.review_and_record_step("action_backtest", result, request), request)
+
+    def review_and_record_step(self, step_name, result, request):
+        if not isinstance(result, dict) or result.get("ok") is False:
+            return result
+
+        step_output = report_backtest_step_output(step_name, result, request)
+        step_status = report_backtest_step_status(step_name, result)
+        step_run_id = record_report_backtest_step(self.step_repository, step_name, request, step_output, step_status)
+        review_result = create_report_backtest_judge_review(
+            self.judge_review_service,
+            request,
+            step_run_id,
+            judge_report_backtest_step_output(step_name, step_output),
+        )
+        public_review = judge_review_public_payload(review_result)
+        reviewed = dict(result)
+        if public_review:
+            reviewed["judgeReview"] = public_review
+            reviewed["judgeReviewStatus"] = public_review["status"]
+            reviewed["status"] = public_status_from_judge(step_status, public_review["status"])
+            update_report_backtest_step_status(
+                self.step_repository,
+                step_run_id,
+                reviewed["status"],
+                public_review["status"],
+            )
+        return reviewed
+
+
+def record_report_backtest_step(step_repository, step_name, request, output_json, status):
+    if step_repository is None or not hasattr(step_repository, "record_step"):
+        return None
+    step = {
+        "run_id": request.get("agent_loop_run_id"),
+        "project_id": request.get("project_id"),
+        "agent_name": "Report Agent" if step_name == "daily_report" else "Backtest Agent",
+        "step_name": step_name,
+        "status": status,
+        "input_json": report_backtest_step_input(step_name, request),
+        "output_summary": output_json.get("summary"),
+        "output_json": output_json,
+        "evidence_ids": safe_evidence_ids(output_json.get("evidenceIds")),
+        "business_refs": report_backtest_business_refs(step_name, request, output_json),
+    }
+    recorded = step_repository.record_step(step)
+    if isinstance(recorded, dict):
+        return positive_integer(recorded.get("id")) or positive_integer(recorded.get("stepRunId"))
+    return positive_integer(recorded)
+
+
+def update_report_backtest_step_status(step_repository, step_run_id, public_status, judge_status):
+    if step_run_id is None or step_repository is None or not hasattr(step_repository, "update_step_status"):
+        return
+    error_type = None
+    error_message = None
+    if judge_status == "failed":
+        error_type = "judge_review_failed"
+        error_message = "Judge review rejected the Report/Backtest Agent output."
+    elif judge_status == "needs_human":
+        error_type = "judge_review_needs_human"
+        error_message = "Judge review requires human handling."
+    elif judge_status == "retry-exhausted":
+        error_type = "judge_retry_exhausted"
+        error_message = "Judge retry exhausted and needs human handling."
+    step_repository.update_step_status(step_run_id, public_status, error_type=error_type, error_message=error_message)
+
+
+def create_report_backtest_judge_review(judge_review_service, request, step_run_id, output):
+    if step_run_id is None or judge_review_service is None or not hasattr(judge_review_service, "create_review"):
+        return None
+    try:
+        return judge_review_service.create_review(request.get("agent_loop_run_id"), {
+            "projectId": request.get("project_id"),
+            "stepRunId": step_run_id,
+            "maxAttempts": 3,
+            "fixtureOutputs": [{"output": output}],
+        })
+    except Exception:
+        return {
+            "ok": True,
+            "review": {
+                "status": "failed",
+                "passed": False,
+                "retry_count": 0,
+                "required_changes": ["Judge review failed before accepting this output."],
+                "evidence_errors": [{"error_type": "judge_review_failed"}],
+                "feedback_json": {},
+            },
+        }
+
+
+def report_backtest_step_input(step_name, request):
+    payload = {
+        "project_id": request.get("project_id"),
+        "agent_loop_run_id": request.get("agent_loop_run_id"),
+        "evidence_ids": list(request.get("evidence_ids") or []),
+    }
+    if step_name == "daily_report":
+        payload["report_date"] = request.get("report_date")
+    else:
+        payload["action_id"] = request.get("action_id")
+    return payload
+
+
+def report_backtest_business_refs(step_name, request, output_json):
+    if step_name == "daily_report":
+        refs = {"report_date": output_json.get("reportDate") or request.get("report_date")}
+        report_id = positive_integer(output_json.get("reportId"))
+        if report_id is not None:
+            refs["report_id"] = report_id
+        return {key: value for key, value in refs.items() if value is not None}
+    refs = {"action_id": request.get("action_id")}
+    backtest_id = positive_integer(output_json.get("backtestId"))
+    if backtest_id is not None:
+        refs["backtest_id"] = backtest_id
+    return {key: value for key, value in refs.items() if value is not None}
+
+
+def report_backtest_step_status(step_name, result):
+    if step_name == "action_backtest":
+        detail = result.get("backtest") if isinstance(result.get("backtest"), dict) else result
+        backtest_result = safe_backtest_result(detail.get("result") or result.get("result"))
+        return safe_backtest_status(result.get("status"), detail.get("result") or result.get("result"), backtest_result)
+    return safe_status(result.get("status") or "succeeded")
+
+
+def report_backtest_step_output(step_name, result, request):
+    detail_key = "report" if step_name == "daily_report" else "backtest"
+    detail = result.get(detail_key) if isinstance(result.get(detail_key), dict) else result
+    output = {
+        "command": "weibo-daily-report" if step_name == "daily_report" else "weibo-action-backtest",
+        "summary": safe_text(detail.get("summary") or result.get("summary")),
+        "evidenceIds": first_evidence_ids(result, detail, request),
+    }
+    if step_name == "daily_report":
+        output["coverage"] = safe_coverage(detail.get("coverage") or detail.get("dataCoverage") or result.get("coverage"))
+        report_date = safe_text(detail.get("reportDate") or result.get("reportDate") or request.get("report_date"))
+        if report_date:
+            output["reportDate"] = report_date
+        report_id = positive_integer(detail.get("id") or detail.get("reportId") or result.get("reportId"))
+        if report_id is not None:
+            output["reportId"] = report_id
+        return {key: value for key, value in output.items() if value not in (None, [], {})}
+
+    raw_result = detail.get("result") or result.get("result")
+    output["result"] = safe_backtest_result(raw_result)
+    next_recommendation = safe_text(
+        detail.get("nextRecommendation")
+        or detail.get("next_recommendation")
+        or result.get("nextRecommendation")
+        or result.get("next_recommendation")
+    )
+    if next_recommendation:
+        output["nextRecommendation"] = next_recommendation
+    missing_reason = safe_text(
+        detail.get("missingDataReason")
+        or detail.get("missing_data_reason")
+        or result.get("missingDataReason")
+        or result.get("missing_data_reason")
+    )
+    if missing_reason:
+        output["missingDataReason"] = missing_reason
+    confounders = safe_string_list(detail.get("confounders") or result.get("confounders"))
+    if confounders:
+        output["confounders"] = confounders
+    backtest_id = positive_integer(detail.get("id") or detail.get("backtestId") or result.get("backtestId"))
+    if backtest_id is not None:
+        output["backtestId"] = backtest_id
+    add_model_owned_metric_fields(output, result, detail)
+    return {key: value for key, value in output.items() if value not in (None, [], {})}
+
+
+def add_model_owned_metric_fields(output, result, detail):
+    for key in ("modelProvidedMetric", "model_provided_metric", "modelOwnedMetric", "model_owned_metric", "observed_signal"):
+        value = detail.get(key) if isinstance(detail, dict) and key in detail else result.get(key)
+        text = safe_text(value)
+        if text:
+            output[key] = text
+
+
+def judge_report_backtest_step_output(step_name, output_json):
+    output = dict(output_json)
+    output["evidence_ids"] = judge_evidence_ids_from_public(output.get("evidenceIds"))
+    output.pop("evidenceIds", None)
+    if step_name == "daily_report":
+        output["_allowed_evidence_prefixes"] = ["target", "post", "comment", "analysis", "event", "action", "memory"]
+        output["_unsupported_evidence_error_type"] = "unsupported_daily_report_evidence_prefix"
+    else:
+        output["_allowed_evidence_prefixes"] = ["target", "post", "comment", "analysis", "event", "action", "memory"]
+        output["_unsupported_evidence_error_type"] = "unsupported_action_backtest_evidence_prefix"
+    return output
+
+
+def judge_evidence_ids_from_public(evidence_ids):
+    prepared = []
+    for evidence_id in safe_evidence_ids(evidence_ids):
+        parsed = parse_evidence_id(evidence_id)
+        if parsed is None:
+            continue
+        kind = "analysis" if parsed["kind"] == "sentiment" else parsed["kind"]
+        prepared.append(f"{kind}-{parsed['id']}")
+    return prepared
+
+
+def judge_review_public_payload(review_result):
+    if not isinstance(review_result, dict) or not review_result.get("ok", True):
+        return None
+    review = review_result.get("review") if isinstance(review_result.get("review"), dict) else review_result
+    if not isinstance(review, dict):
+        return None
+    status = safe_judge_review_status(review.get("status"))
+    payload = {
+        "status": status,
+        "passed": review.get("passed") if isinstance(review.get("passed"), bool) else status == "passed",
+        "retryCount": integer_or_zero(review.get("retry_count") if "retry_count" in review else review_result.get("retryCount")),
+        "requiredChanges": safe_string_list(review.get("required_changes") or review.get("requiredChanges")),
+        "evidenceErrors": safe_evidence_errors(review.get("evidence_errors") or review.get("evidenceErrors")),
+    }
+    review_id = safe_text(review.get("id"))
+    if review_id:
+        payload["id"] = review_id
+    feedback_json = review.get("feedback_json") if isinstance(review.get("feedback_json"), dict) else {}
+    failed_summary = safe_failed_output_summary(
+        feedback_json.get("failed_output_summary")
+        or review.get("failedOutputSummary")
+        or review.get("failed_output_summary")
+    )
+    if failed_summary:
+        payload["failedOutputSummary"] = failed_summary
+    return payload
+
+
+def safe_judge_review_status(value):
+    text = safe_text(value)
+    if text in {"passed", "failed", "needs_human", "retry-exhausted", "retry_exhausted"}:
+        return "retry-exhausted" if text == "retry_exhausted" else text
+    return "pending"
+
+
+def public_status_from_judge(step_status, judge_status):
+    if judge_status == "passed":
+        return step_status
+    if judge_status == "failed":
+        return "failed"
+    if judge_status in {"needs_human", "retry-exhausted"}:
+        return "needs_human"
+    return step_status
+
+
+def safe_evidence_errors(values):
+    if not isinstance(values, list):
+        return []
+    errors = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        item = {}
+        for key in ("error_type", "evidence_id", "message", "path"):
+            text = safe_text(value.get(key))
+            if text:
+                item[key] = text
+        if item:
+            errors.append(item)
+    return errors
+
+
+def safe_failed_output_summary(value):
+    if not isinstance(value, dict):
+        return {}
+    summary = {}
+    text = safe_text(value.get("summary"))
+    if text:
+        summary["summary"] = text
+    evidence_ids = safe_string_list(value.get("evidence_ids") or value.get("evidenceIds"))
+    if evidence_ids:
+        summary["evidence_ids"] = evidence_ids
+    return summary
+
+
+def integer_or_zero(value):
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
 
 
 EVIDENCE_TABLES = {
@@ -357,7 +692,7 @@ def daily_report_public_response(result, request_payload=None):
     if report_date:
         response_report["reportDate"] = report_date
     evidence_ids = first_evidence_ids(result, report, request_payload)
-    return {
+    response = {
         "ok": True,
         "agentLoopRunId": safe_public_id(result.get("agentLoopRunId"), request_payload.get("agent_loop_run_id")),
         "step": "daily_report",
@@ -366,6 +701,10 @@ def daily_report_public_response(result, request_payload=None):
         "evidenceIds": evidence_ids,
         "judgeReviewStatus": safe_text(result.get("judgeReviewStatus") or report.get("judgeReviewStatus") or "pending") or "pending",
     }
+    judge_review = judge_review_public_payload(result.get("judgeReview") or report.get("judgeReview"))
+    if judge_review:
+        response["judgeReview"] = judge_review
+    return response
 
 
 def action_backtest_public_response(result, request_payload=None):
@@ -400,7 +739,7 @@ def action_backtest_public_response(result, request_payload=None):
 
     evidence_ids = first_evidence_ids(result, backtest, request_payload)
     status = safe_backtest_status(result.get("status"), raw_backtest_result, backtest_result)
-    return {
+    response = {
         "ok": True,
         "agentLoopRunId": safe_public_id(result.get("agentLoopRunId"), request_payload.get("agent_loop_run_id")),
         "step": "action_backtest",
@@ -409,6 +748,10 @@ def action_backtest_public_response(result, request_payload=None):
         "evidenceIds": evidence_ids,
         "judgeReviewStatus": safe_text(result.get("judgeReviewStatus") or backtest.get("judgeReviewStatus") or "pending") or "pending",
     }
+    judge_review = judge_review_public_payload(result.get("judgeReview") or backtest.get("judgeReview"))
+    if judge_review:
+        response["judgeReview"] = judge_review
+    return response
 
 
 def public_error_response(error):

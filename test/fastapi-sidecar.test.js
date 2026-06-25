@@ -1510,6 +1510,301 @@ for forbidden in ["stdout", "stderr", "rawArtifact", "internalPayload", "databas
 `);
 });
 
+test("ReportBacktestAgentService records report/backtest step audits and exposes Judge status", () => {
+  runPython(`
+from app.report_backtest_agent_service import ReportBacktestAgentService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+class ActionRepository:
+    def has_action(self, action_id, project_id):
+        return (action_id, project_id) in {(55, 2), (56, 2), (57, 2), (58, 2)}
+
+class EvidenceRepository:
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        return {"comment:123", "event:7", "sentiment:4", "action:55", "action:56", "action:57", "action:58"}.intersection(evidence_ids)
+
+class RecordingStepRepository:
+    def __init__(self):
+        self.records = []
+        self.updates = []
+
+    def record_step(self, step):
+        prepared = dict(step)
+        prepared["id"] = 100 + len(self.records) + 1
+        self.records.append(prepared)
+        return {"id": prepared["id"]}
+
+    def update_step_status(self, step_run_id, status, error_type=None, error_message=None):
+        self.updates.append({
+            "step_run_id": step_run_id,
+            "status": status,
+            "error_type": error_type,
+            "error_message": error_message,
+        })
+
+class RuntimeAdapter:
+    def run_daily_report(self, request):
+        return {
+            "ok": True,
+            "summary": "Scoped daily report cites comment:123 and event:7.",
+            "coverage": {"comments": 1, "events": 1, "actions": 0, "backtests": 0},
+            "evidenceIds": list(request["evidence_ids"]),
+            "report": {"id": 801},
+        }
+
+    def run_action_backtest(self, request):
+        if request["action_id"] == 56:
+            return {
+                "ok": True,
+                "result": "unknown",
+                "summary": "Action timing is missing.",
+                "missingDataReason": "missing_effective_at",
+                "nextRecommendation": "Collect scoped post-action windows.",
+                "evidenceIds": list(request["evidence_ids"]),
+            }
+        return {
+            "ok": True,
+            "result": "no_signal",
+            "summary": "No deterministic signal; keep monitoring.",
+            "nextRecommendation": "Use comment:123 as a bounded signal.",
+            "confounders": ["external event"],
+            "evidenceIds": list(request["evidence_ids"]),
+            "backtest": {"id": 900 + request["action_id"]},
+        }
+
+class JudgeReviewService:
+    def __init__(self):
+        self.calls = []
+
+    def create_review(self, run_id, payload):
+        self.calls.append((run_id, payload))
+        step_run_id = payload["stepRunId"]
+        if step_run_id == 103:
+            status = "needs_human"
+            passed = False
+        elif step_run_id == 104:
+            status = "retry-exhausted"
+            passed = False
+        else:
+            status = "passed"
+            passed = True
+        return {
+            "ok": True,
+            "review": {
+                "id": f"judge-{step_run_id}",
+                "status": status,
+                "passed": passed,
+                "retry_count": 2 if status == "retry-exhausted" else 0,
+                "required_changes": [] if passed else ["human review required"],
+                "evidence_errors": [] if passed else [{"error_type": "manual_review_required"}],
+                "feedback_json": {"failed_output_summary": {"summary": "bounded"}},
+            },
+            "retryCount": 2 if status == "retry-exhausted" else 0,
+            "stepRunId": step_run_id,
+        }
+
+steps = RecordingStepRepository()
+judge = JudgeReviewService()
+service = ReportBacktestAgentService(
+    runtime_adapter=RuntimeAdapter(),
+    run_repository=RunRepository(),
+    action_repository=ActionRepository(),
+    evidence_repository=EvidenceRepository(),
+    step_repository=steps,
+    judge_review_service=judge,
+)
+
+report = service.create_daily_report(10, {
+    "projectId": 2,
+    "reportDate": "2026-06-25",
+    "evidenceIds": ["comment:123", "event:7", "sentiment:4"],
+})
+assert report["ok"] is True, report
+assert report["status"] == "succeeded", report
+assert report["judgeReviewStatus"] == "passed", report
+assert report["judgeReview"]["status"] == "passed", report
+
+unknown = service.create_action_backtest(10, 56, {
+    "projectId": 2,
+    "evidenceIds": ["action:56"],
+})
+assert unknown["ok"] is True, unknown
+assert unknown["status"] == "partial", unknown
+assert unknown["backtest"]["result"] == "unknown", unknown
+assert unknown["judgeReviewStatus"] == "passed", unknown
+
+needs_human = service.create_action_backtest(10, 57, {
+    "projectId": 2,
+    "evidenceIds": ["action:57", "comment:123"],
+})
+assert needs_human["status"] == "needs_human", needs_human
+assert needs_human["judgeReviewStatus"] == "needs_human", needs_human
+
+retry_exhausted = service.create_action_backtest(10, 58, {
+    "projectId": 2,
+    "evidenceIds": ["action:58", "comment:123"],
+})
+assert retry_exhausted["status"] == "needs_human", retry_exhausted
+assert retry_exhausted["judgeReviewStatus"] == "retry-exhausted", retry_exhausted
+
+assert [record["step_name"] for record in steps.records] == [
+    "daily_report",
+    "action_backtest",
+    "action_backtest",
+    "action_backtest",
+], steps.records
+first = steps.records[0]
+assert first["run_id"] == 10, first
+assert first["project_id"] == 2, first
+assert first["status"] == "succeeded", first
+assert first["output_summary"] == "Scoped daily report cites comment:123 and event:7.", first
+assert first["output_json"]["coverage"]["comments"] == 1, first
+assert first["evidence_ids"] == ["comment:123", "event:7", "sentiment:4"], first
+assert first["business_refs"] == {"report_date": "2026-06-25", "report_id": 801}, first
+
+unknown_record = steps.records[1]
+assert unknown_record["status"] == "partial", unknown_record
+assert unknown_record["business_refs"] == {"action_id": 56}, unknown_record
+assert unknown_record["output_json"]["result"] == "unknown", unknown_record
+
+assert steps.updates == [
+    {"step_run_id": 101, "status": "succeeded", "error_type": None, "error_message": None},
+    {"step_run_id": 102, "status": "partial", "error_type": None, "error_message": None},
+    {"step_run_id": 103, "status": "needs_human", "error_type": "judge_review_needs_human", "error_message": "Judge review requires human handling."},
+    {"step_run_id": 104, "status": "needs_human", "error_type": "judge_retry_exhausted", "error_message": "Judge retry exhausted and needs human handling."},
+], steps.updates
+
+assert judge.calls[0][1]["fixtureOutputs"][0]["output"]["evidence_ids"] == ["comment-123", "event-7", "analysis-4"], judge.calls
+assert judge.calls[1][1]["fixtureOutputs"][0]["output"]["result"] == "unknown", judge.calls
+assert judge.calls[1][1]["fixtureOutputs"][0]["output"]["evidence_ids"] == ["action-56"], judge.calls
+`);
+});
+
+test("ReportBacktestAgentService rejects unsafe report/backtest outputs through Judge with redacted summaries", () => {
+  runPython(`
+import json
+from app.judge_review_service import JudgeReviewService
+from app.report_backtest_agent_service import ReportBacktestAgentService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return True
+
+class ActionRepository:
+    def has_action(self, action_id, project_id):
+        return True
+
+class EvidenceRepository:
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        return {"comment:123", "action:55", "comment-123", "action-55"}.intersection(evidence_ids)
+
+class StepRepository:
+    def __init__(self):
+        self.records = []
+        self.updates = []
+
+    def record_step(self, step):
+        prepared = dict(step)
+        prepared["id"] = len(self.records) + 201
+        self.records.append(prepared)
+        return {"id": prepared["id"]}
+
+    def update_step_status(self, step_run_id, status, error_type=None, error_message=None):
+        self.updates.append((step_run_id, status, error_type, error_message))
+
+class SourceRepository:
+    def has_sources(self, run_id, project_id, proposal_audit_id=None, step_run_id=None):
+        return True
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append({"review": persisted, "output": output})
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        return {"feedback": {"id": 1}}
+
+class RuntimeAdapter:
+    def run_daily_report(self, request):
+        return {
+            "ok": True,
+            "summary": "Report draft has no citations and mentions /tmp/raw_stdout_report.json token=secret password=hunter2.",
+            "coverage": {"comments": 0, "events": 0, "actions": 0, "backtests": 0},
+            "evidenceIds": [],
+        }
+
+    def run_action_backtest(self, request):
+        return {
+            "ok": True,
+            "result": "no_signal",
+            "summary": "This action directly caused negative comments to fall; backtest signal: observed_signal.",
+            "nextRecommendation": "Open /tmp/raw_stdout_backtest.json with token=secret.",
+            "confounders": [],
+            "evidenceIds": list(request["evidence_ids"]),
+            "modelProvidedMetric": "observed_signal",
+        }
+
+review_repository = ReviewRepository()
+service = ReportBacktestAgentService(
+    runtime_adapter=RuntimeAdapter(),
+    run_repository=RunRepository(),
+    action_repository=ActionRepository(),
+    evidence_repository=EvidenceRepository(),
+    step_repository=StepRepository(),
+    judge_review_service=JudgeReviewService(
+        run_repository=RunRepository(),
+        source_repository=SourceRepository(),
+        review_repository=review_repository,
+        evidence_repository=EvidenceRepository(),
+    ),
+)
+
+missing_evidence = service.create_daily_report(10, {"projectId": 2})
+assert missing_evidence["ok"] is True, missing_evidence
+assert missing_evidence["status"] == "failed", missing_evidence
+assert missing_evidence["judgeReviewStatus"] == "failed", missing_evidence
+assert any(item["error_type"] == "missing_evidence_ids" for item in missing_evidence["judgeReview"]["evidenceErrors"]), missing_evidence
+assert missing_evidence["judgeReview"]["requiredChanges"], missing_evidence
+
+unsafe_backtest = service.create_action_backtest(10, 55, {
+    "projectId": 2,
+    "evidenceIds": ["action:55", "comment:123"],
+})
+assert unsafe_backtest["ok"] is True, unsafe_backtest
+assert unsafe_backtest["status"] == "failed", unsafe_backtest
+assert unsafe_backtest["judgeReviewStatus"] == "failed", unsafe_backtest
+error_types = {item["error_type"] for item in unsafe_backtest["judgeReview"]["evidenceErrors"]}
+assert "deterministic_metric_overclaim" in error_types, unsafe_backtest
+assert "single_cause_overclaim" in error_types, unsafe_backtest
+assert any("deterministic_metric_overclaim" in item for item in unsafe_backtest["judgeReview"]["requiredChanges"]), unsafe_backtest
+assert any("single_cause_overclaim" in item for item in unsafe_backtest["judgeReview"]["requiredChanges"]), unsafe_backtest
+
+serialized_public = json.dumps([missing_evidence, unsafe_backtest], ensure_ascii=False).lower()
+serialized_reviews = json.dumps([record["review"]["feedback_json"] for record in review_repository.records], ensure_ascii=False).lower()
+for forbidden in [
+    "/tmp/raw_stdout_report.json",
+    "/tmp/raw_stdout_backtest.json",
+    "token=secret",
+    "password=hunter2",
+    "raw_stdout",
+    "stdout",
+]:
+    assert forbidden not in serialized_public, serialized_public
+    assert forbidden not in serialized_reviews, serialized_reviews
+
+failed_summaries = [record["review"]["feedback_json"]["failed_output_summary"] for record in review_repository.records]
+assert all("summary" not in item or item["summary"] for item in failed_summaries), failed_summaries
+assert review_repository.records[1]["output"]["modelProvidedMetric"] == "observed_signal", review_repository.records[1]
+`);
+});
+
 test("DeterministicReportBacktestAdapter reuses allowlisted enterprise worker helpers with service-owned inputs", () => {
   runPython(`
 from app.report_backtest_agent_service import DeterministicReportBacktestAdapter
@@ -1978,6 +2273,128 @@ wrong_command = JudgeReviewService(
 })
 assert wrong_command["ok"] is False, wrong_command
 assert wrong_command["error_type"] == "judge_review_source_not_found", wrong_command
+`);
+});
+
+test("JudgeReviewService maps report/backtest persisted step evidence into Rule Judge input", () => {
+  runPython(`
+from app.judge_review_service import JudgeReviewService
+
+class RunRepository:
+    def has_run(self, run_id, project_id):
+        return run_id == 10 and project_id == 2
+
+class SourceRepository:
+    def __init__(self, step_name="daily_report", command="weibo-daily-report", evidence_ids=None):
+        self.calls = []
+        self.output_calls = []
+        self.step_name = step_name
+        self.command = command
+        self.evidence_ids = evidence_ids if evidence_ids is not None else ["sentiment:4", "comment:123"]
+
+    def has_sources(self, run_id, project_id, proposal_audit_id=None, step_run_id=None):
+        self.calls.append((run_id, project_id, proposal_audit_id, step_run_id))
+        return run_id == 10 and project_id == 2 and proposal_audit_id is None and step_run_id == 64
+
+    def step_output_for_review(self, run_id, project_id, step_run_id):
+        self.output_calls.append((run_id, project_id, step_run_id))
+        output = {
+            "command": self.command,
+            "summary": "Report cites scoped sentiment and comment evidence.",
+            "coverage": {"comments": 1, "events": 0, "actions": 0, "backtests": 0},
+            "evidenceIds": ["sentiment:4", "comment:123"],
+        }
+        if self.step_name == "action_backtest":
+            output = {
+                "command": self.command,
+                "summary": "Backtest cites scoped sentiment and action evidence.",
+                "result": "no_signal",
+                "evidenceIds": ["sentiment:4", "action:55"],
+            }
+        return {
+            "ok": True,
+            "step": {
+                "id": step_run_id,
+                "step_name": self.step_name,
+                "status": "succeeded",
+                "output_json": output,
+                "evidence_ids": self.evidence_ids,
+            },
+        }
+
+class EvidenceRepository:
+    def __init__(self):
+        self.calls = []
+
+    def existing_evidence_ids(self, project_id, evidence_ids):
+        self.calls.append((project_id, list(evidence_ids)))
+        return {"analysis-4", "comment-123", "action-55"}.intersection(evidence_ids)
+
+    def existing_knowledge_card_ids(self, project_id, knowledge_ids):
+        return set()
+
+class ReviewRepository:
+    def __init__(self):
+        self.records = []
+
+    def record_review(self, run_id, project_id, proposal_audit_id, step_run_id, review, output):
+        persisted = {**review, "id": len(self.records) + 1}
+        self.records.append({
+            "proposal_audit_id": proposal_audit_id,
+            "step_run_id": step_run_id,
+            "review": persisted,
+            "output": output,
+        })
+        return persisted
+
+    def mark_needs_human(self, run_id, project_id, step_run_id, review):
+        raise AssertionError("report/backtest step-output review should not create handoff")
+
+source_repository = SourceRepository()
+review_repository = ReviewRepository()
+evidence_repository = EvidenceRepository()
+service = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=source_repository,
+    review_repository=review_repository,
+    evidence_repository=evidence_repository,
+)
+
+accepted = service.create_review(10, {
+    "projectId": 2,
+    "stepRunId": 64,
+    "maxAttempts": 3,
+})
+assert accepted["ok"] is True, accepted
+assert accepted["review"]["status"] == "passed", accepted
+assert source_repository.calls == [(10, 2, None, 64)], source_repository.calls
+assert source_repository.output_calls == [(10, 2, 64)], source_repository.output_calls
+assert evidence_repository.calls == [(2, ["analysis-4", "comment-123"])], evidence_repository.calls
+recorded = review_repository.records[0]
+assert recorded["output"]["command"] == "weibo-daily-report", recorded
+assert recorded["output"]["evidence_ids"] == ["analysis-4", "comment-123"], recorded
+
+backtest_source = SourceRepository(
+    step_name="action_backtest",
+    command="weibo-action-backtest",
+    evidence_ids=["sentiment:4", "action:55"],
+)
+backtest_reviews = ReviewRepository()
+backtest_evidence = EvidenceRepository()
+backtest = JudgeReviewService(
+    run_repository=RunRepository(),
+    source_repository=backtest_source,
+    review_repository=backtest_reviews,
+    evidence_repository=backtest_evidence,
+).create_review(10, {
+    "projectId": 2,
+    "stepRunId": 64,
+    "maxAttempts": 3,
+})
+assert backtest["ok"] is True, backtest
+assert backtest["review"]["status"] == "passed", backtest
+assert backtest_evidence.calls == [(2, ["analysis-4", "action-55"])], backtest_evidence.calls
+assert backtest_reviews.records[0]["output"]["evidence_ids"] == ["analysis-4", "action-55"], backtest_reviews.records
 `);
 });
 

@@ -402,3 +402,78 @@ Review 结果：
 生命周期：
 
 - reviewer `019efb55-b9c5-7343-981c-02b5a206bf77` completed, integrated, closed.
+
+### 2026-06-25 Agent 2 Persistence/Judge First Slice
+
+日期：2026-06-25
+
+Agent：Persistence-Judge Worker `019efb68-465c-7e21-bd12-5ede980d9c86` + reviewer `019efb74-fdc6-7231-8978-0b1e97f6d95e`
+
+任务：推进 OpenSpec tasks 1.3、2.3、2.4 的 fake/local 第一阶段：Report/Backtest service 记录 step audit，并把 step output 交给 Judge review；Judge 拒绝 missing evidence、model-owned metrics、causal overclaim，并返回 required changes / evidence errors / redacted failed-output summary。
+
+改动文件：
+
+- `app/report_backtest_agent_service.py`
+- `app/judge_review_service.py`
+- `test/fastapi-sidecar.test.js`
+- `openspec/changes/haidao-report-backtest-agent-loop/tasks.md`
+- `docs/agent-loop/haidao-report-backtest-agent-loop-handoff.md`
+
+新增接口：
+
+- 无新增 HTTP endpoint；扩展 `ReportBacktestAgentService` 构造器，支持注入 `step_repository` 与 `judge_review_service`。
+
+复用接口：
+
+- `JudgeReviewService.create_review`
+- Rule Judge evidence / boundary checks
+- 既有 report/backtest public response sanitizer
+
+验证命令：
+
+- `PYTHON_BIN=.venv/bin/python node --test --test-name-pattern 'ReportBacktestAgentService records|ReportBacktestAgentService rejects unsafe' test/fastapi-sidecar.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test --test-name-pattern 'JudgeReviewService maps report/backtest persisted step evidence into Rule Judge input' test/fastapi-sidecar.test.js`
+- `PYTHON_BIN=.venv/bin/python node --test --test-name-pattern 'ReportBacktestAgentService|daily report|action backtest|Judge' test/fastapi-sidecar.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test -- test/fastapi-sidecar.test.js`
+- `PYTHON_BIN=.venv/bin/python npm test`（脱沙箱，因沙箱内监听 127.0.0.1 会 EPERM）
+- `openspec validate haidao-report-backtest-agent-loop --strict`
+- `git diff --check`
+- `python3 -m compileall app/report_backtest_agent_service.py app/judge_review_service.py`
+- `npm run agent:guard`
+
+验证结果：
+
+- 新增红测初次失败于 `ReportBacktestAgentService.__init__()` 不支持 `step_repository`，随后实现后通过。
+- 主控补充 persisted-step 红测初次失败于 `sentiment:4` 被映射为 Judge 不支持的 `sentiment-4`，随后修为 `analysis-4` 后通过。
+- 新增定向 tests：2/2 pass。
+- persisted-step evidence mapper：1/1 pass。
+- report/backtest/Judge pattern：23/23 pass。
+- FastAPI sidecar 文件：46/46 pass。
+- 全量 no-DB：251 tests, 199 pass / 52 skipped / 0 fail。
+- OpenSpec strict validate：pass。
+- diff check：pass。
+- compileall：pass。
+- guard：pass。
+
+Review 结果：
+
+- reviewer `019efb74-fdc6-7231-8978-0b1e97f6d95e` 初审发现 P2：persisted step 的 Judge mapper 把 `sentiment:4` 转成 unsupported `sentiment-4`，而直接 service path 已正确转 `analysis-4`。
+- 主控补测试并修复 `normalize_report_backtest_evidence_ids()`。
+- reviewer re-review APPROVED：无 P0/P1/P2；确认 fake/local service-Judge-step audit 可通过，真实 MySQL persistence、真实 Judge persistence、全链路 no-causal-overclaim 仍留后续。
+
+遗留问题：
+
+- 2.3/2.4 仍未勾：本轮只证明 fake/local repository 与 service/Judge contract，未执行真实 MySQL `agent_step_runs` / `judge_reviews` 持久化验证。
+- 4.x 真实 MySQL persistence、5.x no-causal-overclaim 全链路 Q&A/report 行为仍留给后续 worker。
+- 默认 `MYSQL_URL` 未配置时 service 不自动写 MySQL step repository；测试通过注入 fake repository 证明本轮 contract。
+
+下一位 agent 注意事项：
+
+- 真实 MySQL worker 需要验证 `MySQLAgentStepRepository` 写入/更新与 loop 状态联动，尤其是 Judge failed / needs_human / retry-exhausted 时的 step status。
+- 如果继续扩展 Judge stepRunId 直读路径，可为 `daily_report` / `action_backtest` mapper 增加独立 red tests。
+- 继续不要读取 `.env`、Cookie、token、真实平台登录态，不要碰 PRD 既有脏 diff 或 `.playwright-cli/`。
+
+生命周期：
+
+- worker `019efb68-465c-7e21-bd12-5ede980d9c86` completed with concerns; 主控已集成并补 P2 修复。
+- reviewer `019efb74-fdc6-7231-8978-0b1e97f6d95e` completed, approved, closed.
